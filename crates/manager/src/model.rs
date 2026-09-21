@@ -1,0 +1,116 @@
+use crate::tree::Row;
+use zeroize::Zeroizing;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalRequest {
+    pub id: String,
+    pub target: String,
+    pub create: Vec<String>,
+    pub replace: Vec<String>,
+    pub recipient_keys: Vec<String>,
+    pub host_key: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum Mode {
+    Browse,
+    Edit {
+        path: String,
+        value: Zeroizing<Vec<u8>>,
+    },
+    Replace {
+        path: String,
+        value: Zeroizing<Vec<u8>>,
+    },
+    Approval(ApprovalRequest),
+    ProviderFailure {
+        message: String,
+        path: String,
+        value: Zeroizing<Vec<u8>>,
+    },
+}
+
+pub struct Model {
+    pub rows: Vec<Row>,
+    pub selected: usize,
+    pub mode: Mode,
+    pub message: Option<String>,
+}
+
+impl Model {
+    pub fn new(rows: Vec<Row>) -> Self {
+        Self {
+            rows,
+            selected: 0,
+            mode: Mode::Browse,
+            message: None,
+        }
+    }
+
+    pub fn selected(&self) -> Option<&Row> {
+        self.rows.get(self.selected)
+    }
+
+    pub fn move_by(&mut self, amount: isize) {
+        if self.rows.is_empty() {
+            return;
+        }
+        self.selected = self
+            .selected
+            .saturating_add_signed(amount)
+            .min(self.rows.len() - 1);
+    }
+
+    pub fn begin_value(&mut self, value: Vec<u8>) {
+        let Some(row) = self.selected().filter(|row| row.is_secret()) else {
+            return;
+        };
+        let path = row.path.clone().expect("secret row has path");
+        let value = Zeroizing::new(value);
+        self.mode = if row.is_set {
+            Mode::Replace { path, value }
+        } else {
+            Mode::Edit { path, value }
+        };
+    }
+
+    pub fn mark_saved(&mut self, path: &str) {
+        if let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.path.as_deref() == Some(path))
+        {
+            row.is_set = true;
+        }
+        self.mode = Mode::Browse;
+        self.message = Some(format!("saved {path}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(set: bool) -> Row {
+        Row {
+            depth: 0,
+            name: "key".into(),
+            path: Some("h.services.s.key".into()),
+            is_set: set,
+        }
+    }
+
+    #[test]
+    fn replacing_a_set_leaf_requires_confirmation() {
+        let mut model = Model::new(vec![leaf(true)]);
+        model.begin_value(b"new".to_vec());
+        assert!(matches!(model.mode, Mode::Replace { .. }));
+    }
+
+    #[test]
+    fn unset_leaf_enters_editor_directly() {
+        let mut model = Model::new(vec![leaf(false)]);
+        model.begin_value(Vec::new());
+        assert!(matches!(model.mode, Mode::Edit { .. }));
+    }
+}

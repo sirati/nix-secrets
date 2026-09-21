@@ -1,0 +1,22 @@
+[package]
+name = "nix-secrets-crypto"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[features]
+real-age-tests = []
+
+[dependencies]
+base64 = "0.22.1"
+getrandom = "0.4.2"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+zeroize = "1.8.2"
+
+[dev-dependencies]
+serde_json = "1.0.149"
+
+[[test]]
+name = "real_age_identity"
+required-features = ["real-age-tests"]

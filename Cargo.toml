@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "crates/backend",
+  "crates/core",
+  "crates/crypto",
+  "crates/deploy",
+  "crates/manager",
+  "crates/secrets-ready-waiter",
+  "crates/transport",
+]
+resolver = "2"
