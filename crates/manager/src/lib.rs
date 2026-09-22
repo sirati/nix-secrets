@@ -8,6 +8,7 @@ pub mod deployment;
 pub mod model;
 pub mod socket;
 pub mod startup;
+mod task;
 pub mod tree;
 pub mod ui;
 #[cfg(test)]

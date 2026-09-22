@@ -1,6 +1,6 @@
 use nix_secrets_transport::{
     Decision, DeployEntry, DeploymentResult, ExpectedTarget, HostIdentity, HostKeyPreflight,
-    HostKeyStatus, HostKeyVerifier, OpenSsh, PreparedDeployment,
+    HostKeyStatus, HostKeyVerifier, OpenSsh, PreparedDeployment, TaskEntry,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -66,9 +66,13 @@ pub fn prepare(
     PreparedDeployment::open(session, expected).map_err(|error| error.to_string())
 }
 
-pub fn deploy(prepared: PreparedDeployment, entries: Vec<DeployEntry>) -> Result<(), String> {
+pub fn deploy(
+    prepared: PreparedDeployment,
+    entries: Vec<DeployEntry>,
+    tasks: Vec<TaskEntry>,
+) -> Result<(), String> {
     match prepared
-        .deploy(entries)
+        .deploy_with_tasks(entries, tasks)
         .map_err(|error| error.to_string())?
     {
         DeploymentResult::Applied { .. } => {}

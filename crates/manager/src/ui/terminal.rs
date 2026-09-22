@@ -99,10 +99,11 @@ fn prompt(model: &Model) -> String {
                 )
             } else {
                 format!(
-                    "{failure} Deploy to {}? create [{}], replace [{}], keys [{}] · y/n",
+                    "{failure} Deploy to {}? create [{}], replace [{}], tasks [{}], keys [{}] · y/n",
                     request.target,
                     request.create.join(", "),
                     request.replace.join(", "),
+                    request.tasks.iter().map(task_status).collect::<Vec<_>>().join(", "),
                     request.recipient_keys.join(", ")
                 )
             }
@@ -120,8 +121,33 @@ fn item(row: &Row) -> ListItem<'static> {
     } else {
         ("unset", Color::Red)
     };
+    let label = if row.is_task() {
+        format!(
+            "task · input {status} · output {}",
+            row.output_is_set.map(set_status).unwrap_or("unknown")
+        )
+    } else {
+        status.into()
+    };
     ListItem::new(Line::from(vec![
         Span::raw(format!("{indent}{}  ", row.name)),
-        Span::styled(status, Style::default().fg(color)),
+        Span::styled(label, Style::default().fg(color)),
     ]))
+}
+
+fn set_status(set: bool) -> &'static str {
+    if set {
+        "set"
+    } else {
+        "unset"
+    }
+}
+
+fn task_status(task: &crate::model::TaskApproval) -> String {
+    format!(
+        "{} (input {}, output {})",
+        task.identifier,
+        set_status(task.input_is_set),
+        task.output_is_set.map(set_status).unwrap_or("unknown")
+    )
 }

@@ -1,4 +1,4 @@
-use crate::model::{ApprovalRequest, Mode, Model};
+use crate::model::{ApprovalRequest, Mode, Model, TaskApproval};
 use crate::tree::Row;
 use crate::ui::{drive, reduce, Action, Frontend, SecretWriter, UiEvent};
 use std::collections::VecDeque;
@@ -11,6 +11,7 @@ struct Writer {
     approval: Option<bool>,
     requests: Vec<String>,
     poll_error: bool,
+    approval_error: bool,
 }
 impl SecretWriter for Writer {
     fn write(
@@ -25,6 +26,9 @@ impl SecretWriter for Writer {
         Ok(Action::Saved(path.into()))
     }
     fn approval(&mut self, accepted: bool) -> Result<Option<ApprovalRequest>, String> {
+        if self.approval_error {
+            return Err("identity provider is locked".into());
+        }
         self.approval = Some(accepted);
         Ok(None)
     }
@@ -61,6 +65,8 @@ fn model(set: bool) -> Model {
         name: "key".into(),
         path: Some("h.services.s.key".into()),
         is_set: set,
+        is_task: false,
+        output_is_set: None,
     }])
 }
 
@@ -114,6 +120,7 @@ fn approval_is_explicit_and_testable() {
         replace: vec![],
         recipient_keys: vec!["operator".into()],
         host_key: None,
+        tasks: vec![],
     };
     reduce(&mut model, UiEvent::Approval(request), &mut writer);
     assert_eq!(
@@ -121,6 +128,45 @@ fn approval_is_explicit_and_testable() {
         Action::Rejected
     );
     assert_eq!(writer.approval, Some(false));
+}
+
+#[test]
+fn task_approval_exposes_input_and_target_output_status() {
+    let mut model = Model::new(vec![Row {
+        depth: 0,
+        name: "bootstrap".into(),
+        path: Some("h.services.backup.bootstrap".into()),
+        is_set: false,
+        is_task: true,
+        output_is_set: None,
+    }]);
+    let mut writer = writer();
+    let request = ApprovalRequest {
+        id: "request".into(),
+        target: "h".into(),
+        create: vec![],
+        replace: vec![],
+        recipient_keys: vec!["operator".into()],
+        host_key: None,
+        tasks: vec![TaskApproval {
+            identifier: "h.services.backup.bootstrap".into(),
+            input_is_set: true,
+            output_is_set: Some(false),
+        }],
+    };
+    assert_eq!(
+        reduce(&mut model, UiEvent::Approval(request), &mut writer),
+        Action::Continue
+    );
+    assert!(matches!(model.mode, Mode::Approval(_)));
+    assert!(model.rows[0].is_set);
+    assert_eq!(model.rows[0].output_is_set, Some(false));
+    assert!(writer.approval.is_none());
+    assert_eq!(
+        reduce(&mut model, UiEvent::Character('y'), &mut writer),
+        Action::Approved
+    );
+    assert_eq!(writer.approval, Some(true));
 }
 
 #[test]
@@ -141,6 +187,7 @@ fn writer() -> Writer {
         approval: None,
         requests: vec![],
         poll_error: false,
+        approval_error: false,
     }
 }
 
@@ -160,10 +207,42 @@ fn lost_lease_drops_the_modal_and_reports_expiry() {
         replace: vec!["h.services.s.key".into()],
         recipient_keys: vec![],
         host_key: None,
+        tasks: vec![],
     });
     drive(&mut frontend, &mut writer, &mut model).unwrap();
     assert!(matches!(model.mode, Mode::Browse));
     assert_eq!(model.message.as_deref(), Some("approval lease was lost"));
+}
+
+#[test]
+fn task_provider_failure_keeps_approval_for_retry() {
+    let mut model = model(true);
+    let mut writer = writer();
+    let request = ApprovalRequest {
+        id: "id".into(),
+        target: "h".into(),
+        create: vec![],
+        replace: vec![],
+        recipient_keys: vec!["operator".into()],
+        host_key: None,
+        tasks: vec![TaskApproval {
+            identifier: "h.services.backup.bootstrap".into(),
+            input_is_set: true,
+            output_is_set: Some(false),
+        }],
+    };
+    model.mode = Mode::Approval(request);
+    writer.approval_error = true;
+    assert_eq!(
+        reduce(&mut model, UiEvent::Character('y'), &mut writer),
+        Action::Continue
+    );
+    assert!(matches!(model.mode, Mode::Approval(_)));
+    writer.approval_error = false;
+    assert_eq!(
+        reduce(&mut model, UiEvent::Character('y'), &mut writer),
+        Action::Approved
+    );
 }
 
 #[test]

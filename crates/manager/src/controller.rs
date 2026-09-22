@@ -4,11 +4,12 @@ use crate::model::ApprovalRequest as UiApproval;
 use crate::tree::Row;
 use crate::ui::{Action, SecretWriter};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use nix_secrets_core::{ApprovalRequest, Schema, SecretPath};
+use nix_secrets_core::{ApprovalRequest, LeafSpec, Schema, SecretPath};
 use nix_secrets_crypto::{decrypt_secret, AgeCommandProvider, EncryptedSecret, Recipient};
 use nix_secrets_transport::{
-    DeployEntry, Destination, ExpectedSecret, ExpectedTarget, HostIdentity, HostKeyStatus,
-    PreparedDeployment, TargetState,
+    DeployEntry, Destination, ExpectedSecret, ExpectedTarget, ExpectedTask, HostIdentity,
+    HostKeyStatus, PreparedDeployment, StorageBoxBootstrap, TargetState, TaskEntry,
+    STORAGE_BOX_SSH_KEY,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -60,9 +61,11 @@ impl Controller {
         &self,
         request: &ApprovalRequest,
         state: Option<&TargetState>,
+        set: &BTreeSet<String>,
     ) -> Result<UiApproval, String> {
         let mut create = Vec::new();
         let mut replace = Vec::new();
+        let mut tasks = Vec::new();
         let mut keys = BTreeSet::new();
         for identifier in &request.secrets {
             let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
@@ -72,16 +75,28 @@ impl Controller {
                     request.target
                 ));
             }
-            let spec = self
-                .schema
-                .secret(&path)
-                .map_err(|error| error.to_string())?;
-            keys.extend(spec.recipient_ids);
-            if let Some(state) = state {
-                if target_has_version(state, identifier)? {
-                    replace.push(identifier.clone());
-                } else {
-                    create.push(identifier.clone());
+            let spec = self.schema.leaf(&path).map_err(|error| error.to_string())?;
+            match spec {
+                LeafSpec::Stored(spec) => {
+                    keys.extend(spec.recipient_ids);
+                    if let Some(state) = state {
+                        if target_has_version(state, identifier)? {
+                            replace.push(identifier.clone());
+                        } else {
+                            create.push(identifier.clone());
+                        }
+                    }
+                }
+                LeafSpec::Generated(spec) => {
+                    keys.extend(spec.recipient_ids);
+                    let output_is_set = state
+                        .map(|state| target_task_has_version(state, identifier))
+                        .transpose()?;
+                    tasks.push(crate::model::TaskApproval {
+                        identifier: identifier.clone(),
+                        input_is_set: set.contains(identifier),
+                        output_is_set,
+                    });
                 }
             }
         }
@@ -92,6 +107,7 @@ impl Controller {
             replace,
             recipient_keys: keys.into_iter().collect(),
             host_key: None,
+            tasks,
         })
     }
 
@@ -108,27 +124,39 @@ impl Controller {
         let active = self.active.as_ref().expect("active approval exists");
         let entries = self.client.list().map_err(|error| error.to_string())?;
         let identifiers = active.request.secrets.clone();
-        let deploy_entries = identifiers
-            .iter()
-            .map(|identifier| {
-                let stored = entries
-                    .get(identifier)
-                    .ok_or_else(|| format!("required secret is unset: {identifier}"))?;
-                let record = EncryptedSecret {
-                    format_version: stored.format_version,
-                    version_id: stored.version_id.clone(),
-                    recipient_ids: stored.recipient_ids.clone(),
-                    age_ciphertext: stored.age_ciphertext.clone(),
-                };
-                let value = decrypt_secret(identifier, &record, &self.provider)
-                    .map_err(|error| error.to_string())?;
-                Ok(DeployEntry {
+        let mut deploy_entries = Vec::new();
+        let mut task_entries = Vec::new();
+        for identifier in &identifiers {
+            let stored = entries
+                .get(identifier)
+                .ok_or_else(|| format!("required secret is unset: {identifier}"))?;
+            let record = EncryptedSecret {
+                format_version: stored.format_version,
+                version_id: stored.version_id.clone(),
+                recipient_ids: stored.recipient_ids.clone(),
+                age_ciphertext: stored.age_ciphertext.clone(),
+            };
+            let value = decrypt_secret(identifier, &record, &self.provider)
+                .map_err(|error| error.to_string())?;
+            let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
+            match self.schema.leaf(&path).map_err(|error| error.to_string())? {
+                LeafSpec::Stored(_) => deploy_entries.push(DeployEntry {
                     identifier: identifier.clone(),
                     version_id: STANDARD.encode(&stored.version_id),
                     contents_base64: STANDARD.encode(&value),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+                }),
+                LeafSpec::Generated(_) => {
+                    let contribution = crate::task::fresh_contribution()
+                        .map_err(|error| format!("OS randomness failed: {error}"))?;
+                    task_entries.push(TaskEntry {
+                        identifier: identifier.clone(),
+                        version_id: STANDARD.encode(&stored.version_id),
+                        password_base64: STANDARD.encode(&value),
+                        client_contribution_base64: STANDARD.encode(&contribution[..]),
+                    });
+                }
+            }
+        }
         let prepared = self
             .active
             .as_mut()
@@ -136,7 +164,7 @@ impl Controller {
             .prepared
             .take()
             .expect("prepared above");
-        deployment::deploy(prepared, deploy_entries)?;
+        deployment::deploy(prepared, deploy_entries, task_entries)?;
         let active = self.active.take().expect("approval remains active");
         self.client
             .resolve(active.request.id, active.lease_id, true)
@@ -157,30 +185,46 @@ impl Controller {
 mod writer;
 
 fn expected_target(schema: &Schema, request: &ApprovalRequest) -> Result<ExpectedTarget, String> {
-    let secrets = request
-        .secrets
-        .iter()
-        .map(|identifier| {
-            let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
-            let spec = schema.secret(&path).map_err(|error| error.to_string())?;
-            Ok(ExpectedSecret {
+    let mut secrets = Vec::new();
+    let mut tasks = Vec::new();
+    for identifier in &request.secrets {
+        let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
+        match schema.leaf(&path).map_err(|error| error.to_string())? {
+            LeafSpec::Stored(spec) => secrets.push(ExpectedSecret {
                 identifier: identifier.clone(),
                 recipient_ids: spec.recipient_ids,
-                destination: Destination {
-                    path: spec.destination.path,
-                    category: spec.destination.category,
-                    owner: spec.destination.owner,
-                    group: spec.destination.group,
-                    mode: spec.destination.mode,
-                    consumer_units: spec.consumer_units,
+                destination: destination(spec.destination, spec.consumer_units),
+            }),
+            LeafSpec::Generated(spec) => tasks.push(ExpectedTask {
+                identifier: identifier.clone(),
+                task_type: STORAGE_BOX_SSH_KEY.into(),
+                recipient_ids: spec.recipient_ids,
+                output: destination(spec.generated_secret.output, spec.consumer_units),
+                bootstrap: StorageBoxBootstrap {
+                    host: spec.generated_secret.bootstrap.host,
+                    port: spec.generated_secret.bootstrap.port,
+                    user: spec.generated_secret.bootstrap.user,
+                    host_public_keys: spec.generated_secret.bootstrap.host_public_keys,
                 },
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+            }),
+        }
+    }
     Ok(ExpectedTarget {
         hostname: request.target.clone(),
         secrets,
+        tasks,
     })
+}
+
+fn destination(value: nix_secrets_core::Destination, consumer_units: Vec<String>) -> Destination {
+    Destination {
+        path: value.path,
+        category: value.category,
+        owner: value.owner,
+        group: value.group,
+        mode: value.mode,
+        consumer_units,
+    }
 }
 
 fn target_has_version(state: &TargetState, identifier: &str) -> Result<bool, String> {
@@ -190,6 +234,15 @@ fn target_has_version(state: &TargetState, identifier: &str) -> Result<bool, Str
         .find(|secret| secret.identifier == identifier)
         .map(|secret| secret.current_version_id.is_some())
         .ok_or_else(|| format!("target omitted {identifier}"))
+}
+
+fn target_task_has_version(state: &TargetState, identifier: &str) -> Result<bool, String> {
+    state
+        .tasks
+        .iter()
+        .find(|task| task.identifier == identifier)
+        .map(|task| task.current_version_id.is_some())
+        .ok_or_else(|| format!("target omitted task {identifier}"))
 }
 
 #[cfg(test)]
@@ -220,6 +273,7 @@ mod tests {
                 secret("host.services.s.new", None),
                 secret("host.services.s.old", Some("version")),
             ],
+            tasks: vec![],
         };
         assert!(!target_has_version(&state, "host.services.s.new").unwrap());
         assert!(target_has_version(&state, "host.services.s.old").unwrap());

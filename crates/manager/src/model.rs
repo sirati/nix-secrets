@@ -9,6 +9,14 @@ pub struct ApprovalRequest {
     pub replace: Vec<String>,
     pub recipient_keys: Vec<String>,
     pub host_key: Option<String>,
+    pub tasks: Vec<TaskApproval>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskApproval {
+    pub identifier: String,
+    pub input_is_set: bool,
+    pub output_is_set: Option<bool>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -85,6 +93,19 @@ impl Model {
         self.mode = Mode::Browse;
         self.message = Some(format!("saved {path}"));
     }
+
+    pub fn apply_task_status(&mut self, request: &ApprovalRequest) {
+        for task in &request.tasks {
+            if let Some(row) = self
+                .rows
+                .iter_mut()
+                .find(|row| row.path.as_deref() == Some(&task.identifier))
+            {
+                row.is_set = task.input_is_set;
+                row.output_is_set = task.output_is_set;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -97,6 +118,8 @@ mod tests {
             name: "key".into(),
             path: Some("h.services.s.key".into()),
             is_set: set,
+            is_task: false,
+            output_is_set: None,
         }
     }
 

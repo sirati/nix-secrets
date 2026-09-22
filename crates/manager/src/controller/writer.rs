@@ -10,14 +10,17 @@ impl SecretWriter for Controller {
             Ok(parsed) => parsed,
             Err(error) => return Err((error.to_string(), value)),
         };
-        let spec = match self.schema.secret(&parsed) {
+        let spec = match self.schema.leaf(&parsed) {
             Ok(spec) => spec,
             Err(error) => return Err((error.to_string(), value)),
         };
-        let recipients = spec
-            .recipient_ids
+        let (recipient_ids, recipient_public_keys) = match &spec {
+            LeafSpec::Stored(spec) => (&spec.recipient_ids, &spec.recipient_public_keys),
+            LeafSpec::Generated(spec) => (&spec.recipient_ids, &spec.recipient_public_keys),
+        };
+        let recipients = recipient_ids
             .iter()
-            .zip(&spec.recipient_public_keys)
+            .zip(recipient_public_keys)
             .map(|(id, key)| Recipient {
                 id,
                 ssh_public_key: key,
@@ -56,7 +59,13 @@ impl SecretWriter for Controller {
         else {
             return Ok(None);
         };
-        let mut details = match self.approval_details(&request, None) {
+        let set = self
+            .client
+            .list()
+            .map_err(|error| error.to_string())?
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        let mut details = match self.approval_details(&request, None, &set) {
             Ok(details) => details,
             Err(error) => {
                 self.client
@@ -122,6 +131,7 @@ impl SecretWriter for Controller {
             details = self.approval_details(
                 &active.request,
                 active.prepared.as_ref().map(PreparedDeployment::state),
+                &set,
             )?;
         }
         Ok(Some(details))
@@ -144,7 +154,15 @@ impl SecretWriter for Controller {
                     .as_ref()
                     .map(PreparedDeployment::state)
                     .cloned();
-                return self.approval_details(&request, state.as_ref()).map(Some);
+                let set = self
+                    .client
+                    .list()
+                    .map_err(|error| error.to_string())?
+                    .into_keys()
+                    .collect::<BTreeSet<_>>();
+                return self
+                    .approval_details(&request, state.as_ref(), &set)
+                    .map(Some);
             }
             let (id, lease_id) = self
                 .active

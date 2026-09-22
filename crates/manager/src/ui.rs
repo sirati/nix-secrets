@@ -68,7 +68,10 @@ pub fn drive(
         let event = frontend.read()?;
         if event == UiEvent::Tick {
             match writer.poll_approval() {
-                Ok(Some(request)) => model.mode = Mode::Approval(request),
+                Ok(Some(request)) => {
+                    model.apply_task_status(&request);
+                    model.mode = Mode::Approval(request);
+                }
                 Ok(None) => {}
                 Err(message) => {
                     model.mode = Mode::Browse;
@@ -85,6 +88,7 @@ pub fn drive(
 
 pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter) -> Action {
     if let UiEvent::Approval(request) = event {
+        model.apply_task_status(&request);
         model.mode = Mode::Approval(request);
         return Action::Continue;
     }
@@ -107,6 +111,7 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
                         Err(error) => error,
                     });
                 }
+                Some(row) if row.is_task() => model.message = Some("task input is unset".into()),
                 Some(row) if row.is_secret() => model.message = Some("secret is unset".into()),
                 _ => model.message = Some("select a set secret to deploy".into()),
             }
