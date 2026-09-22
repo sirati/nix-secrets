@@ -88,6 +88,9 @@ impl Clock for FixedClock {
     }
 }
 
+type TestEngine = Engine<Backend, PartialSink, Generator, FixedClock>;
+type TestEngineParts = (TestEngine, Rc<RefCell<State>>, Rc<RefCell<usize>>);
+
 fn task() -> StorageBoxTask {
     let host_key = OsKeyGenerator.generate().unwrap().public_key;
     StorageBoxTask {
@@ -107,13 +110,7 @@ fn task() -> StorageBoxTask {
     }
 }
 
-fn engine(
-    fail_write: bool,
-) -> (
-    Engine<Backend, PartialSink, Generator, FixedClock>,
-    Rc<RefCell<State>>,
-    Rc<RefCell<usize>>,
-) {
+fn engine(fail_write: bool) -> TestEngineParts {
     let state = Rc::new(RefCell::new(State::default()));
     let calls = Rc::new(RefCell::new(0));
     let entropy = Rc::new(RefCell::new(Vec::new()));

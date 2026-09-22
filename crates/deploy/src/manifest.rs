@@ -27,6 +27,12 @@ struct ManifestEntry {
     destination: Destination,
 }
 
+#[derive(Default)]
+struct TargetLeaves {
+    secrets: Vec<TargetSecret>,
+    tasks: Vec<TargetTask>,
+}
+
 pub fn system_hostname() -> Result<String, DeployError> {
     let value = fs::read_to_string("/proc/sys/kernel/hostname")?;
     let hostname = value.trim().to_owned();
@@ -61,8 +67,7 @@ pub fn load_target_state(
         .0
         .get(hostname)
         .ok_or_else(|| DeployError::Invalid(format!("manifest has no host {hostname}")))?;
-    let mut secrets = Vec::new();
-    let mut tasks = Vec::new();
+    let mut leaves = TargetLeaves::default();
     for (namespace, services) in &host.service_groups {
         for (service, node) in services {
             flatten_target(
@@ -72,18 +77,21 @@ pub fn load_target_state(
                 &mut Vec::new(),
                 node,
                 versions,
-                &mut secrets,
-                &mut tasks,
+                &mut leaves,
             );
         }
     }
-    secrets.sort_unstable_by(|a, b| a.identifier.cmp(&b.identifier));
-    tasks.sort_unstable_by(|a, b| a.identifier.cmp(&b.identifier));
+    leaves
+        .secrets
+        .sort_unstable_by(|a, b| a.identifier.cmp(&b.identifier));
+    leaves
+        .tasks
+        .sort_unstable_by(|a, b| a.identifier.cmp(&b.identifier));
     Ok(TargetState {
         protocol_version: 1,
         hostname: hostname.into(),
-        secrets,
-        tasks,
+        secrets: leaves.secrets,
+        tasks: leaves.tasks,
     })
 }
 
@@ -111,22 +119,21 @@ fn flatten_target(
     parents: &mut Vec<String>,
     node: &SecretNode,
     versions: &BTreeMap<String, String>,
-    output: &mut Vec<TargetSecret>,
-    tasks: &mut Vec<TargetTask>,
+    output: &mut TargetLeaves,
 ) {
     match node {
         SecretNode::Branch(children) => {
             for (name, child) in children {
                 parents.push(name.clone());
                 flatten_target(
-                    hostname, namespace, service, parents, child, versions, output, tasks,
+                    hostname, namespace, service, parents, child, versions, output,
                 );
                 parents.pop();
             }
         }
         SecretNode::Secret(leaf) => {
             let identifier = identifier(hostname, namespace, service, parents);
-            output.push(TargetSecret {
+            output.secrets.push(TargetSecret {
                 identifier: identifier.clone(),
                 recipient_ids: leaf.recipient_ids.clone(),
                 destination: WireDestination {
@@ -143,7 +150,7 @@ fn flatten_target(
         SecretNode::Generated(leaf) => {
             let identifier = identifier(hostname, namespace, service, parents);
             let generated = &leaf.generated_secret;
-            tasks.push(TargetTask {
+            output.tasks.push(TargetTask {
                 identifier: identifier.clone(),
                 task_type: STORAGE_BOX_SSH_KEY.into(),
                 recipient_ids: leaf.recipient_ids.clone(),
