@@ -4,6 +4,7 @@ use russh::keys::{PublicKey, PublicKeyOrCertificate};
 use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, Packet, StatusCode};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::runtime::Runtime;
 use zeroize::Zeroizing;
 
@@ -135,20 +136,14 @@ impl RemoteSession for RusshSession {
         );
         self.runtime.block_on(async {
             ensure_ssh_directory(&self.sftp).await?;
-            self.sftp
-                .write(&temporary, contents)
-                .await
-                .map_err(|error| ssh_error("write authorized_keys staging file", error))?;
-            self.sftp
-                .set_metadata(
-                    &temporary,
-                    FileAttributes {
-                        permissions: Some(0o600),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| ssh_error("set authorized_keys staging permissions", error))?;
+            if let Err(error) = write_staging_file(&self.sftp, &temporary, contents).await {
+                if let Err(cleanup) = self.sftp.remove_file(&temporary).await {
+                    return Err(Error::Ssh(format!(
+                        "{error}; staging cleanup failed: {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
             let payload = rename_payload(&temporary, ".ssh/authorized_keys")?;
             let result = self
                 .raw_sftp
@@ -171,6 +166,35 @@ impl RemoteSession for RusshSession {
             Ok(())
         })
     }
+}
+
+async fn write_staging_file(
+    sftp: &SftpSession,
+    path: &str,
+    contents: &[u8],
+) -> Result<(), Error> {
+    let mut file = sftp
+        .create(path)
+        .await
+        .map_err(|error| ssh_error("create authorized_keys staging file", error))?;
+    file.set_metadata(FileAttributes {
+        permissions: Some(0o600),
+        ..Default::default()
+    })
+    .await
+    .map_err(|error| ssh_error("set authorized_keys staging permissions", error))?;
+    file.write_all(contents)
+        .await
+        .map_err(|error| ssh_error("write authorized_keys staging file", error))?;
+    file.flush()
+        .await
+        .map_err(|error| ssh_error("flush authorized_keys staging file", error))?;
+    file.sync_all()
+        .await
+        .map_err(|error| ssh_error("sync authorized_keys staging file", error))?;
+    file.close()
+        .await
+        .map_err(|error| ssh_error("close authorized_keys staging file", error))
 }
 
 async fn ensure_ssh_directory(sftp: &SftpSession) -> Result<(), Error> {
