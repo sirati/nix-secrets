@@ -18,7 +18,6 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import base64
-    import hashlib
     import json
     import os
     import textwrap
