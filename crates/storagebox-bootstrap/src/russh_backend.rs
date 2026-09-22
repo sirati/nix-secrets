@@ -2,7 +2,7 @@ use crate::{Error, RemoteSession, SshBackend, StorageBoxTask};
 use russh::client;
 use russh::keys::{PublicKey, PublicKeyOrCertificate};
 use russh_sftp::client::{RawSftpSession, SftpSession};
-use russh_sftp::protocol::{Packet, StatusCode};
+use russh_sftp::protocol::{FileAttributes, Packet, StatusCode};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use zeroize::Zeroizing;
@@ -139,13 +139,14 @@ impl RemoteSession for RusshSession {
                 .write(&temporary, contents)
                 .await
                 .map_err(|error| ssh_error("write authorized_keys staging file", error))?;
-            let mut metadata = self.sftp
-                .metadata(&temporary)
-                .await
-                .map_err(|error| ssh_error("stat authorized_keys staging file", error))?;
-            metadata.permissions = Some(0o600);
             self.sftp
-                .set_metadata(&temporary, metadata)
+                .set_metadata(
+                    &temporary,
+                    FileAttributes {
+                        permissions: Some(0o600),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .map_err(|error| ssh_error("set authorized_keys staging permissions", error))?;
             let payload = rename_payload(&temporary, ".ssh/authorized_keys")?;
@@ -190,13 +191,14 @@ async fn ensure_ssh_directory(sftp: &SftpSession) -> Result<(), Error> {
             .await
             .map_err(|error| ssh_error("create .ssh", error))?;
     }
-    let mut metadata = sftp
-        .metadata(".ssh")
-        .await
-        .map_err(|error| ssh_error("stat .ssh", error))?;
-    metadata.permissions = Some(0o700);
     sftp
-        .set_metadata(".ssh", metadata)
+        .set_metadata(
+            ".ssh",
+            FileAttributes {
+                permissions: Some(0o700),
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|error| ssh_error("set .ssh permissions", error))
 }
