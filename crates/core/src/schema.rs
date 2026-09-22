@@ -3,6 +3,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use thiserror::Error;
 
+mod validation;
+use validation::{validate_component, validate_namespace, validate_tree};
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct Schema(pub BTreeMap<String, HostSchema>);
@@ -33,13 +36,60 @@ pub struct HostSchema {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SecretNode {
+    Generated(GeneratedSecretLeaf),
     Secret(SecretLeaf),
     Branch(BTreeMap<String, SecretNode>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct GeneratedSecretLeaf {
+    pub kind: GeneratedKind,
+    #[serde(rename = "recipientPublicKeys")]
+    pub recipient_public_keys: Vec<String>,
+    #[serde(rename = "recipientIds")]
+    pub recipient_ids: Vec<String>,
+    #[serde(rename = "generatedSecret")]
+    pub generated_secret: GeneratedSecret,
+    #[serde(rename = "consumerUnits")]
+    pub consumer_units: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum GeneratedKind {
+    #[serde(rename = "generated")]
+    Generated,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedSecret {
+    #[serde(rename = "type")]
+    pub secret_type: GeneratedSecretType,
+    pub output: Destination,
+    pub bootstrap: StorageBoxBootstrap,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum GeneratedSecretType {
+    #[serde(rename = "storage-box-ssh-key")]
+    StorageBoxSshKey,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageBoxBootstrap {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    #[serde(rename = "hostPublicKeys")]
+    pub host_public_keys: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecretLeaf {
+    pub kind: SecretKind,
     #[serde(rename = "recipientPublicKeys")]
     pub recipient_public_keys: Vec<String>,
     #[serde(rename = "recipientIds")]
@@ -47,6 +97,12 @@ pub struct SecretLeaf {
     pub destination: Destination,
     #[serde(rename = "consumerUnits")]
     pub consumer_units: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum SecretKind {
+    #[serde(rename = "secret")]
+    Secret,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,6 +128,21 @@ pub struct SecretSpec {
     pub consumer_units: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct GeneratedSecretSpec {
+    pub path: SecretPath,
+    pub recipient_public_keys: Vec<String>,
+    pub recipient_ids: Vec<String>,
+    pub generated_secret: GeneratedSecret,
+    pub consumer_units: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum LeafSpec {
+    Stored(SecretSpec),
+    Generated(GeneratedSecretSpec),
+}
+
 #[derive(Debug, Error)]
 pub enum SchemaError {
     #[error("secret path must have at least four components")]
@@ -84,6 +155,8 @@ pub enum SchemaError {
     NotFound(SecretPath),
     #[error("schema path is a branch: {0}")]
     IsBranch(SecretPath),
+    #[error("schema path has the wrong leaf kind: {0}")]
+    WrongKind(SecretPath),
     #[error("secret has no recipient public key: {0}")]
     MissingPublicKey(SecretPath),
     #[error("recipient key and identifier counts differ: {0}")]
@@ -165,6 +238,20 @@ impl Schema {
     }
 
     pub fn secret(&self, path: &SecretPath) -> Result<SecretSpec, SchemaError> {
+        match self.leaf(path)? {
+            LeafSpec::Stored(spec) => Ok(spec),
+            LeafSpec::Generated(_) => Err(SchemaError::WrongKind(path.clone())),
+        }
+    }
+
+    pub fn generated_secret(&self, path: &SecretPath) -> Result<GeneratedSecretSpec, SchemaError> {
+        match self.leaf(path)? {
+            LeafSpec::Generated(spec) => Ok(spec),
+            LeafSpec::Stored(_) => Err(SchemaError::WrongKind(path.clone())),
+        }
+    }
+
+    pub fn leaf(&self, path: &SecretPath) -> Result<LeafSpec, SchemaError> {
         let host = self.0.get(&path.0[0]).ok_or_else(|| missing(path))?;
         let services = host
             .service_groups
@@ -176,87 +263,26 @@ impl Schema {
                 SecretNode::Branch(children) => {
                     children.get(component).ok_or_else(|| missing(path))?
                 }
-                SecretNode::Secret(_) => return Err(missing(path)),
+                SecretNode::Secret(_) | SecretNode::Generated(_) => return Err(missing(path)),
             };
         }
         match node {
             SecretNode::Branch(_) => Err(SchemaError::IsBranch(path.clone())),
-            SecretNode::Secret(leaf) => Ok(SecretSpec {
+            SecretNode::Secret(leaf) => Ok(LeafSpec::Stored(SecretSpec {
                 path: path.clone(),
                 recipient_public_keys: leaf.recipient_public_keys.clone(),
                 recipient_ids: leaf.recipient_ids.clone(),
                 destination: leaf.destination.clone(),
                 consumer_units: leaf.consumer_units.clone(),
-            }),
+            })),
+            SecretNode::Generated(leaf) => Ok(LeafSpec::Generated(GeneratedSecretSpec {
+                path: path.clone(),
+                recipient_public_keys: leaf.recipient_public_keys.clone(),
+                recipient_ids: leaf.recipient_ids.clone(),
+                generated_secret: leaf.generated_secret.clone(),
+                consumer_units: leaf.consumer_units.clone(),
+            })),
         }
-    }
-}
-
-fn validate_tree(
-    host: &str,
-    namespace: &str,
-    service: &str,
-    parents: &[String],
-    node: &SecretNode,
-) -> Result<(), SchemaError> {
-    match node {
-        SecretNode::Branch(children) => {
-            for (name, child) in children {
-                validate_component(name)?;
-                let mut path = parents.to_vec();
-                path.push(name.clone());
-                validate_tree(host, namespace, service, &path, child)?;
-            }
-            Ok(())
-        }
-        SecretNode::Secret(leaf) => {
-            let mut components = vec![host.into(), namespace.into(), service.into()];
-            components.extend_from_slice(parents);
-            let path = SecretPath(components);
-            if leaf.recipient_public_keys.is_empty() {
-                return Err(SchemaError::MissingPublicKey(path));
-            }
-            if leaf.recipient_public_keys.len() != leaf.recipient_ids.len() {
-                return Err(SchemaError::RecipientCount(path));
-            }
-            let category = &leaf.destination.category;
-            if !matches!(category.as_str(), "setup" | "service" | "backup") {
-                return Err(SchemaError::InvalidDestination(
-                    path,
-                    "invalid category".into(),
-                ));
-            }
-            let prefix = format!("/persistent/secrets/{service}/{category}/");
-            if !leaf.destination.path.starts_with(&prefix) {
-                return Err(SchemaError::InvalidDestination(
-                    path,
-                    format!("path must start with {prefix}"),
-                ));
-            }
-            Ok(())
-        }
-    }
-}
-
-fn validate_component(component: &str) -> Result<(), SchemaError> {
-    let valid = !component.is_empty()
-        && component
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'));
-    if valid {
-        Ok(())
-    } else {
-        Err(SchemaError::InvalidComponent(component.into()))
-    }
-}
-
-fn validate_namespace(namespace: &str) -> Result<(), SchemaError> {
-    if namespace == "services"
-        || (namespace.starts_with("user-") && namespace.ends_with("-services"))
-    {
-        Ok(())
-    } else {
-        Err(SchemaError::InvalidNamespace(namespace.into()))
     }
 }
 

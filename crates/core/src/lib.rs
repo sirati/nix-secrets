@@ -10,5 +10,8 @@ pub mod store;
 pub use approval::{ApprovalBroker, BrokerError};
 pub use approval_types::{ApprovalRequest, ApprovalStatus, Claim, Decision};
 pub use backend::{Backend, Request, Response};
-pub use schema::{Destination, Schema, SchemaError, SchemaLoadError, SecretPath, SecretSpec};
+pub use schema::{
+    Destination, GeneratedSecret, GeneratedSecretSpec, GeneratedSecretType, LeafSpec, Schema,
+    SchemaError, SchemaLoadError, SecretKind, SecretPath, SecretSpec, StorageBoxBootstrap,
+};
 pub use store::{EncryptedSecret, SecretStore, StoreError};

@@ -27,12 +27,12 @@ fn manifest(temp: &tempfile::TempDir, mode: &str) -> std::path::PathBuf {
         "metadata": {"socketPath": "/persistent/secrets/backend.sock",
             "deployment": {"host": "testhost", "destination": "secrets@testhost", "port": 22}},
         "services": {"mail": {"password": {
-            "recipientPublicKeys": ["ssh-ed25519 test"], "recipientIds": ["key"],
+            "kind": "secret", "recipientPublicKeys": ["ssh-ed25519 test"], "recipientIds": ["key"],
             "consumerUnits": ["mail.service"],
             "destination": {"path": "/persistent/secrets/mail/service/password",
                 "category": "service", "owner": owner, "group": group, "mode": mode}
         }}, "git": {"token": {
-            "recipientPublicKeys": ["ssh-ed25519 test"], "recipientIds": ["key"],
+            "kind": "secret", "recipientPublicKeys": ["ssh-ed25519 test"], "recipientIds": ["key"],
             "consumerUnits": ["git.service"],
             "destination": {"path": "/persistent/secrets/git/service/token",
                 "category": "service", "owner": owner, "group": group, "mode": mode}

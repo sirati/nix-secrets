@@ -9,6 +9,7 @@ pub fn schema() -> Schema {
             "services": {
                 "mail": {
                     "password": {
+                        "kind": "secret",
                         "recipientPublicKeys": ["ssh-ed25519 test"],
                         "recipientIds": ["recipient-id"],
                         "destination": {

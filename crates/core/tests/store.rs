@@ -104,6 +104,7 @@ fn schema_with_many_secrets(count: usize) -> nix_secrets_core::Schema {
             (
                 format!("secret_{index}"),
                 serde_json::json!({
+                    "kind": "secret",
                     "recipientPublicKeys": ["ssh-ed25519 test"],
                     "recipientIds": ["recipient-id"],
                     "destination": {

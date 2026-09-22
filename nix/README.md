@@ -35,6 +35,34 @@ metadata only.
 }
 ```
 
+A generated Storage Box key leaf consumes an operator-encrypted bootstrap
+password and publishes only its locally generated private key at `output`:
+
+```nix
+services.nixSecrets.services.backup.secrets.storage-key.generatedSecret = {
+  type = "storage-box-ssh-key";
+  output = {
+    path = "/persistent/secrets/backup/backup/storage-key";
+    category = "backup";
+    owner = "backup";
+    group = "backup";
+    mode = "0400";
+  };
+  bootstrap = {
+    host = "u123.storagebox.example";
+    port = 23;
+    user = "u123";
+    hostPublicKeys = [ "ssh-ed25519 AAAA... pinned-storage-box-host" ];
+  };
+};
+```
+
+The normalized leaf has `kind = "generated"`. Ordinary destination leaves have
+`kind = "secret"`. Generated outputs take part in destination uniqueness and
+service readiness checks. Host keys are complete, pinned OpenSSH public-key
+lines; duplicate pins and ports other than the Storage Box SSH port 23 fail
+schema validation.
+
 `defaultRecipientPublicKeys` is inherited by every leaf. A service can set
 `recipientPublicKeys`, a subtree can set `_recipientPublicKeys`, and a leaf can
 set `recipientPublicKeys`.

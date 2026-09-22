@@ -30,10 +30,14 @@ let
   entryData = entry:
     let
       leaves = secretsLib.collectLeaves entry.tree;
-      paths = map (leaf: leaf.destination.path) leaves;
-      expected = map (leaf: {
-        inherit (leaf.destination) path owner group mode;
-      }) leaves;
+      destinations = map (
+        leaf:
+        if leaf.kind == "generated" then leaf.generatedSecret.output else leaf.destination
+      ) leaves;
+      paths = map (destination: destination.path) destinations;
+      expected = map (destination: {
+        inherit (destination) path owner group mode;
+      }) destinations;
     in
     entry // {
       inherit leaves paths;

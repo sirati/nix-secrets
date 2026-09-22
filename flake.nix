@@ -75,10 +75,9 @@
       checks = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
-          generated-schema = import ./nix/tests/generated-schema.nix {
-            inherit pkgs;
+          generated-schema = assert import ./nix/tests/generated-schema.nix {
             secretsLib = self.lib;
-          };
+          }; pkgs.runCommand "generated-secret-schema-test" { } "touch $out";
           real-age = pkgs.callPackage ./nix/checks/real-age.nix { };
           inherit (self.packages.${system}) secrets-ready-waiter;
           secrets-ready-waiter-vm = import ./nix/tests/secrets-ready-waiter.nix {

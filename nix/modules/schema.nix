@@ -20,8 +20,8 @@ let
       secrets = lib.mkOption {
         type = lib.types.attrs;
         description = ''
-          A nested secret tree. A leaf has a destination attribute. Any branch
-          may set _recipientPublicKeys to override recipients below that point.
+          A nested tree. A leaf has either destination or generatedSecret. Any
+          branch may set _recipientPublicKeys to override recipients below it.
         '';
       };
     };
@@ -43,7 +43,13 @@ let
   leaves = lib.concatMap (
     services: lib.concatMap secretsLib.collectLeaves (builtins.attrValues services)
   ) (builtins.attrValues serviceGroups);
-  destinationPaths = map (leaf: leaf.destination.path) leaves;
+  destinationPaths = map (
+    leaf:
+    if leaf.kind or null == "generated" then
+      leaf.generatedSecret.output.path
+    else
+      leaf.destination.path
+  ) leaves;
 in
 {
   options.services.nixSecrets = {

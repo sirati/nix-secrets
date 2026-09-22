@@ -17,7 +17,7 @@ fn manifest(socket: &Path) -> String {
             "services": {
                 "mail": {
                     "password": {
-                        "recipientPublicKeys": ["ssh-ed25519 AAAA test"],
+                        "kind": "secret", "recipientPublicKeys": ["ssh-ed25519 AAAA test"],
                         "recipientIds": ["recipient"],
                         "destination": {
                             "path": "/persistent/secrets/mail/service/password",
