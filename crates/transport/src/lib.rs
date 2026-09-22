@@ -10,7 +10,8 @@ mod receiver;
 pub use deployment::{
     read_wire_json, serve_deployment, write_wire_json, DeployEntry, DeploymentBatch,
     DeploymentClient, DeploymentError, DeploymentResult, DeploymentSelection, Destination,
-    ExpectedSecret, ExpectedTarget, PreparedDeployment, TargetSecret, TargetState,
+    ExpectedSecret, ExpectedTarget, ExpectedTask, PreparedDeployment, StorageBoxBootstrap,
+    TargetSecret, TargetState, TargetTask, TaskEntry, STORAGE_BOX_SSH_KEY,
 };
 pub use hostkey::{
     Decision, HostIdentity, HostKeyDecision, HostKeyError, HostKeyPreflight, HostKeyStatus,
