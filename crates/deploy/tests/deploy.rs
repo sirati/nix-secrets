@@ -139,7 +139,8 @@ fn rejects_omissions_extras_duplicates_and_bad_modes_before_deploy() {
 
 #[test]
 fn generated_output_uses_manifest_and_atomic_generation() {
-    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin";
+    const KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin";
     let temp = tempfile::tempdir().unwrap();
     let (owner, group) = account_names();
     let value = json!({"testhost": {
@@ -179,6 +180,10 @@ fn generated_output_uses_manifest_and_atomic_generation() {
         fs::read(root.join("backup/backup/storage-key")).unwrap(),
         b"OPENSSH-PRIVATE-KEY"
     );
-    let state = load_target_state(&path, "testhost", &deployer.current_versions().unwrap()).unwrap();
-    assert_eq!(state.tasks[0].current_version_id.as_deref(), Some("version-one"));
+    let state =
+        load_target_state(&path, "testhost", &deployer.current_versions().unwrap()).unwrap();
+    assert_eq!(
+        state.tasks[0].current_version_id.as_deref(),
+        Some("version-one")
+    );
 }

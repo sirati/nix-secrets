@@ -1,13 +1,13 @@
 use crate::manifest::load_schema;
 use crate::{DeployError, SecretDeployment};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use nix::unistd::{Group, User};
 use nix_secrets_core::{GeneratedSecretType, SecretPath};
 use nix_secrets_storagebox_bootstrap::{
     ClientContribution, DevUrandom, Engine, OsKeyGenerator, Output, RusshBackend, StorageBoxTask,
     SystemClock,
 };
 use nix_secrets_transport::TaskEntry;
-use nix::unistd::{Group, User};
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -64,7 +64,12 @@ pub fn run_generated_tasks(
             clock: SystemClock,
         };
         let key = engine
-            .run(&task, password, contribution, existing.as_ref().map(|value| value.as_str()))
+            .run(
+                &task,
+                password,
+                contribution,
+                existing.as_ref().map(|value| value.as_str()),
+            )
             .map_err(task_error)?;
         outputs.push(SecretDeployment {
             identifier: entry.identifier.clone(),
@@ -112,7 +117,9 @@ fn read_existing_key(path: &Path) -> Result<Option<Zeroizing<String>>, DeployErr
     };
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > MAX_PRIVATE_KEY_BYTES {
-        return Err(invalid("existing generated key is not a bounded regular file"));
+        return Err(invalid(
+            "existing generated key is not a bounded regular file",
+        ));
     }
     let mut value = Zeroizing::new(String::with_capacity(metadata.len() as usize));
     file.read_to_string(&mut value)?;
@@ -142,7 +149,9 @@ fn validate_output(
         .join(&output.category);
     let path = Path::new(&output.path);
     if path.parent() != Some(expected.as_path()) || output.category != "backup" {
-        return Err(invalid("generated task output escapes its backup service boundary"));
+        return Err(invalid(
+            "generated task output escapes its backup service boundary",
+        ));
     }
     User::from_name(&output.owner)
         .map_err(|_| invalid("cannot resolve generated output owner"))?

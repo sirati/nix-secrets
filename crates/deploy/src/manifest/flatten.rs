@@ -32,7 +32,11 @@ pub(super) fn flatten(
             Ok(())
         }
         SecretNode::Generated(leaf) => {
-            let mut parts = vec![hostname.to_owned(), namespace.to_owned(), service.to_owned()];
+            let mut parts = vec![
+                hostname.to_owned(),
+                namespace.to_owned(),
+                service.to_owned(),
+            ];
             parts.extend(parents.iter().cloned());
             let identifier = parts.join(".");
             let spec = ManifestEntry {

@@ -42,11 +42,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 contents_base64: std::mem::take(&mut entry.contents_base64),
             })
             .collect::<Vec<_>>();
-        entries.extend(run_generated_tasks(
-            path,
-            &hostname,
-            &batch.tasks,
-        ).map_err(|error| error.to_string())?);
+        entries.extend(
+            run_generated_tasks(path, &hostname, &batch.tasks)
+                .map_err(|error| error.to_string())?,
+        );
         let local = DeploymentBatch {
             version: u32::from(batch.version),
             requested_identifiers,
