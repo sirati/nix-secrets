@@ -6,6 +6,7 @@ members = [
   "crates/deploy",
   "crates/manager",
   "crates/secrets-ready-waiter",
+  "crates/storagebox-bootstrap",
   "crates/transport",
 ]
 resolver = "2"
