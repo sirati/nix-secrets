@@ -64,7 +64,7 @@ pub fn run_generated_tasks(
             clock: SystemClock,
         };
         let key = engine
-            .run(&task, password, contribution, existing.as_deref())
+            .run(&task, password, contribution, existing.as_ref().map(|value| value.as_str()))
             .map_err(task_error)?;
         outputs.push(SecretDeployment {
             identifier: entry.identifier.clone(),
