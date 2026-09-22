@@ -47,9 +47,9 @@ impl SshBackend for RusshBackend {
         let pins = task
             .pinned_host_keys
             .iter()
-            .map(|pin| PublicKey::from_openssh(pin).map_err(ssh_error))
+            .map(|pin| PublicKey::from_openssh(pin).map_err(|error| ssh_error("parse pinned host key", error)))
             .collect::<Result<Vec<_>, _>>()?;
-        let runtime = Runtime::new().map_err(Error::Io)?;
+        let runtime = Runtime::new().map_err(|error| ssh_error("create Tokio runtime", error))?;
         let address = (task.storage_box_host.clone(), task.port);
         let username = task.storage_box_user.clone();
         let (handle, sftp, raw_sftp) = runtime.block_on(async move {
@@ -59,29 +59,38 @@ impl SshBackend for RusshBackend {
             });
             let mut handle = client::connect(config, address, PinnedHandler { pins })
                 .await
-                .map_err(ssh_error)?;
+                .map_err(|error| ssh_error("connect SSH transport", error))?;
             let auth = handle
                 .authenticate_password(username, password.as_str())
                 .await
-                .map_err(ssh_error)?;
+                .map_err(|error| ssh_error("request password authentication", error))?;
             if !auth.success() {
                 return Err(Error::Ssh("password authentication rejected".into()));
             }
-            let channel = handle.channel_open_session().await.map_err(ssh_error)?;
+            let channel = handle
+                .channel_open_session()
+                .await
+                .map_err(|error| ssh_error("open SFTP channel", error))?;
             channel
                 .request_subsystem(true, "sftp")
                 .await
-                .map_err(ssh_error)?;
+                .map_err(|error| ssh_error("request SFTP subsystem", error))?;
             let sftp = SftpSession::new(channel.into_stream())
                 .await
-                .map_err(ssh_error)?;
-            let channel = handle.channel_open_session().await.map_err(ssh_error)?;
+                .map_err(|error| ssh_error("initialize SFTP session", error))?;
+            let channel = handle
+                .channel_open_session()
+                .await
+                .map_err(|error| ssh_error("open atomic-rename SFTP channel", error))?;
             channel
                 .request_subsystem(true, "sftp")
                 .await
-                .map_err(ssh_error)?;
+                .map_err(|error| ssh_error("request atomic-rename SFTP subsystem", error))?;
             let raw_sftp = RawSftpSession::new(channel.into_stream());
-            raw_sftp.init().await.map_err(ssh_error)?;
+            raw_sftp
+                .init()
+                .await
+                .map_err(|error| ssh_error("initialize atomic-rename SFTP session", error))?;
             Ok((handle, sftp, raw_sftp))
         })?;
         Ok(RusshSession {
@@ -101,7 +110,7 @@ impl RemoteSession for RusshSession {
                 .sftp
                 .try_exists(".ssh/authorized_keys")
                 .await
-                .map_err(ssh_error)?
+                .map_err(|error| ssh_error("check authorized_keys existence", error))?
             {
                 return Ok(Vec::new());
             }
@@ -109,7 +118,7 @@ impl RemoteSession for RusshSession {
                 .sftp
                 .read(".ssh/authorized_keys")
                 .await
-                .map_err(ssh_error)?;
+                .map_err(|error| ssh_error("read authorized_keys", error))?;
             if value.len() > 1024 * 1024 {
                 return Err(Error::InvalidAuthorizedKeys("file exceeds 1 MiB".into()));
             }
@@ -126,15 +135,37 @@ impl RemoteSession for RusshSession {
         );
         self.runtime.block_on(async {
             ensure_ssh_directory(&self.sftp).await?;
-            self.sftp.write(&temporary, contents).await.map_err(ssh_error)?;
-            let mut metadata = self.sftp.metadata(&temporary).await.map_err(ssh_error)?;
+            self.sftp
+                .write(&temporary, contents)
+                .await
+                .map_err(|error| ssh_error("write authorized_keys staging file", error))?;
+            let mut metadata = self.sftp
+                .metadata(&temporary)
+                .await
+                .map_err(|error| ssh_error("stat authorized_keys staging file", error))?;
             metadata.permissions = Some(0o600);
-            self.sftp.set_metadata(&temporary, metadata).await.map_err(ssh_error)?;
+            self.sftp
+                .set_metadata(&temporary, metadata)
+                .await
+                .map_err(|error| ssh_error("set authorized_keys staging permissions", error))?;
             let payload = rename_payload(&temporary, ".ssh/authorized_keys")?;
-            let result = self.raw_sftp.extended("posix-rename@openssh.com", payload).await;
+            let result = self
+                .raw_sftp
+                .extended("posix-rename@openssh.com", payload)
+                .await;
             if !matches!(result, Ok(Packet::Status(ref status)) if status.status_code == StatusCode::Ok) {
-                let _ = self.sftp.remove_file(&temporary).await;
-                return Err(Error::Ssh("server rejected atomic posix-rename@openssh.com".into()));
+                let rename = result
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "unexpected response packet".into());
+                if let Err(error) = self.sftp.remove_file(&temporary).await {
+                    return Err(Error::Ssh(format!(
+                        "atomic authorized_keys rename failed ({rename}); staging cleanup failed: {error}"
+                    )));
+                }
+                return Err(Error::Ssh(format!(
+                    "atomic authorized_keys rename failed: {rename}"
+                )));
             }
             Ok(())
         })
@@ -142,17 +173,32 @@ impl RemoteSession for RusshSession {
 }
 
 async fn ensure_ssh_directory(sftp: &SftpSession) -> Result<(), Error> {
-    if sftp.try_exists(".ssh").await.map_err(ssh_error)? {
-        let metadata = sftp.symlink_metadata(".ssh").await.map_err(ssh_error)?;
+    if sftp
+        .try_exists(".ssh")
+        .await
+        .map_err(|error| ssh_error("check .ssh existence", error))? {
+        let metadata = sftp
+            .symlink_metadata(".ssh")
+            .await
+            .map_err(|error| ssh_error("lstat .ssh", error))?;
         if !metadata.is_dir() {
             return Err(Error::Ssh(".ssh is not a real directory".into()));
         }
     } else {
-        sftp.create_dir(".ssh").await.map_err(ssh_error)?;
+        sftp
+            .create_dir(".ssh")
+            .await
+            .map_err(|error| ssh_error("create .ssh", error))?;
     }
-    let mut metadata = sftp.metadata(".ssh").await.map_err(ssh_error)?;
+    let mut metadata = sftp
+        .metadata(".ssh")
+        .await
+        .map_err(|error| ssh_error("stat .ssh", error))?;
     metadata.permissions = Some(0o700);
-    sftp.set_metadata(".ssh", metadata).await.map_err(ssh_error)
+    sftp
+        .set_metadata(".ssh", metadata)
+        .await
+        .map_err(|error| ssh_error("set .ssh permissions", error))
 }
 
 fn rename_payload(old: &str, new: &str) -> Result<Vec<u8>, Error> {
@@ -166,6 +212,6 @@ fn rename_payload(old: &str, new: &str) -> Result<Vec<u8>, Error> {
     Ok(value)
 }
 
-fn ssh_error(error: impl std::fmt::Display) -> Error {
-    Error::Ssh(error.to_string())
+fn ssh_error(stage: &str, error: impl std::fmt::Display) -> Error {
+    Error::Ssh(format!("{stage}: {error}"))
 }
