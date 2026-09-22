@@ -8,6 +8,7 @@ license = "MIT"
 base64 = "0.22"
 nix = { version = "0.29", features = ["fs", "user"] }
 nix-secrets-core = { path = "../core" }
+nix-secrets-storagebox-bootstrap = { path = "../storagebox-bootstrap" }
 nix-secrets-transport = { path = "../transport" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

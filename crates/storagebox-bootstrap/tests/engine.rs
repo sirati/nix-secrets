@@ -92,7 +92,7 @@ fn task() -> StorageBoxTask {
     let host_key = OsKeyGenerator.generate().unwrap().public_key;
     StorageBoxTask {
         schema_version: 1,
-        task_id: "postgres-backup".into(),
+        task_id: "hetzner2.services.postgres.storage-key".into(),
         target_hostname: "hetzner2".into(),
         storage_box_host: "u123.your-storagebox.de".into(),
         storage_box_user: "u123".into(),
@@ -157,7 +157,7 @@ fn writes_all_contribution_before_generating_and_reconciles_remote() {
     assert!(
         String::from_utf8(state.borrow().file.clone())
             .unwrap()
-            .contains("nix-secrets:hetzner2:postgres-backup:2026-09-22")
+            .contains("nix-secrets:hetzner2:hetzner2.services.postgres.storage-key:2026-09-22")
     );
 }
 
@@ -216,4 +216,29 @@ fn invalid_task_is_rejected_before_password_or_rng_use() {
     assert!(!state.borrow().validated);
     assert_eq!(*calls.borrow(), 0);
     assert!(engine.entropy.bytes.borrow().is_empty());
+}
+
+#[test]
+fn fresh_attempts_and_contributions_produce_distinct_keys() {
+    let (mut first_engine, _, _) = engine(false);
+    let first = first_engine
+        .run(
+            &task(),
+            Zeroizing::new(b"pw".to_vec()),
+            ClientContribution::new([5; 32]),
+            None,
+        )
+        .unwrap();
+    let (mut second_engine, _, _) = engine(false);
+    let second = second_engine
+        .run(
+            &task(),
+            Zeroizing::new(b"pw".to_vec()),
+            ClientContribution::new([6; 32]),
+            None,
+        )
+        .unwrap();
+    assert_ne!(first.public_key, second.public_key);
+    assert_eq!(*first_engine.entropy.bytes.borrow(), vec![5; 32]);
+    assert_eq!(*second_engine.entropy.bytes.borrow(), vec![6; 32]);
 }

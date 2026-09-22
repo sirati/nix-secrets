@@ -3,7 +3,10 @@ use crate::{DeployError, DeploymentBatch, SecretClass};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use nix::unistd::{Group, User};
 use nix_secrets_core::schema::{Destination, Schema, SecretNode};
-use nix_secrets_transport::{Destination as WireDestination, TargetSecret, TargetState};
+use nix_secrets_transport::{
+    Destination as WireDestination, StorageBoxBootstrap as WireBootstrap, TargetSecret,
+    TargetState, TargetTask, STORAGE_BOX_SSH_KEY,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -59,6 +62,7 @@ pub fn load_target_state(
         .get(hostname)
         .ok_or_else(|| DeployError::Invalid(format!("manifest has no host {hostname}")))?;
     let mut secrets = Vec::new();
+    let mut tasks = Vec::new();
     for (namespace, services) in &host.service_groups {
         for (service, node) in services {
             flatten_target(
@@ -69,18 +73,21 @@ pub fn load_target_state(
                 node,
                 versions,
                 &mut secrets,
+                &mut tasks,
             );
         }
     }
     secrets.sort_unstable_by(|a, b| a.identifier.cmp(&b.identifier));
+    tasks.sort_unstable_by(|a, b| a.identifier.cmp(&b.identifier));
     Ok(TargetState {
         protocol_version: 1,
         hostname: hostname.into(),
         secrets,
+        tasks,
     })
 }
 
-fn load_schema(path: &Path) -> Result<Schema, DeployError> {
+pub(crate) fn load_schema(path: &Path) -> Result<Schema, DeployError> {
     if !path.is_absolute() {
         return Err(DeployError::Invalid(
             "manifest path must be absolute".into(),
@@ -105,24 +112,20 @@ fn flatten_target(
     node: &SecretNode,
     versions: &BTreeMap<String, String>,
     output: &mut Vec<TargetSecret>,
+    tasks: &mut Vec<TargetTask>,
 ) {
     match node {
         SecretNode::Branch(children) => {
             for (name, child) in children {
                 parents.push(name.clone());
                 flatten_target(
-                    hostname, namespace, service, parents, child, versions, output,
+                    hostname, namespace, service, parents, child, versions, output, tasks,
                 );
                 parents.pop();
             }
         }
         SecretNode::Secret(leaf) => {
-            let identifier = std::iter::once(hostname)
-                .chain(std::iter::once(namespace))
-                .chain(std::iter::once(service))
-                .chain(parents.iter().map(String::as_str))
-                .collect::<Vec<_>>()
-                .join(".");
+            let identifier = identifier(hostname, namespace, service, parents);
             output.push(TargetSecret {
                 identifier: identifier.clone(),
                 recipient_ids: leaf.recipient_ids.clone(),
@@ -137,6 +140,43 @@ fn flatten_target(
                 current_version_id: versions.get(&identifier).cloned(),
             });
         }
+        SecretNode::Generated(leaf) => {
+            let identifier = identifier(hostname, namespace, service, parents);
+            let generated = &leaf.generated_secret;
+            tasks.push(TargetTask {
+                identifier: identifier.clone(),
+                task_type: STORAGE_BOX_SSH_KEY.into(),
+                recipient_ids: leaf.recipient_ids.clone(),
+                output: wire_destination(&generated.output, &leaf.consumer_units),
+                bootstrap: WireBootstrap {
+                    host: generated.bootstrap.host.clone(),
+                    port: generated.bootstrap.port,
+                    user: generated.bootstrap.user.clone(),
+                    host_public_keys: generated.bootstrap.host_public_keys.clone(),
+                },
+                current_version_id: versions.get(&identifier).cloned(),
+            });
+        }
+    }
+}
+
+fn identifier(host: &str, namespace: &str, service: &str, parents: &[String]) -> String {
+    std::iter::once(host)
+        .chain(std::iter::once(namespace))
+        .chain(std::iter::once(service))
+        .chain(parents.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn wire_destination(value: &Destination, consumers: &[String]) -> WireDestination {
+    WireDestination {
+        path: value.path.clone(),
+        category: value.category.clone(),
+        owner: value.owner.clone(),
+        group: value.group.clone(),
+        mode: value.mode.clone(),
+        consumer_units: consumers.to_vec(),
     }
 }
 

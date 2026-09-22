@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use nix_secrets_deploy::{
-    load_and_validate_manifest, load_target_state, system_hostname, Deployer, DeploymentBatch,
-    SecretDeployment,
+    load_and_validate_manifest, load_target_state, run_generated_tasks, system_hostname, Deployer,
+    DeploymentBatch, SecretDeployment,
 };
 use nix_secrets_transport::serve_deployment;
 use std::io;
@@ -31,19 +31,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     serve_deployment(stdin.lock(), stdout.lock(), state, |mut batch| {
-        let requested_identifiers = std::mem::take(&mut batch.requested_identifiers);
+        let mut requested_identifiers = std::mem::take(&mut batch.requested_identifiers);
+        requested_identifiers.extend(std::mem::take(&mut batch.requested_tasks));
         let wire_entries = std::mem::take(&mut batch.entries);
+        let mut entries = wire_entries
+            .into_iter()
+            .map(|mut entry| SecretDeployment {
+                identifier: std::mem::take(&mut entry.identifier),
+                version_id: std::mem::take(&mut entry.version_id),
+                contents_base64: std::mem::take(&mut entry.contents_base64),
+            })
+            .collect::<Vec<_>>();
+        entries.extend(run_generated_tasks(
+            path,
+            &hostname,
+            &batch.tasks,
+        ).map_err(|error| error.to_string())?);
         let local = DeploymentBatch {
             version: u32::from(batch.version),
             requested_identifiers,
-            entries: wire_entries
-                .into_iter()
-                .map(|mut entry| SecretDeployment {
-                    identifier: std::mem::take(&mut entry.identifier),
-                    version_id: std::mem::take(&mut entry.version_id),
-                    contents_base64: std::mem::take(&mut entry.contents_base64),
-                })
-                .collect(),
+            entries,
         };
         let resolved = load_and_validate_manifest(path, &hostname, &local)
             .map_err(|error| error.to_string())?;

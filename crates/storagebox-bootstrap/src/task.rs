@@ -30,7 +30,7 @@ impl StorageBoxTask {
         if self.schema_version != 1 {
             return bad("unsupported schemaVersion");
         }
-        token(&self.task_id, "taskId")?;
+        task_identifier(&self.task_id)?;
         dns_name(&self.target_hostname, "targetHostname")?;
         dns_name(&self.storage_box_host, "storageBoxHost")?;
         token(&self.storage_box_user, "storageBoxUser")?;
@@ -72,6 +72,22 @@ fn token(value: &str, field: &str) -> Result<(), Error> {
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     {
         return bad(&format!("{field} contains invalid characters"));
+    }
+    Ok(())
+}
+
+fn task_identifier(value: &str) -> Result<(), Error> {
+    let parts = value.split('.').collect::<Vec<_>>();
+    if value.len() > 4096
+        || parts.len() < 4
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+    {
+        return bad("taskId is not a canonical secret identifier");
     }
     Ok(())
 }
