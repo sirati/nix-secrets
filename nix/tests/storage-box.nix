@@ -99,7 +99,7 @@ pkgs.testers.runNixOSTest {
     )
     original = machine.succeed("cat /var/lib/storagebox/.ssh/authorized_keys")
 
-    unit = "nix-secrets-deployer@.service"
+    unit = "nix-secrets-deployer@probe.service"
     families = machine.succeed(
         f"systemctl show '{unit}' -p RestrictAddressFamilies --value"
     )
