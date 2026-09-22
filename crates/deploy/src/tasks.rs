@@ -33,7 +33,7 @@ pub fn run_generated_tasks(
         let spec = schema
             .generated_secret(&path)
             .map_err(|error| invalid(format!("generated task is absent from manifest: {error}")))?;
-        match spec.generated_secret.secret_type {
+        match &spec.generated_secret.secret_type {
             GeneratedSecretType::StorageBoxSshKey => {}
         }
         let generated = spec.generated_secret;
