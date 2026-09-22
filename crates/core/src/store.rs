@@ -1,4 +1,4 @@
-use crate::schema::{Schema, SchemaError, SecretPath};
+use crate::schema::{LeafSpec, Schema, SchemaError, SecretPath};
 use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -75,8 +75,11 @@ impl SecretStore {
         path: &SecretPath,
         envelope: EncryptedSecret,
     ) -> Result<(), StoreError> {
-        let spec = schema.secret(path)?;
-        if spec.recipient_ids != envelope.recipient_ids {
+        let recipients = match schema.leaf(path)? {
+            LeafSpec::Stored(spec) => spec.recipient_ids,
+            LeafSpec::Generated(spec) => spec.recipient_ids,
+        };
+        if recipients != envelope.recipient_ids {
             return Err(StoreError::RecipientMismatch);
         }
         validate_record(&envelope)?;
@@ -87,7 +90,7 @@ impl SecretStore {
     }
 
     pub fn remove(&self, schema: &Schema, path: &SecretPath) -> Result<bool, StoreError> {
-        schema.secret(path)?;
+        schema.leaf(path)?;
         self.with_lock(true, |document| {
             Ok(document.secrets.remove(&path.to_string()).is_some())
         })

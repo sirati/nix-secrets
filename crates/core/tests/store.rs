@@ -98,6 +98,37 @@ fn rejects_empty_age_ciphertext() {
     ));
 }
 
+#[test]
+fn stores_and_removes_generated_task_input() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = SecretStore::new(directory.path().join("nix-secrets.toml"));
+    let schema = generated_schema();
+    let path = SecretPath::parse("host.services.backup.storage-key").unwrap();
+    let envelope = common::envelope("password");
+    store.set(&schema, &path, envelope.clone()).unwrap();
+    assert_eq!(store.get(&path).unwrap(), Some(envelope));
+    assert!(store.remove(&schema, &path).unwrap());
+}
+
+fn generated_schema() -> nix_secrets_core::Schema {
+    const KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin";
+    serde_json::from_value(serde_json::json!({
+        "host": {
+            "metadata": { "socketPath": "/run/nix-secrets/backend.sock", "deployment": { "host": "host", "destination": "update@host", "port": 22 } },
+            "services": { "backup": { "storage-key": {
+                "kind": "generated", "recipientPublicKeys": [KEY],
+                "recipientIds": ["recipient-id"], "consumerUnits": [],
+                "generatedSecret": {
+                    "type": "storage-box-ssh-key",
+                    "output": { "path": "/persistent/secrets/backup/backup/key", "category": "backup", "owner": "backup", "group": "backup", "mode": "0400" },
+                    "bootstrap": { "host": "box.example", "port": 23, "user": "u1", "hostPublicKeys": [KEY] }
+                }
+            }}}
+        }
+    })).unwrap()
+}
+
 fn schema_with_many_secrets(count: usize) -> nix_secrets_core::Schema {
     let secrets = (0..count)
         .map(|index| {
