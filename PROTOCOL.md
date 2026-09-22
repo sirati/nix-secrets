@@ -173,6 +173,44 @@ Path components come from the validated manifest. Absolute components,
 `..`, symlink traversal, hard-link substitution, device nodes, and unexpected
 owners are rejected.
 
+## Generated-secret tasks
+
+A generated leaf has `kind = "generated"` and a `generatedSecret` declaration
+instead of a direct destination. Its canonical identifier remains the map key
+in `nix-secrets.toml`. The age ciphertext at that key contains the ephemeral
+task input; it is never interpreted as the generated output.
+
+The `storage-box-ssh-key` task declares its output destination and public
+bootstrap parameters: Storage Box host, port, user and one or more complete
+pinned OpenSSH host public-key lines. Selection and target-state messages keep
+ordinary secrets and tasks in distinct arrays. This prevents a receiver from
+silently treating a task password as file contents.
+
+After target-state comparison and approval, a task entry contains the stable
+identifier, ciphertext version, password and exactly 32 frontend CSPRNG bytes.
+The password and contribution are zeroized and are carried only inside the
+authenticated SSH stream. The receiver rejects an entry if its task type,
+identifier, version, recipients, output or bootstrap metadata differs from the
+Nix-generated manifest.
+
+The receiver writes the full frontend contribution to `/dev/urandom` with an
+ordinary write before requesting target-local randomness for key generation.
+It neither uses `RNDADDENTROPY` nor claims entropy credit. Tests replace both
+operations with injected implementations and assert the ordering without
+changing the host random pool.
+
+The receiver connects in-process to the Storage Box, verifies the configured
+host key, password-authenticates, and updates `.ssh/authorized_keys` through
+SFTP. It preserves unrelated entries and allows exactly one entry with the
+stable prefix `nix-secrets:<target-host>:<task-id>:`. A retry reuses an existing
+valid output key; if a crash occurred after the remote update but before local
+publication, retry replaces the marked remote entry before publishing a new
+local key. Malformed or duplicate marker entries fail closed.
+
+The generated private key is published atomically at its declared persistent
+destination only after remote reconciliation succeeds. Task passwords,
+frontend contributions and target seeds never enter a secret generation.
+
 ## Readiness
 
 The NixOS module derives expected files from the same resolved manifest. The

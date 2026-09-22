@@ -96,6 +96,28 @@ A target cannot request arbitrary repository values. Both the TUI and target
 validate its request against the independently evaluated declaration, and the
 user approves the displayed set before decryption.
 
+### Generated Storage Box credentials
+
+The encrypted Storage Box password is a bootstrap task input. The frontend and
+target see it only during an approved task, and it is never published into the
+target's persistent secret generation. The target-generated Ed25519 private
+key never leaves the target and is installed only at the declared output path.
+
+The frontend contributes fresh operating-system randomness to each approved
+attempt. The target writes it to `/dev/urandom` before drawing its own OS
+randomness. Linux mixes writes into the random pool without crediting entropy;
+the contribution is therefore defense in depth and is not trusted. Target key
+security still depends on the target OS CSPRNG. The frontend contribution and
+target seed are zeroized after use.
+
+Storage Box host keys are complete pinned public keys from the Nix manifest.
+Changed or unlisted keys fail closed. The authorized-keys update replaces one
+stable task marker and rejects duplicate or malformed marker entries, limiting
+crash recovery to one active task key while preserving unrelated entries.
+A malicious Storage Box can reject access or discard updates. It learns the
+generated public key and necessarily receives the password authentication, but
+it never receives the generated private key.
+
 ### Frontend compromise
 
 A compromised TUI process can capture entered, pasted, decrypted, or approved
