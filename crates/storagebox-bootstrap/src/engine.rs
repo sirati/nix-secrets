@@ -54,8 +54,8 @@ impl<B: SshBackend, S: EntropySink, G: KeyGenerator, C: Clock> Engine<B, S, G, C
         };
         let mut session = self.backend.connect(task, password.as_slice())?;
         let current = session.read_authorized_keys()?;
-        let format =
-            format_description::parse_borrowed::<2>("[year]-[month]-[day]").map_err(|_| Error::KeyGeneration)?;
+        let format = format_description::parse_borrowed::<2>("[year]-[month]-[day]")
+            .map_err(|_| Error::KeyGeneration)?;
         let date = self
             .clock
             .utc_date()?

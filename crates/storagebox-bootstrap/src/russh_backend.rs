@@ -48,7 +48,10 @@ impl SshBackend for RusshBackend {
         let pins = task
             .pinned_host_keys
             .iter()
-            .map(|pin| PublicKey::from_openssh(pin).map_err(|error| ssh_error("parse pinned host key", error)))
+            .map(|pin| {
+                PublicKey::from_openssh(pin)
+                    .map_err(|error| ssh_error("parse pinned host key", error))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let runtime = Runtime::new().map_err(|error| ssh_error("create Tokio runtime", error))?;
         let address = (task.storage_box_host.clone(), task.port);
@@ -168,11 +171,7 @@ impl RemoteSession for RusshSession {
     }
 }
 
-async fn write_staging_file(
-    sftp: &SftpSession,
-    path: &str,
-    contents: &[u8],
-) -> Result<(), Error> {
+async fn write_staging_file(sftp: &SftpSession, path: &str, contents: &[u8]) -> Result<(), Error> {
     let mut file = sftp
         .create(path)
         .await
@@ -201,7 +200,8 @@ async fn ensure_ssh_directory(sftp: &SftpSession) -> Result<(), Error> {
     if sftp
         .try_exists(".ssh")
         .await
-        .map_err(|error| ssh_error("check .ssh existence", error))? {
+        .map_err(|error| ssh_error("check .ssh existence", error))?
+    {
         let metadata = sftp
             .symlink_metadata(".ssh")
             .await
@@ -210,21 +210,19 @@ async fn ensure_ssh_directory(sftp: &SftpSession) -> Result<(), Error> {
             return Err(Error::Ssh(".ssh is not a real directory".into()));
         }
     } else {
-        sftp
-            .create_dir(".ssh")
+        sftp.create_dir(".ssh")
             .await
             .map_err(|error| ssh_error("create .ssh", error))?;
     }
-    sftp
-        .set_metadata(
-            ".ssh",
-            FileAttributes {
-                permissions: Some(0o700),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|error| ssh_error("set .ssh permissions", error))
+    sftp.set_metadata(
+        ".ssh",
+        FileAttributes {
+            permissions: Some(0o700),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| ssh_error("set .ssh permissions", error))
 }
 
 fn rename_payload(old: &str, new: &str) -> Result<Vec<u8>, Error> {
