@@ -37,6 +37,9 @@
           nix-secrets-age = pkgs.callPackage ./nix/packages/age.nix {
             nix-secrets = self.packages.${system}.default;
           };
+          nix-secrets-clipboard = pkgs.callPackage ./nix/packages/clipboard.nix {
+            nix-secrets = self.packages.${system}.default;
+          };
           nix-secrets-1password = pkgsWithOnePassword.callPackage ./nix/packages/one-password.nix {
             nix-secrets = self.packages.${system}.default;
           };
@@ -70,6 +73,10 @@
           type = "app";
           program = "${self.packages.${system}.nix-secrets-age}/bin/nix-secrets";
         };
+        nix-secrets-clipboard = {
+          type = "app";
+          program = "${self.packages.${system}.nix-secrets-clipboard}/bin/nix-secrets";
+        };
       });
 
       checks = forAllSystems (system:
@@ -78,6 +85,9 @@
           generated-schema = assert import ./nix/tests/generated-schema.nix {
             secretsLib = self.lib;
           }; pkgs.runCommand "generated-secret-schema-test" { } "touch $out";
+          generation-policy = assert import ./nix/tests/generation-policy.nix {
+            secretsLib = self.lib;
+          }; pkgs.runCommand "generation-policy-test" { } "touch $out";
           real-age = pkgs.callPackage ./nix/checks/real-age.nix { };
           inherit (self.packages.${system}) secrets-ready-waiter;
           secrets-ready-waiter-vm = import ./nix/tests/secrets-ready-waiter.nix {

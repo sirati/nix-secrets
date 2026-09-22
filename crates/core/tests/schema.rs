@@ -1,6 +1,8 @@
 mod common;
 
-use nix_secrets_core::{GeneratedSecretType, LeafSpec, Schema, SchemaError, SecretPath};
+use nix_secrets_core::{
+    ByteEncoding, GeneratedSecretType, GenerationPolicy, LeafSpec, Schema, SchemaError, SecretPath,
+};
 use serde_json::json;
 
 const KEY: &str =
@@ -72,6 +74,24 @@ fn rejects_invalid_generated_secret_boundaries() {
     assert!(Schema::from_json(&generated_schema(23, vec!["ssh-ed25519 invalid"], None)).is_err());
     assert!(Schema::from_json(&generated_schema(23, vec![KEY, KEY], None)).is_err());
     assert!(Schema::from_json(&generated_schema(23, vec![KEY], Some(true))).is_err());
+}
+
+#[test]
+fn generated_task_input_accepts_generation_policy() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&generated_schema(23, vec![KEY], None)).unwrap();
+    value["host"]["services"]["backup"]["storage-key"]["generation"] = json!({
+        "type": "random-bytes", "bytes": 32, "encoding": "base64url-unpadded"
+    });
+    let schema = Schema::from_json(&value.to_string()).unwrap();
+    let path = SecretPath::parse("host.services.backup.storage-key").unwrap();
+    assert_eq!(
+        schema.generated_secret(&path).unwrap().generation,
+        Some(GenerationPolicy::RandomBytes {
+            bytes: 32,
+            encoding: ByteEncoding::Base64urlUnpadded,
+        })
+    );
 }
 
 fn generated_schema(port: u16, host_keys: Vec<&str>, unknown: Option<bool>) -> String {

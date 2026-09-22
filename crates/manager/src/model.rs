@@ -1,4 +1,5 @@
 use crate::tree::Row;
+use std::fmt;
 use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,7 +20,7 @@ pub struct TaskApproval {
     pub output_is_set: Option<bool>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub enum Mode {
     Browse,
     Edit {
@@ -30,12 +31,55 @@ pub enum Mode {
         path: String,
         value: Zeroizing<Vec<u8>>,
     },
+    GeneratedPreview {
+        path: String,
+        value: Zeroizing<Vec<u8>>,
+        revealed: bool,
+        replacing: bool,
+    },
     Approval(ApprovalRequest),
     ProviderFailure {
         message: String,
         path: String,
         value: Zeroizing<Vec<u8>>,
     },
+}
+
+impl fmt::Debug for Mode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Browse => formatter.write_str("Browse"),
+            Self::Edit { path, .. } => formatter
+                .debug_struct("Edit")
+                .field("path", path)
+                .field("value", &"<redacted>")
+                .finish(),
+            Self::Replace { path, .. } => formatter
+                .debug_struct("Replace")
+                .field("path", path)
+                .field("value", &"<redacted>")
+                .finish(),
+            Self::GeneratedPreview {
+                path,
+                revealed,
+                replacing,
+                ..
+            } => formatter
+                .debug_struct("GeneratedPreview")
+                .field("path", path)
+                .field("value", &"<redacted>")
+                .field("revealed", revealed)
+                .field("replacing", replacing)
+                .finish(),
+            Self::Approval(request) => formatter.debug_tuple("Approval").field(request).finish(),
+            Self::ProviderFailure { message, path, .. } => formatter
+                .debug_struct("ProviderFailure")
+                .field("message", message)
+                .field("path", path)
+                .field("value", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 pub struct Model {
@@ -119,6 +163,7 @@ mod tests {
             path: Some("h.services.s.key".into()),
             is_set: set,
             is_task: false,
+            can_generate: false,
             output_is_set: None,
         }
     }

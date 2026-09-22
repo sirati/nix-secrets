@@ -3,7 +3,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 use thiserror::Error;
 
+mod generated;
+mod generation;
 mod validation;
+pub use generated::{
+    GeneratedKind, GeneratedSecret, GeneratedSecretLeaf, GeneratedSecretType, StorageBoxBootstrap,
+};
+pub use generation::{
+    ByteEncoding, GenerationPolicy, PassphraseSeparator, PassphraseWordList, PasswordAlphabet,
+};
 use validation::{validate_component, validate_namespace, validate_tree};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -43,51 +51,6 @@ pub enum SecretNode {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct GeneratedSecretLeaf {
-    pub kind: GeneratedKind,
-    #[serde(rename = "recipientPublicKeys")]
-    pub recipient_public_keys: Vec<String>,
-    #[serde(rename = "recipientIds")]
-    pub recipient_ids: Vec<String>,
-    #[serde(rename = "generatedSecret")]
-    pub generated_secret: GeneratedSecret,
-    #[serde(rename = "consumerUnits")]
-    pub consumer_units: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum GeneratedKind {
-    #[serde(rename = "generated")]
-    Generated,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GeneratedSecret {
-    #[serde(rename = "type")]
-    pub secret_type: GeneratedSecretType,
-    pub output: Destination,
-    pub bootstrap: StorageBoxBootstrap,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum GeneratedSecretType {
-    #[serde(rename = "storage-box-ssh-key")]
-    StorageBoxSshKey,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct StorageBoxBootstrap {
-    pub host: String,
-    pub port: u16,
-    pub user: String,
-    #[serde(rename = "hostPublicKeys")]
-    pub host_public_keys: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct SecretLeaf {
     pub kind: SecretKind,
     #[serde(rename = "recipientPublicKeys")]
@@ -97,6 +60,7 @@ pub struct SecretLeaf {
     pub destination: Destination,
     #[serde(rename = "consumerUnits")]
     pub consumer_units: Vec<String>,
+    pub generation: Option<GenerationPolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -126,6 +90,7 @@ pub struct SecretSpec {
     pub recipient_ids: Vec<String>,
     pub destination: Destination,
     pub consumer_units: Vec<String>,
+    pub generation: Option<GenerationPolicy>,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +100,7 @@ pub struct GeneratedSecretSpec {
     pub recipient_ids: Vec<String>,
     pub generated_secret: GeneratedSecret,
     pub consumer_units: Vec<String>,
+    pub generation: Option<GenerationPolicy>,
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +129,8 @@ pub enum SchemaError {
     RecipientCount(SecretPath),
     #[error("invalid destination for {0}: {1}")]
     InvalidDestination(SecretPath, String),
+    #[error("invalid generation policy for {0}")]
+    InvalidGeneration(SecretPath),
 }
 
 #[derive(Debug, Error)]
@@ -274,6 +242,7 @@ impl Schema {
                 recipient_ids: leaf.recipient_ids.clone(),
                 destination: leaf.destination.clone(),
                 consumer_units: leaf.consumer_units.clone(),
+                generation: leaf.generation.clone(),
             })),
             SecretNode::Generated(leaf) => Ok(LeafSpec::Generated(GeneratedSecretSpec {
                 path: path.clone(),
@@ -281,6 +250,7 @@ impl Schema {
                 recipient_ids: leaf.recipient_ids.clone(),
                 generated_secret: leaf.generated_secret.clone(),
                 consumer_units: leaf.consumer_units.clone(),
+                generation: leaf.generation.clone(),
             })),
         }
     }

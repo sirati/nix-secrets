@@ -19,8 +19,11 @@ The repository implements the local editing and target deployment path in
 - Crash-atomic persistent generations, safe partial updates, strict ownership
   and modes, and bounded rollback history.
 - Metadata-only service waiters and consumer-only systemd dependencies. SSH
-  and `multi-user.target` remain independent; essential waiters gate NMBL
-  generation success.
+  and `multi-user.target` remain independent; essential waiters participate in
+  the configured boot-success check.
+- Schema-authorized password, EFF passphrase, and encoded random-byte
+  generation in the TUI, with masked preview, explicit reveal/copy, and
+  replacement confirmation.
 - NixOS modules, packages, apps, Rust tests, a real-age check, and NixOS VM
   tests for the service and deployment boundaries.
 

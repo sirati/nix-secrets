@@ -21,7 +21,8 @@ pub(super) fn validate_tree(
         SecretNode::Secret(leaf) => {
             let path = leaf_path(host, namespace, service, parents);
             validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
-            validate_destination(&path, service, &leaf.destination)
+            validate_destination(&path, service, &leaf.destination)?;
+            validate_generation(&path, leaf.generation.as_ref())
         }
         SecretNode::Generated(leaf) => {
             validate_generated(leaf_path(host, namespace, service, parents), service, leaf)
@@ -36,6 +37,7 @@ fn validate_generated(
 ) -> Result<(), SchemaError> {
     validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
     validate_destination(&path, service, &leaf.generated_secret.output)?;
+    validate_generation(&path, leaf.generation.as_ref())?;
     let bootstrap = &leaf.generated_secret.bootstrap;
     if bootstrap.host.is_empty() || bootstrap.user.is_empty() {
         return Err(invalid(&path, "storage-box bootstrap is incomplete"));
@@ -65,6 +67,13 @@ fn validate_generated(
         return Err(invalid(&path, "invalid OpenSSH recipient public key"));
     }
     Ok(())
+}
+
+fn validate_generation(
+    path: &SecretPath,
+    generation: Option<&super::GenerationPolicy>,
+) -> Result<(), SchemaError> {
+    generation.map_or(Ok(()), |policy| policy.validate(path))
 }
 
 fn validate_recipients(

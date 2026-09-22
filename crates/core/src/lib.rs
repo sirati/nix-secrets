@@ -11,7 +11,8 @@ pub use approval::{ApprovalBroker, BrokerError};
 pub use approval_types::{ApprovalRequest, ApprovalStatus, Claim, Decision};
 pub use backend::{Backend, Request, Response};
 pub use schema::{
-    Destination, GeneratedSecret, GeneratedSecretSpec, GeneratedSecretType, LeafSpec, Schema,
+    ByteEncoding, Destination, GeneratedSecret, GeneratedSecretSpec, GeneratedSecretType,
+    GenerationPolicy, LeafSpec, PassphraseSeparator, PassphraseWordList, PasswordAlphabet, Schema,
     SchemaError, SchemaLoadError, SecretKind, SecretPath, SecretSpec, StorageBoxBootstrap,
 };
 pub use store::{EncryptedSecret, SecretStore, StoreError};

@@ -47,6 +47,13 @@ each leaf `set` in green or `unset` in red. Pressing Enter opens a masked input
 editor. Pasting while a leaf is selected sets it from the clipboard. Replacing
 an existing value requires confirmation.
 
+When a leaf declares a generation policy, press `g` to generate its value.
+The preview starts masked; `r` reveals it, `c` explicitly copies it, Enter
+encrypts and stores it, and Escape discards it. Replacement still requires a
+separate confirmation. Copy uses `wl-copy` with the value on standard input;
+the opt-in `nix-secrets-clipboard` package supplies it without adding a
+clipboard dependency to other package outputs.
+
 The declaration can set a default SSH encryption recipient for the whole tree
 and override it at any subtree or leaf. Transport host keys remain a separate
 use of SSH keys and authenticate connections.

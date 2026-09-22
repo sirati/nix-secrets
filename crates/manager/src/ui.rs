@@ -51,6 +51,12 @@ pub trait SecretWriter {
     fn request_deployment(&mut self, _path: &str) -> Result<(), String> {
         Ok(())
     }
+    fn generate(&mut self, _path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+        Err("generation is not authorized for this secret".into())
+    }
+    fn copy(&mut self, _value: &[u8]) -> Result<(), String> {
+        Err("no clipboard provider is available".into())
+    }
 }
 
 pub trait Frontend {
@@ -101,6 +107,7 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             model.begin_value(value);
             submit_if_edit(model, writer);
         }
+        (Mode::Browse, UiEvent::Character('g')) => generated::begin(model, writer),
         (Mode::Browse, UiEvent::Character('d')) => {
             let selected = model.selected().cloned();
             match selected {
@@ -135,6 +142,9 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         }
         (Mode::Replace { .. }, UiEvent::Character('n') | UiEvent::Escape) => {}
         (Mode::Replace { path, value }, _) => model.mode = Mode::Replace { path, value },
+        (preview @ Mode::GeneratedPreview { .. }, event) => {
+            return generated::reduce(model, writer, preview, event)
+        }
         (Mode::ProviderFailure { path, value, .. }, UiEvent::Character('r')) => {
             submit(model, writer, path, value);
         }
@@ -224,6 +234,7 @@ fn truncate_character(value: &mut Vec<u8>) {
     }
 }
 
+mod generated;
 mod terminal;
 
 pub use terminal::run;

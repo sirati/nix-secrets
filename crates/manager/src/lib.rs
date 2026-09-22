@@ -2,9 +2,11 @@
 
 pub mod cli;
 pub mod client;
+mod clipboard;
 pub mod command;
 pub mod controller;
 pub mod deployment;
+pub mod generator;
 pub mod model;
 pub mod socket;
 pub mod startup;

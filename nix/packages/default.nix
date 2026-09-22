@@ -19,7 +19,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Repository-aware secret management and NixOS deployment";
-    license = lib.licenses.mit;
+    license = [ lib.licenses.mit lib.licenses.cc-by-40 ];
     mainProgram = "nix-secrets";
   };
 }

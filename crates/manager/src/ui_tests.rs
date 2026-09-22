@@ -12,8 +12,16 @@ struct Writer {
     requests: Vec<String>,
     poll_error: bool,
     approval_error: bool,
+    copies: Vec<Vec<u8>>,
 }
 impl SecretWriter for Writer {
+    fn generate(&mut self, _path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+        Ok(Zeroizing::new(b"generated-value".to_vec()))
+    }
+    fn copy(&mut self, value: &[u8]) -> Result<(), String> {
+        self.copies.push(value.to_vec());
+        Ok(())
+    }
     fn write(
         &mut self,
         path: &str,
@@ -66,6 +74,7 @@ fn model(set: bool) -> Model {
         path: Some("h.services.s.key".into()),
         is_set: set,
         is_task: false,
+        can_generate: true,
         output_is_set: None,
     }])
 }
@@ -138,6 +147,7 @@ fn task_approval_exposes_input_and_target_output_status() {
         path: Some("h.services.backup.bootstrap".into()),
         is_set: false,
         is_task: true,
+        can_generate: false,
         output_is_set: None,
     }]);
     let mut writer = writer();
@@ -188,9 +198,11 @@ fn writer() -> Writer {
         requests: vec![],
         poll_error: false,
         approval_error: false,
+        copies: vec![],
     }
 }
 
+mod generation_tests;
 #[test]
 fn lost_lease_drops_the_modal_and_reports_expiry() {
     let mut frontend = FakeFrontend {

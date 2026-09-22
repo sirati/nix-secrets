@@ -3,7 +3,11 @@
 use nix_secrets_core::{EncryptedSecret, Schema, SecretPath};
 
 pub fn schema() -> Schema {
-    Schema::from_json(r#"{
+    Schema::from_json(schema_json()).unwrap()
+}
+
+pub fn schema_json() -> &'static str {
+    r#"{
         "host": {
             "metadata": { "socketPath": "/run/nix-secrets/backend.sock", "deployment": { "host": "host", "destination": "nix-secrets-forward@host", "port": 22 } },
             "services": {
@@ -25,7 +29,7 @@ pub fn schema() -> Schema {
             },
             "user-alice-services": {}
         }
-    }"#).unwrap()
+    }"#
 }
 
 pub fn path() -> SecretPath {

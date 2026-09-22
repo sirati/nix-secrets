@@ -1,6 +1,21 @@
 use super::*;
 
 impl SecretWriter for Controller {
+    fn generate(&mut self, path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+        let path = SecretPath::parse(path).map_err(|error| error.to_string())?;
+        let leaf = self.schema.leaf(&path).map_err(|error| error.to_string())?;
+        let policy = match leaf {
+            LeafSpec::Stored(spec) => spec.generation,
+            LeafSpec::Generated(spec) => spec.generation,
+        }
+        .ok_or_else(|| format!("generation is not authorized for {path}"))?;
+        crate::generator::generate(&manager_policy(policy)).map_err(|error| error.to_string())
+    }
+
+    fn copy(&mut self, value: &[u8]) -> Result<(), String> {
+        crate::clipboard::copy(value)
+    }
+
     fn write(
         &mut self,
         path: &str,
@@ -204,5 +219,52 @@ impl SecretWriter for Controller {
                 secrets: vec![path.to_string()],
             })
             .map_err(|error| error.to_string())
+    }
+}
+
+fn manager_policy(
+    policy: nix_secrets_core::GenerationPolicy,
+) -> crate::generator::GenerationPolicy {
+    use nix_secrets_core::{ByteEncoding, PassphraseSeparator, PasswordAlphabet};
+    match policy {
+        nix_secrets_core::GenerationPolicy::RandomPassword { length, alphabet } => {
+            let alphabet = match alphabet {
+                PasswordAlphabet::Alphanumeric => {
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+                }
+                PasswordAlphabet::AsciiSafe => concat!(
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+                    "!#$%&()*+,-./:;<=>?@[]^_{|}~"
+                ),
+            };
+            crate::generator::GenerationPolicy::Password {
+                length: usize::from(length),
+                alphabet: alphabet.into(),
+            }
+        }
+        nix_secrets_core::GenerationPolicy::RandomPassphrase {
+            words, separator, ..
+        } => crate::generator::GenerationPolicy::Passphrase {
+            words: usize::from(words),
+            separator: match separator {
+                PassphraseSeparator::Hyphen => "-",
+                PassphraseSeparator::Underscore => "_",
+                PassphraseSeparator::Space => " ",
+            }
+            .into(),
+            word_list: crate::generator::eff_large_words(),
+        },
+        nix_secrets_core::GenerationPolicy::RandomBytes { bytes, encoding } => {
+            crate::generator::GenerationPolicy::Bytes {
+                length: usize::from(bytes),
+                encoding: match encoding {
+                    ByteEncoding::Base64urlUnpadded => {
+                        crate::generator::ByteEncoding::Base64UrlUnpadded
+                    }
+                    ByteEncoding::Base64 => crate::generator::ByteEncoding::Base64,
+                    ByteEncoding::Hex => crate::generator::ByteEncoding::HexLower,
+                },
+            }
+        }
     }
 }

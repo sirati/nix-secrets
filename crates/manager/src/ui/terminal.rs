@@ -81,13 +81,28 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) {
 fn prompt(model: &Model) -> String {
     match &model.mode {
         Mode::Browse => model.message.clone().unwrap_or_else(|| {
-            "Enter: edit · paste: set · d: deploy selected set secret · Esc: quit".into()
+            let generate = model
+                .selected()
+                .filter(|row| row.can_generate)
+                .map(|_| " · g: generate")
+                .unwrap_or_default();
+            format!("Enter: edit · paste: set{generate} · d: deploy · Esc: quit")
         }),
         Mode::Edit { value, .. } => format!(
             "value: {}  (Enter saves, Esc cancels)",
             "•".repeat(value.len())
         ),
         Mode::Replace { path, .. } => format!("Replace {path}? y/n"),
+        Mode::GeneratedPreview {
+            value, revealed, ..
+        } => {
+            let preview = if *revealed {
+                std::str::from_utf8(value).unwrap_or("<non-UTF8 generated value>")
+            } else {
+                "••••••••"
+            };
+            format!("generated: {preview} · r: reveal/hide · c: copy · Enter: save · Esc: cancel")
+        }
         Mode::ProviderFailure { message, .. } => {
             format!("Provider failed: {message}. r: retry · Esc: cancel")
         }

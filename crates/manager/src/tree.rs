@@ -9,6 +9,7 @@ pub struct Row {
     pub path: Option<String>,
     pub is_set: bool,
     pub is_task: bool,
+    pub can_generate: bool,
     pub output_is_set: Option<bool>,
 }
 
@@ -51,12 +52,22 @@ fn visit(
     output: &mut Vec<Row>,
 ) {
     match node {
-        SecretNode::Secret(_) | SecretNode::Generated(_) => output.push(Row {
+        SecretNode::Secret(leaf) => output.push(Row {
             depth: depth.saturating_sub(1),
             name: path.rsplit('.').next().unwrap_or(path).to_owned(),
             path: Some(path.to_owned()),
             is_set: set.contains(path),
-            is_task: matches!(node, SecretNode::Generated(_)),
+            is_task: false,
+            can_generate: leaf.generation.is_some(),
+            output_is_set: None,
+        }),
+        SecretNode::Generated(leaf) => output.push(Row {
+            depth: depth.saturating_sub(1),
+            name: path.rsplit('.').next().unwrap_or(path).to_owned(),
+            path: Some(path.to_owned()),
+            is_set: set.contains(path),
+            is_task: true,
+            can_generate: leaf.generation.is_some(),
             output_is_set: None,
         }),
         SecretNode::Branch(children) => {
@@ -88,6 +99,7 @@ fn branch(depth: usize, name: &str) -> Row {
         path: None,
         is_set: false,
         is_task: false,
+        can_generate: false,
         output_is_set: None,
     }
 }
@@ -109,6 +121,7 @@ mod tests {
                 path: Some("host.services.mail.password".into()),
                 is_set: true,
                 is_task: false,
+                can_generate: false,
                 output_is_set: None,
             }
         );

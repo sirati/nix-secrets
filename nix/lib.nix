@@ -44,6 +44,48 @@ let
     !(lib.hasInfix "\n" key) && !(lib.hasInfix "\r" key)
     && builtins.match ''(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))[[:space:]]+[A-Za-z0-9+/]+={0,2}([[:space:]]+[^[:space:]].*)?'' key != null;
 
+  validateGeneration = generation:
+    let
+      type = generation.type or null;
+      specs = {
+        random-password = {
+          fields = [ "type" "length" "alphabet" ];
+          valid = generation ? length && generation ? alphabet
+            && builtins.isInt generation.length
+            && generation.length >= 16 && generation.length <= 256
+            && builtins.elem generation.alphabet [ "alphanumeric" "ascii-safe" ];
+        };
+        random-passphrase = {
+          fields = [ "type" "words" "separator" "wordList" ];
+          valid = generation ? words && generation ? separator && generation ? wordList
+            && builtins.isInt generation.words
+            && generation.words >= 6 && generation.words <= 24
+            && builtins.elem generation.separator [ "hyphen" "underscore" "space" ]
+            && generation.wordList == "eff-large";
+        };
+        random-bytes = {
+          fields = [ "type" "bytes" "encoding" ];
+          valid = generation ? bytes && generation ? encoding
+            && builtins.isInt generation.bytes
+            && generation.bytes >= 16 && generation.bytes <= 4096
+            && builtins.elem generation.encoding [ "base64url-unpadded" "base64" "hex" ];
+        };
+      };
+      spec = specs.${toString type} or null;
+      extra = if spec == null then [ ] else
+        builtins.filter (name: !(builtins.elem name spec.fields)) (attrNames generation);
+    in
+    if !isAttrs generation then
+      throw "secret generation policy must be an attribute set"
+    else if spec == null then
+      throw "unsupported secret generation policy ${toString type}"
+    else if extra != [ ] then
+      throw "secret generation policy has unknown fields: ${lib.concatStringsSep ", " extra}"
+    else if !spec.valid then
+      throw "secret generation policy ${type} has invalid or missing parameters"
+    else
+      generation;
+
   validateGeneratedSecret = serviceName: generated:
     let
       required = [ "type" "output" "bootstrap" ];
@@ -81,8 +123,12 @@ let
   normalizeLeaf = context: node:
     let
       keys = node.recipientPublicKeys or context.recipientPublicKeys;
+      allowed = [ "destination" "recipientPublicKeys" "consumerUnits" "generation" ];
+      extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in
-    if keys == [ ] then
+    if extra != [ ] then
+      throw "secret leaf has unknown fields: ${lib.concatStringsSep ", " extra}"
+    else if keys == [ ] then
       throw "secret ${node.destination.path} has no recipient public key"
     else
       builtins.removeAttrs node [ "recipientPublicKeys" ] // {
@@ -91,13 +137,15 @@ let
         recipientIds = map recipientId keys;
         destination = validateDestination context.serviceName node.destination;
         consumerUnits = node.consumerUnits or context.consumerUnits;
+      } // lib.optionalAttrs (node ? generation) {
+        generation = validateGeneration node.generation;
       };
 
   normalizeGeneratedLeaf = context: node:
     let
       keys = node.recipientPublicKeys or context.recipientPublicKeys;
       generated = validateGeneratedSecret context.serviceName node.generatedSecret;
-      allowed = [ "generatedSecret" "recipientPublicKeys" "consumerUnits" ];
+      allowed = [ "generatedSecret" "recipientPublicKeys" "consumerUnits" "generation" ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in
     if extra != [ ] then
@@ -111,6 +159,8 @@ let
         recipientIds = map recipientId keys;
         generatedSecret = generated;
         consumerUnits = node.consumerUnits or context.consumerUnits;
+      } // lib.optionalAttrs (node ? generation) {
+        generation = validateGeneration node.generation;
       };
 
   normalizeTree = context: tree:
@@ -177,5 +227,11 @@ let
     };
 in
 {
-  inherit collectLeaves normalizeHost normalizeService normalizeServices recipientId validSshPublicKey;
+  generators.backup = {
+    type = "random-bytes";
+    bytes = 32;
+    encoding = "base64url-unpadded";
+  };
+  inherit collectLeaves normalizeHost normalizeService normalizeServices recipientId
+    validSshPublicKey validateGeneration;
 }

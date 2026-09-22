@@ -2,7 +2,8 @@
 
 Import `nixosModules.default`, enable `services.nixSecrets`, and describe each
 secret as a leaf with a deployment destination. Configuration contains public
-metadata only.
+metadata only. Optional value-generation policies and their limits are in
+[`GENERATION-POLICIES.md`](../GENERATION-POLICIES.md).
 
 ```nix
 {
