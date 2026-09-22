@@ -106,9 +106,8 @@ impl ApprovalBroker {
         Ok(ids
             .into_iter()
             .filter_map(|id| self.entries.get(&id))
-            .filter_map(|entry| {
-                matches!(entry.state, State::Pending).then(|| entry.request.clone())
-            })
+            .filter(|entry| matches!(entry.state, State::Pending))
+            .map(|entry| entry.request.clone())
             .collect())
     }
 
@@ -236,10 +235,10 @@ impl ApprovalBroker {
 
 fn queue(frontend: &mut Frontend, id: String) {
     if frontend.known.insert(id.clone()) {
-        if frontend.queued.len() == MAX_QUEUE {
-            if let Some(old) = frontend.queued.pop_front() {
-                frontend.known.remove(&old);
-            }
+        if frontend.queued.len() == MAX_QUEUE
+            && let Some(old) = frontend.queued.pop_front()
+        {
+            frontend.known.remove(&old);
         }
         frontend.queued.push_back(id);
     }
