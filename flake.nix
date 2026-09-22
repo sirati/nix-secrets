@@ -75,6 +75,10 @@
       checks = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
+          generated-schema = import ./nix/tests/generated-schema.nix {
+            inherit pkgs;
+            secretsLib = self.lib;
+          };
           real-age = pkgs.callPackage ./nix/checks/real-age.nix { };
           inherit (self.packages.${system}) secrets-ready-waiter;
           secrets-ready-waiter-vm = import ./nix/tests/secrets-ready-waiter.nix {
@@ -82,6 +86,10 @@
             module = self.nixosModules.default;
           };
           deployment-vm = import ./nix/tests/deployment.nix {
+            inherit pkgs;
+            module = self.nixosModules.default;
+          };
+          storage-box-vm = import ./nix/tests/storage-box.nix {
             inherit pkgs;
             module = self.nixosModules.default;
           };

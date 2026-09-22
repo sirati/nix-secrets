@@ -3,6 +3,20 @@
 let
   cfg = config.services.nixSecrets.receiver;
   secrets = config.services.nixSecrets;
+  treeHasGeneratedSecret = tree:
+    lib.any (
+      name:
+      let node = tree.${name};
+      in builtins.isAttrs node && (
+        node ? generatedSecret || treeHasGeneratedSecret node
+      )
+    ) (builtins.attrNames tree);
+  servicesHaveGeneratedSecret = services:
+    lib.any (service: treeHasGeneratedSecret service.secrets) (
+      builtins.attrValues services
+    );
+  hasGeneratedSecrets = servicesHaveGeneratedSecret secrets.services
+    || lib.any servicesHaveGeneratedSecret (builtins.attrValues secrets.userServices);
 in
 {
   options.services.nixSecrets.receiver = {
@@ -71,7 +85,10 @@ in
         ProtectProc = "invisible";
         ProtectSystem = "strict";
         ReadWritePaths = [ "/persistent/secrets" ];
-        RestrictAddressFamilies = [ "AF_UNIX" ];
+        RestrictAddressFamilies = [ "AF_UNIX" ] ++ lib.optionals hasGeneratedSecrets [
+          "AF_INET"
+          "AF_INET6"
+        ];
         RestrictNamespaces = true;
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
