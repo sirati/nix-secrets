@@ -1,6 +1,6 @@
 use crate::model::{ApprovalRequest, Mode, Model, TaskApproval};
 use crate::tree::Row;
-use crate::ui::{drive, reduce, Action, Frontend, SecretWriter, UiEvent};
+use crate::ui::{drive, reduce, Action, Frontend, GenerateKind, SecretWriter, UiEvent};
 use std::collections::VecDeque;
 use std::io;
 use zeroize::Zeroizing;
@@ -15,7 +15,7 @@ struct Writer {
     copies: Vec<Vec<u8>>,
 }
 impl SecretWriter for Writer {
-    fn generate(&mut self, _path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    fn generate(&mut self, _path: &str, _kind: GenerateKind) -> Result<Zeroizing<Vec<u8>>, String> {
         Ok(Zeroizing::new(b"generated-value".to_vec()))
     }
     fn copy(&mut self, value: &[u8]) -> Result<(), String> {

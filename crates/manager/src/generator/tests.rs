@@ -35,7 +35,7 @@ fn password_rejects_the_biased_tail_before_selecting() {
     // 2^64 mod 3 is one. Zero must be rejected; three then maps to index zero.
     let mut random = ScriptedRandom::new(le(&[0, 3]));
     let result = generate_with(
-        &GenerationPolicy::Password {
+        &GeneratorOptions::Password {
             length: 1,
             alphabet: "abc".into(),
         },
@@ -59,7 +59,7 @@ fn accepted_domain_has_no_modulo_remainder() {
 fn password_supports_unique_unicode_characters() {
     let mut random = ScriptedRandom::new(le(&[3, 1, 2]));
     let result = generate_with(
-        &GenerationPolicy::Password {
+        &GeneratorOptions::Password {
             length: 3,
             alphabet: "aβ🦀".into(),
         },
@@ -72,7 +72,7 @@ fn password_supports_unique_unicode_characters() {
 #[test]
 fn passphrase_uses_configured_words_and_exact_separator() {
     let mut random = ScriptedRandom::new(le(&[2, 3, 1]));
-    let policy = GenerationPolicy::Passphrase {
+    let policy = GeneratorOptions::Passphrase {
         words: 3,
         separator: "::".into(),
         word_list: vec!["amber".into(), "birch".into(), "cedar".into()],
@@ -93,7 +93,7 @@ fn byte_encodings_are_exact() {
     ];
     for (encoding, expected) in cases {
         let mut random = ScriptedRandom::new([0xfb, 0xef, 0xff]);
-        let policy = GenerationPolicy::Bytes {
+        let policy = GeneratorOptions::Bytes {
             length: 3,
             encoding,
         };
@@ -104,7 +104,7 @@ fn byte_encodings_are_exact() {
 #[test]
 fn base64url_is_unpadded_for_partial_groups() {
     let mut random = ScriptedRandom::new([0xff]);
-    let policy = GenerationPolicy::Bytes {
+    let policy = GeneratorOptions::Bytes {
         length: 1,
         encoding: ByteEncoding::Base64UrlUnpadded,
     };
@@ -114,7 +114,7 @@ fn base64url_is_unpadded_for_partial_groups() {
 #[test]
 fn invalid_and_excessive_policies_are_rejected_before_randomness() {
     let mut random = ScriptedRandom::new([]);
-    let duplicate = GenerationPolicy::Password {
+    let duplicate = GeneratorOptions::Password {
         length: 10,
         alphabet: "aba".into(),
     };
@@ -122,7 +122,7 @@ fn invalid_and_excessive_policies_are_rejected_before_randomness() {
         generate_with(&duplicate, &mut random).unwrap_err(),
         Error::DuplicateAlphabetCharacter
     );
-    let excessive = GenerationPolicy::Bytes {
+    let excessive = GeneratorOptions::Bytes {
         length: MAX_OUTPUT_BYTES,
         encoding: ByteEncoding::HexLower,
     };
@@ -134,7 +134,7 @@ fn invalid_and_excessive_policies_are_rejected_before_randomness() {
 
 #[test]
 fn operating_system_source_produces_the_requested_size() {
-    let result = generate(&GenerationPolicy::Bytes {
+    let result = generate(&GeneratorOptions::Bytes {
         length: 32,
         encoding: ByteEncoding::Raw,
     })

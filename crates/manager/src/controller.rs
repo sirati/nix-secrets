@@ -2,9 +2,9 @@ use crate::client::BackendClient;
 use crate::deployment::{self, Connection};
 use crate::model::ApprovalRequest as UiApproval;
 use crate::tree::Row;
-use crate::ui::{Action, SecretWriter};
+use crate::ui::{Action, GenerateKind, SecretWriter};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use nix_secrets_core::{ApprovalRequest, LeafSpec, Schema, SecretPath};
+use nix_secrets_core::{ApprovalRequest, LeafSpec, Schema, SecretPath, ValueType};
 use nix_secrets_crypto::{decrypt_secret, AgeCommandProvider, EncryptedSecret, Recipient};
 use nix_secrets_transport::{
     DeployEntry, Destination, ExpectedSecret, ExpectedTarget, ExpectedTask, HostIdentity,
@@ -184,6 +184,7 @@ impl Controller {
     }
 }
 
+mod generate;
 mod registration;
 mod writer;
 

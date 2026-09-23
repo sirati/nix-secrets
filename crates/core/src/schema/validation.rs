@@ -22,7 +22,7 @@ pub(super) fn validate_tree(
             let path = leaf_path(host, namespace, service, parents);
             validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
             validate_destination(&path, service, &leaf.destination)?;
-            validate_generation(&path, leaf.generation.as_ref())
+            validate_value(&path, leaf.value_type, leaf.consumer_constraints.as_ref())
         }
         SecretNode::Generated(leaf) => {
             validate_generated(leaf_path(host, namespace, service, parents), service, leaf)
@@ -37,7 +37,7 @@ fn validate_generated(
 ) -> Result<(), SchemaError> {
     validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
     validate_destination(&path, service, &leaf.generated_secret.output)?;
-    validate_generation(&path, leaf.generation.as_ref())?;
+    validate_value(&path, leaf.value_type, leaf.consumer_constraints.as_ref())?;
     let bootstrap = match leaf.generated_secret.secret_type {
         super::GeneratedSecretType::StorageBoxSshKey => leaf
             .generated_secret
@@ -96,11 +96,23 @@ fn validate_generated(
     Ok(())
 }
 
-fn validate_generation(
+fn validate_value(
     path: &SecretPath,
-    generation: Option<&super::GenerationPolicy>,
+    value_type: Option<super::ValueType>,
+    constraints: Option<&super::ConsumerConstraints>,
 ) -> Result<(), SchemaError> {
-    generation.map_or(Ok(()), |policy| policy.validate(path))
+    if constraints.is_some() && value_type != Some(super::ValueType::Password) {
+        return Err(SchemaError::InvalidValueDefinition(
+            path.clone(),
+            "consumerConstraints requires valueType=password".into(),
+        ));
+    }
+    if let Some(constraints) = constraints {
+        constraints
+            .validate_definition()
+            .map_err(|error| SchemaError::InvalidValueDefinition(path.clone(), error))?;
+    }
+    Ok(())
 }
 
 fn validate_recipients(

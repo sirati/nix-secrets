@@ -36,6 +36,12 @@ pub enum Action {
     Rejected,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GenerateKind {
+    Password,
+    Passphrase,
+}
+
 pub trait SecretWriter {
     fn write(
         &mut self,
@@ -51,8 +57,8 @@ pub trait SecretWriter {
     fn request_deployment(&mut self, _path: &str) -> Result<(), String> {
         Ok(())
     }
-    fn generate(&mut self, _path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
-        Err("generation is not authorized for this secret".into())
+    fn generate(&mut self, _path: &str, _kind: GenerateKind) -> Result<Zeroizing<Vec<u8>>, String> {
+        Err("select a password leaf".into())
     }
     fn copy(&mut self, _value: &[u8]) -> Result<(), String> {
         Err("no clipboard provider is available".into())
@@ -108,6 +114,9 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             submit_if_edit(model, writer);
         }
         (Mode::Browse, UiEvent::Character('g')) => generated::begin(model, writer),
+        (choice @ Mode::GenerateChoice { .. }, event) => {
+            return generated::choose(model, writer, choice, event)
+        }
         (Mode::Browse, UiEvent::Character('d')) => {
             let selected = model.selected().cloned();
             match selected {

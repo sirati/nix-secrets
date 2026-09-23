@@ -4,7 +4,7 @@ let
   key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin";
   service = port: hostPublicKeys: {
     secrets.storage-key = {
-      generation = secretsLib.generators.backup;
+      valueType = "password";
       generatedSecret = {
         type = "storage-box-ssh-key";
         output = {
@@ -26,13 +26,18 @@ let
   generated = (normalize (service 23 [ key ])).storage-key;
   invalidPort = builtins.tryEval (builtins.deepSeq (normalize (service 22 [ key ])) true);
   duplicatePins = builtins.tryEval (
-    builtins.deepSeq (normalize (service 23 [ key key ])) true
+    builtins.deepSeq (normalize (
+      service 23 [
+        key
+        key
+      ]
+    )) true
   );
 in
 assert generated.kind == "generated";
 assert generated.generatedSecret.type == "storage-box-ssh-key";
 assert generated.generatedSecret.bootstrap.port == 23;
-assert generated.generation == secretsLib.generators.backup;
+assert generated.valueType == "password";
 assert !invalidPort.success;
 assert !duplicatePins.success;
 true

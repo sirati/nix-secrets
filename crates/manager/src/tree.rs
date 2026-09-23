@@ -1,5 +1,5 @@
 use nix_secrets_core::schema::SecretNode;
-use nix_secrets_core::Schema;
+use nix_secrets_core::{Schema, ValueType};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,7 +58,7 @@ fn visit(
             path: Some(path.to_owned()),
             is_set: set.contains(path),
             is_task: false,
-            can_generate: leaf.generation.is_some(),
+            can_generate: leaf.value_type == Some(ValueType::Password),
             output_is_set: None,
         }),
         SecretNode::Generated(leaf) => output.push(Row {
@@ -67,7 +67,7 @@ fn visit(
             path: Some(path.to_owned()),
             is_set: set.contains(path),
             is_task: true,
-            can_generate: leaf.generation.is_some(),
+            can_generate: leaf.value_type == Some(ValueType::Password),
             output_is_set: None,
         }),
         SecretNode::Branch(children) => {

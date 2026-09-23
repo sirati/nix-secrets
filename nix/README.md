@@ -2,8 +2,9 @@
 
 Import `nixosModules.default`, enable `services.nixSecrets`, and describe each
 secret as a leaf with a deployment destination. Configuration contains public
-metadata only. Optional value-generation policies and their limits are in
-[`GENERATION-POLICIES.md`](../GENERATION-POLICIES.md).
+metadata only. A password leaf may declare `valueType = "password"` and optional
+consumer format limits. The TUI offers password and passphrase generation as
+an operator choice.
 
 ```nix
 {
@@ -13,21 +14,27 @@ metadata only. Optional value-generation policies and their limits are in
     services.mail = {
       consumerUnits = [ "stalwart-mail.service" ];
       secrets = {
-        database-password.destination = {
-          path = "/persistent/secrets/mail/service/database-password";
-          category = "service";
-          owner = "stalwart-mail";
-          group = "stalwart-mail";
-          mode = "0400";
+        database-password = {
+          valueType = "password";
+          destination = {
+            path = "/persistent/secrets/mail/service/database-password";
+            category = "service";
+            owner = "stalwart-mail";
+            group = "stalwart-mail";
+            mode = "0400";
+          };
         };
         backup = {
           _recipientPublicKeys = [ "ssh-ed25519 AAAA... backup-operator" ];
-          passphrase.destination = {
-            path = "/persistent/secrets/mail/backup/passphrase";
-            category = "backup";
-            owner = "mail-backup";
-            group = "mail-backup";
-            mode = "0400";
+          passphrase = {
+            valueType = "password";
+            destination = {
+              path = "/persistent/secrets/mail/backup/passphrase";
+              category = "backup";
+              owner = "mail-backup";
+              group = "mail-backup";
+              mode = "0400";
+            };
           };
         };
       };
@@ -36,24 +43,33 @@ metadata only. Optional value-generation policies and their limits are in
 }
 ```
 
+Only consumer compatibility limits belong in `consumerConstraints`. For example,
+if a program rejects values longer than 64 characters, declare
+`consumerConstraints.cannotHandleLongerThan = 64;`. The optional fields are
+`cannotHandleShorterThan`, `cannotHandleLongerThan`, and `matchingRegex`.
+They are enforced for typed passwords entered, pasted, or generated in the TUI.
+
 A generated Storage Box key leaf consumes an operator-encrypted bootstrap
 password and publishes only its locally generated private key at `output`:
 
 ```nix
-services.nixSecrets.services.backup.secrets.storage-key.generatedSecret = {
-  type = "storage-box-ssh-key";
-  output = {
-    path = "/persistent/secrets/backup/backup/storage-key";
-    category = "backup";
-    owner = "backup";
-    group = "backup";
-    mode = "0400";
-  };
-  bootstrap = {
-    host = "u123.storagebox.example";
-    port = 23;
-    user = "u123";
-    hostPublicKeys = [ "ssh-ed25519 AAAA... pinned-storage-box-host" ];
+services.nixSecrets.services.backup.secrets.storage-key = {
+  valueType = "password";
+  generatedSecret = {
+    type = "storage-box-ssh-key";
+    output = {
+      path = "/persistent/secrets/backup/backup/storage-key";
+      category = "backup";
+      owner = "backup";
+      group = "backup";
+      mode = "0400";
+    };
+    bootstrap = {
+      host = "u123.storagebox.example";
+      port = 23;
+      user = "u123";
+      hostPublicKeys = [ "ssh-ed25519 AAAA... pinned-storage-box-host" ];
+    };
   };
 };
 ```

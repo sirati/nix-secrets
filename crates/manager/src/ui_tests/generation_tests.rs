@@ -5,6 +5,8 @@ fn generated_value_is_masked_and_copy_is_explicit() {
     let mut model = model(false);
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('g'), &mut writer);
+    assert!(matches!(model.mode, Mode::GenerateChoice { .. }));
+    reduce(&mut model, UiEvent::Character('p'), &mut writer);
     assert!(matches!(
         model.mode,
         Mode::GeneratedPreview {
@@ -34,6 +36,7 @@ fn generated_replacement_requires_confirmation() {
     let mut model = model(true);
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('g'), &mut writer);
+    reduce(&mut model, UiEvent::Character('w'), &mut writer);
     reduce(&mut model, UiEvent::Enter, &mut writer);
     assert!(matches!(model.mode, Mode::Replace { .. }));
     assert!(writer.writes.is_empty());
@@ -46,22 +49,20 @@ fn generated_unset_value_is_encrypted_immediately_after_acceptance() {
     let mut model = model(false);
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('g'), &mut writer);
+    reduce(&mut model, UiEvent::Character('p'), &mut writer);
     reduce(&mut model, UiEvent::Enter, &mut writer);
     assert_eq!(writer.writes, [b"generated-value"]);
     assert!(model.rows[0].is_set);
 }
 
 #[test]
-fn unauthorized_generation_does_not_open_a_preview() {
+fn non_password_leaf_does_not_open_a_preview() {
     let mut model = model(false);
     let mut writer = writer();
     model.rows[0].can_generate = false;
     reduce(&mut model, UiEvent::Character('g'), &mut writer);
     assert!(matches!(model.mode, Mode::Browse));
-    assert_eq!(
-        model.message.as_deref(),
-        Some("generation is not authorized for this secret")
-    );
+    assert_eq!(model.message.as_deref(), Some("select a password leaf"));
 }
 
 #[test]

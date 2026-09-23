@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{Destination, GenerationPolicy};
+use super::{ConsumerConstraints, Destination, ValueType};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -14,7 +14,10 @@ pub struct GeneratedSecretLeaf {
     pub generated_secret: GeneratedSecret,
     #[serde(rename = "consumerUnits")]
     pub consumer_units: Vec<String>,
-    pub generation: Option<GenerationPolicy>,
+    #[serde(rename = "valueType", default)]
+    pub value_type: Option<ValueType>,
+    #[serde(rename = "consumerConstraints", default)]
+    pub consumer_constraints: Option<ConsumerConstraints>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

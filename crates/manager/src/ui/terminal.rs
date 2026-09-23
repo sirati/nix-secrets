@@ -93,6 +93,7 @@ fn prompt(model: &Model) -> String {
             "•".repeat(value.len())
         ),
         Mode::Replace { path, .. } => format!("Replace {path}? y/n"),
+        Mode::GenerateChoice { .. } => "Generate p: password · w: passphrase · Esc: cancel".into(),
         Mode::GeneratedPreview {
             value, revealed, ..
         } => {

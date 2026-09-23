@@ -31,6 +31,10 @@ pub enum Mode {
         path: String,
         value: Zeroizing<Vec<u8>>,
     },
+    GenerateChoice {
+        path: String,
+        replacing: bool,
+    },
     GeneratedPreview {
         path: String,
         value: Zeroizing<Vec<u8>>,
@@ -58,6 +62,11 @@ impl fmt::Debug for Mode {
                 .debug_struct("Replace")
                 .field("path", path)
                 .field("value", &"<redacted>")
+                .finish(),
+            Self::GenerateChoice { path, replacing } => formatter
+                .debug_struct("GenerateChoice")
+                .field("path", path)
+                .field("replacing", replacing)
                 .finish(),
             Self::GeneratedPreview {
                 path,

@@ -1,8 +1,6 @@
 mod common;
 
-use nix_secrets_core::{
-    ByteEncoding, GeneratedSecretType, GenerationPolicy, LeafSpec, Schema, SchemaError, SecretPath,
-};
+use nix_secrets_core::{GeneratedSecretType, LeafSpec, Schema, SchemaError, SecretPath, ValueType};
 use serde_json::json;
 
 const KEY: &str =
@@ -77,20 +75,15 @@ fn rejects_invalid_generated_secret_boundaries() {
 }
 
 #[test]
-fn generated_task_input_accepts_generation_policy() {
+fn generated_task_input_can_be_a_password() {
     let mut value: serde_json::Value =
         serde_json::from_str(&generated_schema(23, vec![KEY], None)).unwrap();
-    value["host"]["services"]["backup"]["storage-key"]["generation"] = json!({
-        "type": "random-bytes", "bytes": 32, "encoding": "base64url-unpadded"
-    });
+    value["host"]["services"]["backup"]["storage-key"]["valueType"] = json!("password");
     let schema = Schema::from_json(&value.to_string()).unwrap();
     let path = SecretPath::parse("host.services.backup.storage-key").unwrap();
     assert_eq!(
-        schema.generated_secret(&path).unwrap().generation,
-        Some(GenerationPolicy::RandomBytes {
-            bytes: 32,
-            encoding: ByteEncoding::Base64urlUnpadded,
-        })
+        schema.generated_secret(&path).unwrap().value_type,
+        Some(ValueType::Password)
     );
 }
 

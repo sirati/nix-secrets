@@ -14,7 +14,7 @@ are rejected.
 - **Deployment relay** carries a byte stream between the TUI and target. It
   does not terminate the target SSH session.
 - **Target receiver** validates its requirements and atomically installs an
-  approved generation.
+  user-selected password or passphrase generation.
 - **Readiness waiter** checks declared paths by metadata without opening secret
   files. Only consuming units depend on it.
 

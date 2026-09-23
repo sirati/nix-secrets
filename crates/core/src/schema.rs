@@ -4,15 +4,13 @@ use std::fmt;
 use thiserror::Error;
 
 mod generated;
-mod generation;
 mod validation;
+mod value;
 pub use generated::{
     GeneratedKind, GeneratedSecret, GeneratedSecretLeaf, GeneratedSecretType, StorageBoxBootstrap,
 };
-pub use generation::{
-    ByteEncoding, GenerationPolicy, PassphraseSeparator, PassphraseWordList, PasswordAlphabet,
-};
 use validation::{validate_component, validate_namespace, validate_tree};
+pub use value::{ConsumerConstraints, ValueType};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(transparent)]
@@ -60,7 +58,10 @@ pub struct SecretLeaf {
     pub destination: Destination,
     #[serde(rename = "consumerUnits")]
     pub consumer_units: Vec<String>,
-    pub generation: Option<GenerationPolicy>,
+    #[serde(rename = "valueType", default)]
+    pub value_type: Option<ValueType>,
+    #[serde(rename = "consumerConstraints", default)]
+    pub consumer_constraints: Option<ConsumerConstraints>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -94,7 +95,8 @@ pub struct SecretSpec {
     pub recipient_ids: Vec<String>,
     pub destination: Destination,
     pub consumer_units: Vec<String>,
-    pub generation: Option<GenerationPolicy>,
+    pub value_type: Option<ValueType>,
+    pub consumer_constraints: Option<ConsumerConstraints>,
 }
 
 #[derive(Clone, Debug)]
@@ -104,7 +106,8 @@ pub struct GeneratedSecretSpec {
     pub recipient_ids: Vec<String>,
     pub generated_secret: GeneratedSecret,
     pub consumer_units: Vec<String>,
-    pub generation: Option<GenerationPolicy>,
+    pub value_type: Option<ValueType>,
+    pub consumer_constraints: Option<ConsumerConstraints>,
 }
 
 #[derive(Clone, Debug)]
@@ -133,8 +136,8 @@ pub enum SchemaError {
     RecipientCount(SecretPath),
     #[error("invalid destination for {0}: {1}")]
     InvalidDestination(SecretPath, String),
-    #[error("invalid generation policy for {0}")]
-    InvalidGeneration(SecretPath),
+    #[error("invalid value definition for {0}: {1}")]
+    InvalidValueDefinition(SecretPath, String),
 }
 
 #[derive(Debug, Error)]
@@ -246,7 +249,8 @@ impl Schema {
                 recipient_ids: leaf.recipient_ids.clone(),
                 destination: leaf.destination.clone(),
                 consumer_units: leaf.consumer_units.clone(),
-                generation: leaf.generation.clone(),
+                value_type: leaf.value_type,
+                consumer_constraints: leaf.consumer_constraints.clone(),
             })),
             SecretNode::Generated(leaf) => Ok(LeafSpec::Generated(GeneratedSecretSpec {
                 path: path.clone(),
@@ -254,7 +258,8 @@ impl Schema {
                 recipient_ids: leaf.recipient_ids.clone(),
                 generated_secret: leaf.generated_secret.clone(),
                 consumer_units: leaf.consumer_units.clone(),
-                generation: leaf.generation.clone(),
+                value_type: leaf.value_type,
+                consumer_constraints: leaf.consumer_constraints.clone(),
             })),
         }
     }

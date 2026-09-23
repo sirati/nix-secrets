@@ -6,7 +6,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_ALPHABET_CHARS: usize = 4096;
-const MAX_WORDS: usize = 4096;
+const MAX_WORDS: usize = 8192;
 const MAX_WORD_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,7 +18,7 @@ pub enum ByteEncoding {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum GenerationPolicy {
+pub enum GeneratorOptions {
     Password {
         length: usize,
         alphabet: String,
@@ -72,7 +72,7 @@ impl RandomSource for OsRandom {
     }
 }
 
-pub fn generate(policy: &GenerationPolicy) -> Result<Zeroizing<Vec<u8>>, Error> {
+pub fn generate(policy: &GeneratorOptions) -> Result<Zeroizing<Vec<u8>>, Error> {
     generate_with(policy, &mut OsRandom)
 }
 
@@ -84,17 +84,17 @@ pub fn eff_large_words() -> Vec<String> {
 }
 
 pub fn generate_with(
-    policy: &GenerationPolicy,
+    policy: &GeneratorOptions,
     random: &mut impl RandomSource,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
     match policy {
-        GenerationPolicy::Password { length, alphabet } => password(*length, alphabet, random),
-        GenerationPolicy::Passphrase {
+        GeneratorOptions::Password { length, alphabet } => password(*length, alphabet, random),
+        GeneratorOptions::Passphrase {
             words,
             separator,
             word_list,
         } => passphrase(*words, separator, word_list, random),
-        GenerationPolicy::Bytes { length, encoding } => fixed_bytes(*length, *encoding, random),
+        GeneratorOptions::Bytes { length, encoding } => fixed_bytes(*length, *encoding, random),
     }
 }
 
