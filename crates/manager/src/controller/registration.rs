@@ -1,4 +1,5 @@
 use super::*;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use std::collections::BTreeMap;
 
 impl Controller {
@@ -126,14 +127,26 @@ fn parse_dated_key(value: &str) -> Result<(&str, &str), String> {
     let stamp = fields.next().ok_or("missing target key timestamp")?;
     let algorithm = fields.next().ok_or("missing public key algorithm")?;
     let material = fields.next().ok_or("missing public key material")?;
+    let valid_stamp = stamp.len() == 19
+        && stamp.bytes().enumerate().all(|(index, byte)| {
+            if index == 8 {
+                byte == b'T'
+            } else if index == 18 {
+                byte == b'Z'
+            } else {
+                byte.is_ascii_digit()
+            }
+        });
+    let valid_blob = STANDARD.decode(material).ok().is_some_and(|blob| {
+        blob.len() == 51
+            && &blob[..15] == b"\0\0\0\x0bssh-ed25519"
+            && &blob[15..19] == b"\0\0\0\x20"
+    });
     if fields.next().is_some()
-        || stamp.len() != 19
-        || !stamp.bytes().all(|b| b.is_ascii_alphanumeric())
+        || !valid_stamp
         || algorithm != "ssh-ed25519"
         || material.len() != 68
-        || !material
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+        || !valid_blob
     {
         return Err("invalid target generated public key".into());
     }
@@ -156,6 +169,15 @@ fn merge_named_key(lines: &str, host: &str, name: &str, public_key: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn validates_target_timestamp_and_ed25519_blob() {
+        let mut blob = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+        blob.extend_from_slice(&[7; 32]);
+        let key = format!("20260923T120001123Z ssh-ed25519 {}", STANDARD.encode(blob));
+        assert!(parse_dated_key(&key).is_ok());
+        assert!(parse_dated_key(&key.replace("20260923T", "20260923X")).is_err());
+        assert!(parse_dated_key("20260923T120001123Z ssh-ed25519 AAAA").is_err());
+    }
     #[test]
     fn replaces_only_same_hosts_key() {
         let current =
