@@ -53,7 +53,7 @@ fn parses_and_looks_up_generated_secret() {
         spec.generated_secret.secret_type,
         GeneratedSecretType::StorageBoxSshKey
     ));
-    assert_eq!(spec.generated_secret.bootstrap.port, 23);
+    assert_eq!(spec.generated_secret.bootstrap.as_ref().unwrap().port, 23);
     assert_eq!(
         spec.generated_secret.output.path,
         "/persistent/secrets/backup/backup/storage-key"

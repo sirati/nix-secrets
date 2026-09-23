@@ -105,6 +105,34 @@ impl BackendClient {
         recipients: &[Recipient<'_>],
         provider: &impl CryptoProvider,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.set_with_expected(path, plaintext, recipients, provider, None)
+    }
+
+    pub fn set_if_version(
+        &mut self,
+        path: &SecretPath,
+        plaintext: &[u8],
+        recipients: &[Recipient<'_>],
+        provider: &impl CryptoProvider,
+        expected_version: Option<Vec<u8>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.set_with_expected(
+            path,
+            plaintext,
+            recipients,
+            provider,
+            Some(expected_version),
+        )
+    }
+
+    fn set_with_expected(
+        &mut self,
+        path: &SecretPath,
+        plaintext: &[u8],
+        recipients: &[Recipient<'_>],
+        provider: &impl CryptoProvider,
+        expected_version: Option<Option<Vec<u8>>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let encrypted = encrypt_secret(&path.to_string(), plaintext, recipients, provider)?;
         let envelope = StoredSecret {
             format_version: encrypted.format_version,
@@ -112,10 +140,18 @@ impl BackendClient {
             recipient_ids: encrypted.recipient_ids,
             age_ciphertext: encrypted.age_ciphertext,
         };
-        match self.exchange(&Request::Set {
-            path: path.clone(),
-            envelope,
-        })? {
+        let request = match expected_version {
+            Some(expected_version) => Request::SetIfVersion {
+                path: path.clone(),
+                envelope,
+                expected_version,
+            },
+            None => Request::Set {
+                path: path.clone(),
+                envelope,
+            },
+        };
+        match self.exchange(&request)? {
             Response::Updated => Ok(()),
             Response::Error { message } => Err(message.into()),
             response => Err(unexpected(response).into()),

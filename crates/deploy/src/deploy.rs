@@ -77,6 +77,13 @@ impl Deployer {
     }
 
     pub fn deploy(&self, batch: &ResolvedBatch) -> Result<(), DeployError> {
+        self.deploy_inner(batch, None).map(|_| ())
+    }
+
+    pub fn deploy_with_previous(
+        &self,
+        batch: &ResolvedBatch,
+    ) -> Result<BTreeMap<String, String>, DeployError> {
         self.deploy_inner(batch, None)
     }
 
@@ -84,11 +91,12 @@ impl Deployer {
         &self,
         batch: &ResolvedBatch,
         fail: Option<FailurePoint>,
-    ) -> Result<(), DeployError> {
+    ) -> Result<BTreeMap<String, String>, DeployError> {
         let entries = validate(batch)?;
         self.prepare_root()?;
         let _lock = self.lock_deployments()?;
         self.prepare_store()?;
+        let previous = self.current_versions()?;
         fail_at(fail, FailurePoint::StorePrepared)?;
         let id = generation_id();
         let store = self.root.join(".generations");
@@ -126,7 +134,7 @@ impl Deployer {
         sync_directory(&self.root)?;
         fail_at(fail, FailurePoint::PointerSynced)?;
         self.prune_generations(&id)?;
-        Ok(())
+        Ok(previous)
     }
 
     fn prepare_root(&self) -> Result<(), DeployError> {

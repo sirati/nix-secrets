@@ -122,6 +122,7 @@ impl Controller {
             self.prepare_active()?;
         }
         let active = self.active.as_ref().expect("active approval exists");
+        let source_host = active.request.target.clone();
         let entries = self.client.list().map_err(|error| error.to_string())?;
         let identifiers = active.request.secrets.clone();
         let mut deploy_entries = Vec::new();
@@ -164,7 +165,8 @@ impl Controller {
             .prepared
             .take()
             .expect("prepared above");
-        deployment::deploy(prepared, deploy_entries, task_entries)?;
+        let public_keys = deployment::deploy(prepared, deploy_entries, task_entries)?;
+        self.register_public_keys(&source_host, &public_keys)?;
         let active = self.active.take().expect("approval remains active");
         self.client
             .resolve(active.request.id, active.lease_id, true)
@@ -182,6 +184,7 @@ impl Controller {
     }
 }
 
+mod registration;
 mod writer;
 
 fn expected_target(schema: &Schema, request: &ApprovalRequest) -> Result<ExpectedTarget, String> {
@@ -197,15 +200,24 @@ fn expected_target(schema: &Schema, request: &ApprovalRequest) -> Result<Expecte
             }),
             LeafSpec::Generated(spec) => tasks.push(ExpectedTask {
                 identifier: identifier.clone(),
-                task_type: STORAGE_BOX_SSH_KEY.into(),
+                task_type: match spec.generated_secret.secret_type {
+                    nix_secrets_core::GeneratedSecretType::StorageBoxSshKey => STORAGE_BOX_SSH_KEY,
+                    nix_secrets_core::GeneratedSecretType::LocalSshKey => {
+                        nix_secrets_transport::LOCAL_SSH_KEY
+                    }
+                }
+                .into(),
                 recipient_ids: spec.recipient_ids,
                 output: destination(spec.generated_secret.output, spec.consumer_units),
-                bootstrap: StorageBoxBootstrap {
-                    host: spec.generated_secret.bootstrap.host,
-                    port: spec.generated_secret.bootstrap.port,
-                    user: spec.generated_secret.bootstrap.user,
-                    host_public_keys: spec.generated_secret.bootstrap.host_public_keys,
-                },
+                bootstrap: spec
+                    .generated_secret
+                    .bootstrap
+                    .map(|bootstrap| StorageBoxBootstrap {
+                        host: bootstrap.host,
+                        port: bootstrap.port,
+                        user: bootstrap.user,
+                        host_public_keys: bootstrap.host_public_keys,
+                    }),
             }),
         }
     }

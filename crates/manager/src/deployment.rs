@@ -2,6 +2,7 @@ use nix_secrets_transport::{
     Decision, DeployEntry, DeploymentResult, ExpectedTarget, HostIdentity, HostKeyPreflight,
     HostKeyStatus, HostKeyVerifier, OpenSsh, PreparedDeployment, TaskEntry,
 };
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -70,15 +71,17 @@ pub fn deploy(
     prepared: PreparedDeployment,
     entries: Vec<DeployEntry>,
     tasks: Vec<TaskEntry>,
-) -> Result<(), String> {
+) -> Result<BTreeMap<String, String>, String> {
     match prepared
         .deploy_with_tasks(entries, tasks)
         .map_err(|error| error.to_string())?
     {
-        DeploymentResult::Applied { .. } => {}
+        DeploymentResult::Applied {
+            generated_public_keys,
+            ..
+        } => return Ok(generated_public_keys),
         DeploymentResult::Rejected { message } => {
             return Err(format!("target rejected deployment: {message}"))
         }
     }
-    Ok(())
 }

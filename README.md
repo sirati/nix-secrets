@@ -20,13 +20,13 @@ nix-secrets [SSH_ARG ...] -- REPOSITORY
 When no argument appears before `--`, the repository and backend are local:
 
 ```console
-$ nix-secrets -- ~/devel/nix/sirati-nixos
+$ nix-secrets -- ~/projects/infrastructure
 ```
 
 Otherwise every argument before `--` is passed directly to OpenSSH:
 
 ```console
-$ nix-secrets -p 222 user@workstation -- ~/devel/nix/sirati-nixos
+$ nix-secrets -p 222 user@workstation -- ~/projects/infrastructure
 ```
 
 `REPOSITORY` is one argument. On a remote backend, a leading `~/` is expanded
@@ -128,6 +128,25 @@ Only a consuming service depends on its readiness waiter. SSH remains
 available independently so a fresh installation can receive secrets. Missing
 secrets keep their consumers unavailable, which also prevents a machine with
 required services missing from being marked as a successful boot.
+
+Each successful receiver transaction writes a root-owned audit event under
+`/run/nix-secrets/audit/`. It records the target hostname, time, secret
+identifiers, and whether each secret was newly set or replaced. It never
+records secret values. `services.nixSecrets.receiver.auditGroup` grants a
+reporter read access to the event without granting access to secret files.
+
+`local-ssh-key` is a generated secret type for an Ed25519 key kept on the
+target. The target mixes the operator's random contribution into its kernel
+random source, generates or reuses the private key, and returns a dated public
+key. Optional `generatedSecret.registerAt` names a stored secret for the
+public-key inventory. The operator-side deployer adds the verified target
+hostname to the key name and updates that inventory in the encrypted backend.
+It queues a separate approval to deploy the changed inventory to its target.
+Declare its destination with `contentType = "named-ssh-ed25519-public-keys"`
+and `authorizedForUser = "<ssh-account>"`; the receiver then refuses values
+that are not unique named Ed25519 public keys. Registration uses a conditional
+write so two operators cannot silently overwrite each other's key inventory.
+Audit events include the receiving SSH account and key names.
 
 See [PROTOCOL.md](PROTOCOL.md) for message flow and
 [THREAT-MODEL.md](THREAT-MODEL.md) for the security boundary.

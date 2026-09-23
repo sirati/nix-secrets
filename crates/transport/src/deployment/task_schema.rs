@@ -6,11 +6,20 @@ pub(super) fn validate_task_spec(
     identifier: &str,
     kind: &str,
     output: &Destination,
-    bootstrap: &StorageBoxBootstrap,
+    bootstrap: &Option<StorageBoxBootstrap>,
 ) -> Result<(), DeploymentError> {
+    if kind == LOCAL_SSH_KEY {
+        if bootstrap.is_some() || output.category != "service" {
+            return Err(DeploymentError::Invalid("invalid local SSH key task"));
+        }
+        return validate_output(identifier, output);
+    }
     if kind != STORAGE_BOX_SSH_KEY {
         return Err(DeploymentError::Invalid("unsupported generated task type"));
     }
+    let bootstrap = bootstrap
+        .as_ref()
+        .ok_or(DeploymentError::Invalid("missing storage box bootstrap"))?;
     if bootstrap.port != 23 || bootstrap.host.is_empty() || bootstrap.user.is_empty() {
         return Err(DeploymentError::Invalid("invalid storage box endpoint"));
     }

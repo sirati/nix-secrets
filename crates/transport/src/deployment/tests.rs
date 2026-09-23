@@ -29,12 +29,12 @@ fn task(identifier: &str, version: Option<&str>) -> TargetTask {
         task_type: STORAGE_BOX_SSH_KEY.into(),
         recipient_ids: vec!["operator".into()],
         output,
-        bootstrap: StorageBoxBootstrap {
+        bootstrap: Some(StorageBoxBootstrap {
             host: "box.example".into(),
             port: 23,
             user: "u1".into(),
             host_public_keys: vec!["ssh-ed25519 AAAA".into()],
-        },
+        }),
         current_version_id: version.map(str::to_owned),
     }
 }
@@ -84,7 +84,7 @@ fn target_validation_rejects_task_substitution() {
     let expected = expected(&[], std::slice::from_ref(&actual_task));
     assert!(validate_target(&state(&[], vec![actual_task.clone()]), &expected).is_ok());
     let mut substituted = actual_task;
-    substituted.bootstrap.host = "attacker.example".into();
+    substituted.bootstrap.as_mut().unwrap().host = "attacker.example".into();
     assert!(validate_target(&state(&[], vec![substituted]), &expected).is_err());
 }
 
@@ -165,7 +165,7 @@ fn server_sends_selected_task_then_applies_exact_batch() {
     write_wire_json(&mut input, &batch).unwrap();
     let mut output = Vec::new();
     serve_deployment(input.as_slice(), &mut output, target.clone(), |_| {
-        Ok(BTreeMap::from([(id.into(), "v1".into())]))
+        Ok((BTreeMap::from([(id.into(), "v1".into())]), BTreeMap::new()))
     })
     .unwrap();
     let mut cursor = output.as_slice();

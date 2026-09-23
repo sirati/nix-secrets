@@ -1,5 +1,9 @@
 use super::*;
 
+fn errno(error: nix::errno::Errno) -> DeployError {
+    DeployError::Invalid(format!("account lookup failed: {error}"))
+}
+
 pub(super) fn flatten(
     hostname: &str,
     namespace: &str,

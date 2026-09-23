@@ -75,6 +75,32 @@ fn replacement_keeps_the_canonical_identifier_and_resolution() {
 }
 
 #[test]
+fn conditional_set_rejects_stale_public_key_inventory() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = SecretStore::new(directory.path().join("nix-secrets.toml"));
+    let schema = common::schema();
+    let path = common::path();
+    let first = common::envelope("first");
+    let second = common::envelope("second");
+    let stale = common::envelope("stale");
+    store
+        .set_if_version(&schema, &path, first.clone(), None)
+        .unwrap();
+    assert!(matches!(
+        store.set_if_version(&schema, &path, second.clone(), None),
+        Err(StoreError::VersionConflict)
+    ));
+    store
+        .set_if_version(&schema, &path, second.clone(), Some(&first.version_id))
+        .unwrap();
+    assert!(matches!(
+        store.set_if_version(&schema, &path, stale, Some(&first.version_id)),
+        Err(StoreError::VersionConflict)
+    ));
+    assert_eq!(store.get(&path).unwrap(), Some(second));
+}
+
+#[test]
 fn validates_recipient_before_writing() {
     let directory = tempfile::tempdir().unwrap();
     let store = SecretStore::new(directory.path().join("nix-secrets.toml"));

@@ -80,7 +80,12 @@ pub(super) fn validate_target(
     Ok(())
 }
 type SecretSpec = (Vec<String>, Destination);
-type TaskSpec = (String, Vec<String>, Destination, StorageBoxBootstrap);
+type TaskSpec = (
+    String,
+    Vec<String>,
+    Destination,
+    Option<StorageBoxBootstrap>,
+);
 
 fn map_target_secrets(
     items: &[TargetSecret],
@@ -150,7 +155,7 @@ fn task_spec(
     kind: &str,
     recipients: &[String],
     output: &Destination,
-    bootstrap: &StorageBoxBootstrap,
+    bootstrap: &Option<StorageBoxBootstrap>,
 ) -> TaskSpec {
     (
         kind.into(),

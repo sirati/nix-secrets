@@ -14,7 +14,9 @@ pub fn serve_deployment<R, W, F>(
 where
     R: Read,
     W: Write,
-    F: FnOnce(DeploymentBatch) -> Result<BTreeMap<String, String>, String>,
+    F: FnOnce(
+        DeploymentBatch,
+    ) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), String>,
 {
     validate_server_state(&state)?;
     let selection: DeploymentSelection = read_wire_json(&mut input)?;
@@ -38,7 +40,10 @@ where
     )?;
     validate_batch(&batch, &selected_state)?;
     let result = match apply(batch) {
-        Ok(versions) => DeploymentResult::Applied { versions },
+        Ok((versions, generated_public_keys)) => DeploymentResult::Applied {
+            versions,
+            generated_public_keys,
+        },
         Err(message) => DeploymentResult::Rejected { message },
     };
     write_wire_json(&mut output, &result)

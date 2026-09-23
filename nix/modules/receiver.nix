@@ -35,6 +35,11 @@ in
       default = "nix-secrets-deploy";
       description = "Group allowed to reach the fixed deployment socket.";
     };
+    auditGroup = lib.mkOption {
+      type = lib.types.str;
+      default = "root";
+      description = "Group allowed to read deployment audit events without accessing secrets.";
+    };
   };
 
   config = lib.mkIf (secrets.enable && cfg.enable) {
@@ -65,6 +70,8 @@ in
         ExecStart = lib.escapeShellArgs [
           "${cfg.package}/bin/secret-deploy"
           "--manifest" (toString config.system.build.nixSecretsManifest)
+          "--audit-file" "/run/nix-secrets/audit/%i.json"
+          "--audit-group" cfg.auditGroup
         ];
         UMask = "0077";
         CapabilityBoundingSet = [
@@ -84,7 +91,7 @@ in
         ProtectKernelTunables = true;
         ProtectProc = "invisible";
         ProtectSystem = "strict";
-        ReadWritePaths = [ "/persistent/secrets" ];
+        ReadWritePaths = [ "/persistent/secrets" "/run/nix-secrets/audit" ];
         RestrictAddressFamilies = [ "AF_UNIX" ] ++ lib.optionals hasGeneratedSecrets [
           "AF_INET"
           "AF_INET6"
@@ -98,7 +105,8 @@ in
     };
 
     systemd.tmpfiles.rules = [
-      "d /run/nix-secrets 0750 root ${cfg.accessGroup} - -"
+      "d /run/nix-secrets 0711 root root - -"
+      "d /run/nix-secrets/audit 0750 root ${cfg.auditGroup} - -"
       "d /persistent/secrets 0711 root root - -"
       "d /persistent/secrets/.generations 0711 root root - -"
     ];

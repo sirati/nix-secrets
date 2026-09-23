@@ -14,6 +14,8 @@ fn entry(service: &str, secret: &str, contents: &[u8]) -> ResolvedSecret {
         owner: geteuid().as_raw(),
         group: getegid().as_raw(),
         mode: 0o440,
+        audit_ssh_user: None,
+        audit_key_names: Vec::new(),
     }
 }
 

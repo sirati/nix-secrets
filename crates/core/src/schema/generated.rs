@@ -29,13 +29,17 @@ pub struct GeneratedSecret {
     #[serde(rename = "type")]
     pub secret_type: GeneratedSecretType,
     pub output: Destination,
-    pub bootstrap: StorageBoxBootstrap,
+    pub bootstrap: Option<StorageBoxBootstrap>,
+    #[serde(rename = "registerAt", default)]
+    pub register_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum GeneratedSecretType {
     #[serde(rename = "storage-box-ssh-key")]
     StorageBoxSshKey,
+    #[serde(rename = "local-ssh-key")]
+    LocalSshKey,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

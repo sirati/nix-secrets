@@ -5,6 +5,7 @@ use std::{fmt, io};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const STORAGE_BOX_SSH_KEY: &str = "storage-box-ssh-key";
+pub const LOCAL_SSH_KEY: &str = "local-ssh-key";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -44,7 +45,7 @@ pub struct TargetTask {
     pub task_type: String,
     pub recipient_ids: Vec<String>,
     pub output: Destination,
-    pub bootstrap: StorageBoxBootstrap,
+    pub bootstrap: Option<StorageBoxBootstrap>,
     pub current_version_id: Option<String>,
 }
 
@@ -71,7 +72,7 @@ pub struct ExpectedTask {
     pub task_type: String,
     pub recipient_ids: Vec<String>,
     pub output: Destination,
-    pub bootstrap: StorageBoxBootstrap,
+    pub bootstrap: Option<StorageBoxBootstrap>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -121,8 +122,14 @@ pub struct DeploymentBatch {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DeploymentResult {
-    Applied { versions: BTreeMap<String, String> },
-    Rejected { message: String },
+    Applied {
+        versions: BTreeMap<String, String>,
+        #[serde(default)]
+        generated_public_keys: BTreeMap<String, String>,
+    },
+    Rejected {
+        message: String,
+    },
 }
 
 #[derive(Debug)]

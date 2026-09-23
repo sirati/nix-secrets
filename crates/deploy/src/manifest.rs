@@ -2,16 +2,13 @@ use crate::schema::{ResolvedBatch, ResolvedSecret};
 use crate::{DeployError, DeploymentBatch, SecretClass};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use nix::unistd::{Group, User};
-use nix_secrets_core::schema::{Destination, Schema, SecretNode};
+use nix_secrets_core::schema::{Destination, GeneratedSecretType, Schema, SecretNode};
 use nix_secrets_transport::{
     Destination as WireDestination, StorageBoxBootstrap as WireBootstrap, TargetSecret,
-    TargetState, TargetTask, STORAGE_BOX_SSH_KEY,
+    TargetState, TargetTask, LOCAL_SSH_KEY, STORAGE_BOX_SSH_KEY,
 };
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
 use std::path::{Path, PathBuf};
-
-const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
 struct Expected {
     service: String,
@@ -33,15 +30,8 @@ struct TargetLeaves {
     tasks: Vec<TargetTask>,
 }
 
-pub fn system_hostname() -> Result<String, DeployError> {
-    let value = fs::read_to_string("/proc/sys/kernel/hostname")?;
-    let hostname = value.trim().to_owned();
-    if hostname.is_empty() {
-        Err(DeployError::Invalid("system hostname is empty".into()))
-    } else {
-        Ok(hostname)
-    }
-}
+mod hostname;
+pub use hostname::system_hostname;
 
 pub fn load_and_validate_manifest(
     path: &Path,
@@ -95,22 +85,8 @@ pub fn load_target_state(
     })
 }
 
-pub(crate) fn load_schema(path: &Path) -> Result<Schema, DeployError> {
-    if !path.is_absolute() {
-        return Err(DeployError::Invalid(
-            "manifest path must be absolute".into(),
-        ));
-    }
-    let metadata = fs::metadata(path)?;
-    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
-        return Err(DeployError::Invalid(
-            "manifest must be a regular file no larger than 16 MiB".into(),
-        ));
-    }
-    let input = fs::read_to_string(path)?;
-    Schema::from_json(&input)
-        .map_err(|error| DeployError::Invalid(format!("invalid manifest: {error}")))
-}
+mod schema_file;
+pub(crate) use schema_file::load_schema;
 
 fn flatten_target(
     hostname: &str,
@@ -152,15 +128,19 @@ fn flatten_target(
             let generated = &leaf.generated_secret;
             output.tasks.push(TargetTask {
                 identifier: identifier.clone(),
-                task_type: STORAGE_BOX_SSH_KEY.into(),
+                task_type: match generated.secret_type {
+                    GeneratedSecretType::StorageBoxSshKey => STORAGE_BOX_SSH_KEY,
+                    GeneratedSecretType::LocalSshKey => LOCAL_SSH_KEY,
+                }
+                .into(),
                 recipient_ids: leaf.recipient_ids.clone(),
                 output: wire_destination(&generated.output, &leaf.consumer_units),
-                bootstrap: WireBootstrap {
-                    host: generated.bootstrap.host.clone(),
-                    port: generated.bootstrap.port,
-                    user: generated.bootstrap.user.clone(),
-                    host_public_keys: generated.bootstrap.host_public_keys.clone(),
-                },
+                bootstrap: generated.bootstrap.as_ref().map(|bootstrap| WireBootstrap {
+                    host: bootstrap.host.clone(),
+                    port: bootstrap.port,
+                    user: bootstrap.user.clone(),
+                    host_public_keys: bootstrap.host_public_keys.clone(),
+                }),
                 current_version_id: versions.get(&identifier).cloned(),
             });
         }
@@ -267,6 +247,23 @@ fn validate_manifest(
         let contents = STANDARD
             .decode(&supplied.contents_base64)
             .map_err(|_| DeployError::Invalid(format!("invalid base64 for {identifier}")))?;
+        if manifest_entry.destination.content_type.as_deref()
+            == Some("named-ssh-ed25519-public-keys")
+        {
+            validate_named_ssh_keys(&contents)?;
+        }
+        let audit_key_names = if manifest_entry.destination.content_type.as_deref()
+            == Some("named-ssh-ed25519-public-keys")
+        {
+            std::str::from_utf8(&contents)
+                .expect("validated public key inventory is UTF-8")
+                .lines()
+                .filter_map(|line| line.split_ascii_whitespace().next())
+                .map(str::to_owned)
+                .collect()
+        } else {
+            Vec::new()
+        };
         entries.push(ResolvedSecret {
             identifier,
             version_id: supplied.version_id.clone(),
@@ -277,14 +274,14 @@ fn validate_manifest(
             owner: spec.owner,
             group: spec.group,
             mode: spec.mode,
+            audit_ssh_user: manifest_entry.destination.authorized_for_user.clone(),
+            audit_key_names,
         });
     }
     Ok(ResolvedBatch { entries })
 }
 
+mod named_keys;
+use named_keys::validate_named_ssh_keys;
 mod flatten;
 use flatten::{expected_from_destination, flatten};
-
-fn errno(error: nix::errno::Errno) -> DeployError {
-    DeployError::Invalid(format!("account lookup failed: {error}"))
-}

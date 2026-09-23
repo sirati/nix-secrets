@@ -77,6 +77,10 @@ pub struct Destination {
     pub owner: String,
     pub group: String,
     pub mode: String,
+    #[serde(rename = "contentType", default)]
+    pub content_type: Option<String>,
+    #[serde(rename = "authorizedForUser", default)]
+    pub authorized_for_user: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]

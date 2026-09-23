@@ -8,6 +8,7 @@ use nix_secrets_storagebox_bootstrap::{
     SystemClock,
 };
 use nix_secrets_transport::TaskEntry;
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -17,13 +18,19 @@ use zeroize::Zeroizing;
 const MAX_PASSWORD_BYTES: usize = 64 * 1024;
 const MAX_PRIVATE_KEY_BYTES: u64 = 64 * 1024;
 
+pub struct GeneratedTasks {
+    pub deployments: Vec<SecretDeployment>,
+    pub public_keys: BTreeMap<String, String>,
+}
+
 pub fn run_generated_tasks(
     manifest: &Path,
     hostname: &str,
     entries: &[TaskEntry],
-) -> Result<Vec<SecretDeployment>, DeployError> {
+) -> Result<GeneratedTasks, DeployError> {
     let schema = load_schema(manifest)?;
     let mut outputs = Vec::with_capacity(entries.len());
+    let mut public_keys = BTreeMap::new();
     for entry in entries {
         let path = SecretPath::parse(&entry.identifier)
             .map_err(|error| invalid(format!("invalid task identifier: {error}")))?;
@@ -33,20 +40,55 @@ pub fn run_generated_tasks(
         let spec = schema
             .generated_secret(&path)
             .map_err(|error| invalid(format!("generated task is absent from manifest: {error}")))?;
-        match &spec.generated_secret.secret_type {
-            GeneratedSecretType::StorageBoxSshKey => {}
-        }
         let generated = spec.generated_secret;
         validate_output(&path, &generated.output)?;
         let mode = parse_mode(&generated.output.mode)?;
+        let password = decode_password(&entry.password_base64)?;
+        let contribution = decode_contribution(&entry.client_contribution_base64)?;
+        if matches!(generated.secret_type, GeneratedSecretType::LocalSshKey) {
+            let _ = password;
+            use nix_secrets_storagebox_bootstrap::KeyGenerator;
+            let mut entropy = DevUrandom::open().map_err(task_error)?;
+            std::io::Write::write_all(&mut entropy, contribution.expose()).map_err(task_error)?;
+            std::io::Write::flush(&mut entropy).map_err(task_error)?;
+            let existing = read_existing_key(Path::new(&generated.output.path))?;
+            let key = match existing {
+                Some(value) => {
+                    nix_secrets_storagebox_bootstrap::GeneratedKey::from_private_pem(&value)
+                        .map_err(task_error)?
+                }
+                None => OsKeyGenerator.generate().map_err(task_error)?,
+            };
+            let stamp = time::OffsetDateTime::now_utc()
+                .format(
+                    &time::format_description::parse_borrowed::<2>(
+                        "[year][month][day]T[hour][minute][second][subsecond digits:3]Z",
+                    )
+                    .map_err(task_error)?,
+                )
+                .map_err(task_error)?;
+            public_keys.insert(
+                entry.identifier.clone(),
+                format!("{stamp} {}", key.public_key),
+            );
+            outputs.push(SecretDeployment {
+                identifier: entry.identifier.clone(),
+                version_id: entry.version_id.clone(),
+                contents_base64: STANDARD.encode(key.private_pem.as_bytes()),
+            });
+            continue;
+        }
+        let bootstrap = generated
+            .bootstrap
+            .ok_or_else(|| invalid("storage box bootstrap missing"))?;
         let task = StorageBoxTask {
             schema_version: 1,
             task_id: entry.identifier.clone(),
             target_hostname: hostname.into(),
-            storage_box_host: generated.bootstrap.host,
-            storage_box_user: generated.bootstrap.user,
-            port: generated.bootstrap.port,
-            pinned_host_keys: generated.bootstrap.host_public_keys,
+            storage_box_host: bootstrap.host,
+            storage_box_user: bootstrap.user,
+            port: bootstrap.port,
+            pinned_host_keys: bootstrap.host_public_keys,
             output: Output {
                 path: generated.output.path.clone(),
                 owner: generated.output.owner,
@@ -54,8 +96,6 @@ pub fn run_generated_tasks(
                 mode,
             },
         };
-        let password = decode_password(&entry.password_base64)?;
-        let contribution = decode_contribution(&entry.client_contribution_base64)?;
         let existing = read_existing_key(Path::new(&task.output.path))?;
         let mut engine = Engine {
             backend: RusshBackend,
@@ -77,7 +117,10 @@ pub fn run_generated_tasks(
             contents_base64: STANDARD.encode(key.private_pem.as_bytes()),
         });
     }
-    Ok(outputs)
+    Ok(GeneratedTasks {
+        deployments: outputs,
+        public_keys,
+    })
 }
 
 fn decode_password(value: &str) -> Result<Zeroizing<Vec<u8>>, DeployError> {
@@ -148,7 +191,9 @@ fn validate_output(
         .join(service)
         .join(&output.category);
     let path = Path::new(&output.path);
-    if path.parent() != Some(expected.as_path()) || output.category != "backup" {
+    if path.parent() != Some(expected.as_path())
+        || !matches!(output.category.as_str(), "backup" | "service")
+    {
         return Err(invalid(
             "generated task output escapes its backup service boundary",
         ));

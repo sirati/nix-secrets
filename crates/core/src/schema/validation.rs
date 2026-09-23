@@ -38,7 +38,34 @@ fn validate_generated(
     validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
     validate_destination(&path, service, &leaf.generated_secret.output)?;
     validate_generation(&path, leaf.generation.as_ref())?;
-    let bootstrap = &leaf.generated_secret.bootstrap;
+    let bootstrap = match leaf.generated_secret.secret_type {
+        super::GeneratedSecretType::StorageBoxSshKey => leaf
+            .generated_secret
+            .bootstrap
+            .as_ref()
+            .ok_or_else(|| invalid(&path, "storage-box bootstrap is missing"))?,
+        super::GeneratedSecretType::LocalSshKey => {
+            if leaf.generated_secret.bootstrap.is_some()
+                || leaf.generated_secret.output.category != "service"
+            {
+                return Err(invalid(
+                    &path,
+                    "local SSH key must have a service output and no bootstrap",
+                ));
+            }
+            if let Some(register_at) = &leaf.generated_secret.register_at {
+                SecretPath::parse(register_at)
+                    .map_err(|_| invalid(&path, "invalid registration secret identifier"))?;
+            }
+            return Ok(());
+        }
+    };
+    if leaf.generated_secret.register_at.is_some() {
+        return Err(invalid(
+            &path,
+            "storage-box key cannot register another secret",
+        ));
+    }
     if bootstrap.host.is_empty() || bootstrap.user.is_empty() {
         return Err(invalid(&path, "storage-box bootstrap is incomplete"));
     }
@@ -106,6 +133,31 @@ fn validate_destination(
     }
     if !matches!(destination.mode.as_str(), "0400" | "0440") {
         return Err(invalid(path, "mode must be 0400 or 0440"));
+    }
+    if destination
+        .content_type
+        .as_deref()
+        .is_some_and(|kind| kind != "named-ssh-ed25519-public-keys")
+    {
+        return Err(invalid(path, "unsupported secret content type"));
+    }
+    match (
+        destination.content_type.as_deref(),
+        destination.authorized_for_user.as_deref(),
+    ) {
+        (Some("named-ssh-ed25519-public-keys"), Some(user))
+            if !user.is_empty()
+                && user.len() <= 32
+                && user
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)) => {}
+        (None, None) => {}
+        _ => {
+            return Err(invalid(
+                path,
+                "SSH key inventory requires a valid authorizedForUser",
+            ));
+        }
     }
     let prefix = format!("/persistent/secrets/{service}/{}/", destination.category);
     let name = destination.path.strip_prefix(&prefix).unwrap_or_default();

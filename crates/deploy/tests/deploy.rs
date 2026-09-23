@@ -163,7 +163,7 @@ fn generated_output_uses_manifest_and_atomic_generation() {
     let state = load_target_state(&path, "testhost", &Default::default()).unwrap();
     assert!(state.secrets.is_empty());
     assert_eq!(state.tasks.len(), 1);
-    assert_eq!(state.tasks[0].bootstrap.port, 23);
+    assert_eq!(state.tasks[0].bootstrap.as_ref().unwrap().port, 23);
     assert_eq!(state.tasks[0].output.mode, "0400");
 
     let identifier = "testhost.services.backup.storage-key";

@@ -95,8 +95,8 @@ fn task() -> StorageBoxTask {
     let host_key = OsKeyGenerator.generate().unwrap().public_key;
     StorageBoxTask {
         schema_version: 1,
-        task_id: "hetzner2.services.postgres.storage-key".into(),
-        target_hostname: "hetzner2".into(),
+        task_id: "node-a.services.database.storage-key".into(),
+        target_hostname: "node-a".into(),
         storage_box_host: "u123.your-storagebox.de".into(),
         storage_box_user: "u123".into(),
         port: 23,
@@ -154,7 +154,7 @@ fn writes_all_contribution_before_generating_and_reconciles_remote() {
     assert!(
         String::from_utf8(state.borrow().file.clone())
             .unwrap()
-            .contains("nix-secrets:hetzner2:hetzner2.services.postgres.storage-key:2026-09-22")
+            .contains("nix-secrets:node-a:node-a.services.database.storage-key:2026-09-22")
     );
 }
 

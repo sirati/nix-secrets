@@ -8,7 +8,7 @@ use rustix::process::geteuid;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,6 +26,11 @@ pub enum Request {
     Set {
         path: SecretPath,
         envelope: EncryptedSecret,
+    },
+    SetIfVersion {
+        path: SecretPath,
+        envelope: EncryptedSecret,
+        expected_version: Option<Vec<u8>>,
     },
     Remove {
         path: SecretPath,
@@ -168,6 +173,14 @@ fn handle_client(
                 .set(schema, &path, envelope)
                 .map(|()| Response::Updated)
                 .map_err(|error| error.to_string()),
+            Request::SetIfVersion {
+                path,
+                envelope,
+                expected_version,
+            } => store
+                .set_if_version(schema, &path, envelope, expected_version.as_deref())
+                .map(|()| Response::Updated)
+                .map_err(|error| error.to_string()),
             Request::Remove { path } => store
                 .remove(schema, &path)
                 .map(|existed| Response::Removed { existed })
@@ -260,31 +273,5 @@ fn broker_error(error: BrokerError) -> String {
     }
 }
 
-fn prepare_socket_path(path: &Path) -> io::Result<()> {
-    let Some(parent) = path.parent() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "socket has no parent",
-        ));
-    };
-    fs::create_dir_all(parent)?;
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-        Ok(metadata) => {
-            if !metadata.file_type().is_socket() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "socket path is not a socket",
-                ));
-            }
-            if metadata.uid() != geteuid().as_raw() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "socket has a different owner",
-                ));
-            }
-            fs::remove_file(path)
-        }
-    }
-}
+mod socket_path;
+use socket_path::prepare_socket_path;

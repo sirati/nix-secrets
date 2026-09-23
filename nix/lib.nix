@@ -17,6 +17,7 @@ let
     let
       required = [ "path" "owner" "group" "mode" "category" ];
       missing = builtins.filter (name: !(builtins.hasAttr name destination)) required;
+      extra = builtins.filter (name: !(builtins.elem name (required ++ [ "contentType" "authorizedForUser" ]))) (attrNames destination);
       parts = lib.splitString "/" destination.path;
       validCategory = builtins.elem destination.category [ "setup" "service" "backup" ];
       validPath = builtins.length parts == 6
@@ -29,6 +30,14 @@ let
     in
     if missing != [ ] then
       throw "secret destination is missing: ${lib.concatStringsSep ", " missing}"
+    else if extra != [ ] then
+      throw "secret destination has unknown fields: ${lib.concatStringsSep ", " extra}"
+    else if destination ? contentType && destination.contentType != "named-ssh-ed25519-public-keys" then
+      throw "unsupported secret content type"
+    else if destination ? contentType && (!(destination ? authorizedForUser) || builtins.match "[A-Za-z0-9_-]{1,32}" destination.authorizedForUser == null) then
+      throw "SSH key inventory requires authorizedForUser"
+    else if destination ? authorizedForUser && !(destination ? contentType) then
+      throw "authorizedForUser requires a content type"
     else if !validCategory then
       throw "secret category must be setup, service, or backup"
     else if !validPath then
@@ -88,9 +97,9 @@ let
 
   validateGeneratedSecret = serviceName: generated:
     let
-      required = [ "type" "output" "bootstrap" ];
+      required = [ "type" "output" ];
       missing = builtins.filter (name: !(builtins.hasAttr name generated)) required;
-      extra = builtins.filter (name: !(builtins.elem name required)) (attrNames generated);
+      extra = builtins.filter (name: !(builtins.elem name (required ++ [ "bootstrap" "registerAt" ]))) (attrNames generated);
       bootstrap = generated.bootstrap or { };
       bootstrapRequired = [ "host" "port" "user" "hostPublicKeys" ];
       bootstrapMissing = builtins.filter (name: !(builtins.hasAttr name bootstrap)) bootstrapRequired;
@@ -103,19 +112,23 @@ let
       throw "generated secret is missing: ${lib.concatStringsSep ", " missing}"
     else if extra != [ ] then
       throw "generated secret has unknown fields: ${lib.concatStringsSep ", " extra}"
-    else if generated.type != "storage-box-ssh-key" then
+    else if !(builtins.elem generated.type [ "storage-box-ssh-key" "local-ssh-key" ]) then
       throw "unsupported generated secret type ${generated.type}"
-    else if bootstrapMissing != [ ] then
+    else if generated.type == "local-ssh-key" && (generated ? bootstrap || generated.output.category != "service") then
+      throw "local SSH key requires a service output and no bootstrap"
+    else if generated.type == "storage-box-ssh-key" && generated ? registerAt then
+      throw "storage-box key cannot register another secret"
+    else if generated.type == "storage-box-ssh-key" && bootstrapMissing != [ ] then
       throw "storage-box bootstrap is missing: ${lib.concatStringsSep ", " bootstrapMissing}"
-    else if bootstrapExtra != [ ] then
+    else if generated.type == "storage-box-ssh-key" && bootstrapExtra != [ ] then
       throw "storage-box bootstrap has unknown fields: ${lib.concatStringsSep ", " bootstrapExtra}"
-    else if bootstrap.host == "" || bootstrap.user == "" then
+    else if generated.type == "storage-box-ssh-key" && (bootstrap.host == "" || bootstrap.user == "") then
       throw "storage-box bootstrap host and user must not be empty"
-    else if bootstrap.port != 23 then
+    else if generated.type == "storage-box-ssh-key" && bootstrap.port != 23 then
       throw "storage-box bootstrap port must be 23"
-    else if keys == [ ] || !(builtins.all validSshPublicKey keys) then
+    else if generated.type == "storage-box-ssh-key" && (keys == [ ] || !(builtins.all validSshPublicKey keys)) then
       throw "storage-box bootstrap hostPublicKeys must contain complete OpenSSH public key lines"
-    else if builtins.length keys != builtins.length (lib.unique keys) then
+    else if generated.type == "storage-box-ssh-key" && builtins.length keys != builtins.length (lib.unique keys) then
       throw "storage-box bootstrap hostPublicKeys must not contain duplicates"
     else
       generated // { output = validateDestination serviceName generated.output; };

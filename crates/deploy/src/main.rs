@@ -6,6 +6,8 @@ use nix_secrets_deploy::{
 };
 use nix_secrets_transport::serve_deployment;
 use std::io;
+use std::path::Path;
+mod audit;
 
 fn main() {
     if let Err(error) = run() {
@@ -21,6 +23,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: secret-deploy --manifest ABSOLUTE-NIX-STORE-JSON".into());
     }
     let manifest = args.next().ok_or("--manifest requires a path")?;
+    let audit_file = match args.next().as_deref() {
+        Some(value) if value == "--audit-file" => {
+            Some(args.next().ok_or("--audit-file requires a path")?)
+        }
+        None => None,
+        _ => return Err("unexpected receiver argument".into()),
+    };
+    let audit_group = if audit_file.is_some() {
+        if args.next().as_deref() != Some(std::ffi::OsStr::new("--audit-group")) {
+            return Err("--audit-group required with --audit-file".into());
+        }
+        Some(args.next().ok_or("--audit-group requires a name")?)
+    } else {
+        None
+    };
     if args.next().is_some() {
         return Err("unexpected receiver argument".into());
     }
@@ -42,10 +59,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 contents_base64: std::mem::take(&mut entry.contents_base64),
             })
             .collect::<Vec<_>>();
-        entries.extend(
-            run_generated_tasks(path, &hostname, &batch.tasks)
-                .map_err(|error| error.to_string())?,
-        );
+        let generated = run_generated_tasks(path, &hostname, &batch.tasks)
+            .map_err(|error| error.to_string())?;
+        entries.extend(generated.deployments);
         let local = DeploymentBatch {
             version: u32::from(batch.version),
             requested_identifiers,
@@ -53,12 +69,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
         let resolved = load_and_validate_manifest(path, &hostname, &local)
             .map_err(|error| error.to_string())?;
-        deployer
-            .deploy(&resolved)
+        let audit_details = resolved.audit_details();
+        let previous = deployer
+            .deploy_with_previous(&resolved)
             .map_err(|error| error.to_string())?;
-        deployer
-            .current_versions()
-            .map_err(|error| error.to_string())
+        let audit = audit::event(
+            &hostname,
+            &local.requested_identifiers,
+            &previous,
+            &audit_details,
+        )?;
+        if let (Some(file), Some(group)) = (&audit_file, &audit_group) {
+            audit::write_event(
+                Path::new(file),
+                group.to_str().ok_or("audit group is not UTF-8")?,
+                &audit,
+            )?;
+        }
+        eprintln!("nix-secrets-audit: {audit}");
+        Ok((
+            deployer
+                .current_versions()
+                .map_err(|error| error.to_string())?,
+            generated.public_keys,
+        ))
     })?;
     Ok(())
 }

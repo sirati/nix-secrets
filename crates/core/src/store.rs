@@ -50,6 +50,8 @@ pub enum StoreError {
     RecipientMismatch,
     #[error("stored age record metadata is invalid")]
     InvalidRecord,
+    #[error("secret version changed during update")]
+    VersionConflict,
 }
 
 impl SecretStore {
@@ -75,6 +77,26 @@ impl SecretStore {
         path: &SecretPath,
         envelope: EncryptedSecret,
     ) -> Result<(), StoreError> {
+        self.set_checked(schema, path, envelope, None)
+    }
+
+    pub fn set_if_version(
+        &self,
+        schema: &Schema,
+        path: &SecretPath,
+        envelope: EncryptedSecret,
+        expected_version: Option<&[u8]>,
+    ) -> Result<(), StoreError> {
+        self.set_checked(schema, path, envelope, Some(expected_version))
+    }
+
+    fn set_checked(
+        &self,
+        schema: &Schema,
+        path: &SecretPath,
+        envelope: EncryptedSecret,
+        expected_version: Option<Option<&[u8]>>,
+    ) -> Result<(), StoreError> {
         let recipients = match schema.leaf(path)? {
             LeafSpec::Stored(spec) => spec.recipient_ids,
             LeafSpec::Generated(spec) => spec.recipient_ids,
@@ -84,6 +106,15 @@ impl SecretStore {
         }
         validate_record(&envelope)?;
         self.with_lock(true, |document| {
+            if let Some(expected) = expected_version {
+                let actual = document
+                    .secrets
+                    .get(&path.to_string())
+                    .map(|value| value.version_id.as_slice());
+                if actual != expected {
+                    return Err(StoreError::VersionConflict);
+                }
+            }
             document.secrets.insert(path.to_string(), envelope);
             Ok(())
         })

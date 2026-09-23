@@ -61,6 +61,25 @@ pkgs.testers.runNixOSTest {
           mode = "0400";
         };
       };
+      services.keys.secrets.local-key.generatedSecret = {
+        type = "local-ssh-key";
+        output = {
+          path = "/persistent/secrets/keys/service/local-key";
+          category = "service";
+          owner = "alpha";
+          group = "alpha";
+          mode = "0400";
+        };
+      };
+      services.authorized-keys.secrets.token.destination = {
+        path = "/persistent/secrets/authorized-keys/service/token";
+        category = "service";
+        owner = "root";
+        group = "root";
+        mode = "0400";
+        contentType = "named-ssh-ed25519-public-keys";
+        authorizedForUser = "receiver-test";
+      };
     };
     services.secretsReadyWaiter.enable = true;
     systemd.services.alpha-consumer.serviceConfig = {
@@ -206,6 +225,39 @@ pkgs.testers.runNixOSTest {
             f"echo {command} | base64 -d >/root/forward.py; python3 /root/forward.py"
         )
 
+    def deploy_local_key():
+        identifier = "machine.services.keys.local-key"
+        script = textwrap.dedent(f"""
+        import base64,json,socket
+        def wire(value):
+            body=json.dumps(value).encode()
+            return len(body).to_bytes(4,'big')+body
+        def receive(sock):
+            def exact(n):
+                data=bytes()
+                while len(data)<n:
+                    chunk=sock.recv(n-len(data)); assert chunk; data+=chunk
+                return data
+            return json.loads(exact(int.from_bytes(exact(4),'big')))
+        s=socket.socket(socket.AF_UNIX)
+        s.connect('{socket}')
+        s.sendall(wire({{'identifiers':[], 'task_identifiers':['{identifier}']}}))
+        state=receive(s)
+        assert state['tasks'][0]['type']=='local-ssh-key'
+        assert state['tasks'][0]['bootstrap'] is None
+        s.sendall(wire({{'version':1,'requested_identifiers':[],'entries':[],
+            'requested_tasks':['{identifier}'],'tasks':[{{'identifier':'{identifier}',
+            'version_id':'v1','password_base64':base64.b64encode(b'task-authorization').decode(),
+            'client_contribution_base64':base64.b64encode(bytes([11])*32).decode()}}]}}))
+        result=receive(s)
+        assert result['status']=='applied'
+        assert ' ssh-ed25519 ' in result['generated_public_keys']['{identifier}']
+        assert 'PRIVATE KEY' not in result['generated_public_keys']['{identifier}']
+        s.close()
+        """)
+        encoded = base64.b64encode(script.encode()).decode()
+        machine.succeed(f"echo {encoded} | base64 -d >/root/local-key.py; python3 /root/local-key.py")
+
     machine.start(allow_reboot=True)
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("sshd.service")
@@ -236,6 +288,9 @@ pkgs.testers.runNixOSTest {
     machine.succeed("systemctl start --no-block nmbl-mark-boot-success")
 
     deploy([entry("alpha", "alpha-one"), entry("beta", "beta-one")])
+    first_audits = machine.succeed("cat /run/nix-secrets/audit/*.json")
+    assert '"action":"set"' in first_audits
+    assert "alpha-one" not in first_audits and "beta-one" not in first_audits
     machine.wait_for_unit("alpha-consumer.service")
     machine.wait_for_unit("beta-consumer.service")
     machine.wait_for_unit("nmbl-mark-boot-success.service")
@@ -261,10 +316,21 @@ pkgs.testers.runNixOSTest {
     deploy_over_ssh([
         entry("alpha", "alpha-two"), entry("beta", "beta-two")
     ])
+    audits = machine.succeed("cat /run/nix-secrets/audit/*.json")
+    assert '"action":"replaced"' in audits
+    assert "alpha-two" not in audits and "beta-two" not in audits
     new = machine.succeed("readlink /persistent/secrets/.current").strip()
     assert new != old
     machine.succeed("grep alpha-two /persistent/secrets/alpha/service/token")
     machine.succeed("test -f /persistent/secrets/{}/alpha/service/token".format(old))
+    deploy_local_key()
+    machine.succeed("test -s /persistent/secrets/keys/service/local-key")
+    machine.succeed("test \"$(stat -c %a /persistent/secrets/keys/service/local-key)\" = 400")
+    machine.succeed("ssh-keygen -y -f /persistent/secrets/keys/service/local-key | grep '^ssh-ed25519 '")
+    public_key = " ".join(machine.succeed("ssh-keygen -y -f /persistent/secrets/keys/service/local-key").split()[:2])
+    deploy([entry("authorized-keys", "node-20260923T120000000Z " + public_key + "\n")])
+    deploy([entry("authorized-keys", "this is not a public key")], expected_status="rejected")
+    machine.succeed("grep node-20260923T120000000Z /persistent/secrets/authorized-keys/service/token")
 
     machine.reboot()
     machine.wait_for_unit("multi-user.target")
