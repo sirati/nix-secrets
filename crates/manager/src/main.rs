@@ -6,6 +6,7 @@ use nix_secrets_manager::{
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
@@ -22,20 +23,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .ok_or("HOME is not set")?;
     let invocation = cli::parse(env::args_os().skip(1), &home)?;
+    progress("Connecting...")?;
     let repository = if invocation.is_local() {
         invocation.repository.clone()
     } else {
         remote_repository(&invocation.ssh_args, &invocation.repository)?
     };
-    let schema = evaluate(&invocation.ssh_args, &repository)?;
+    let remote_uid = if invocation.is_local() {
+        None
+    } else {
+        Some(remote_uid(&invocation.ssh_args)?)
+    };
+    if remote_uid.is_some() {
+        progress("Connected.")?;
+    }
     let socket_directory = runtime_directory(&home).join("nix-secrets");
     fs::create_dir_all(&socket_directory)?;
     let socket_name = socket_name(&repository);
-    let local_socket = socket_directory.join(&socket_name);
+    // Each remote frontend owns its SSH tunnel. Another terminal can then
+    // remain connected when this one exits, while all tunnels still reach the
+    // same backend socket on the repository host.
+    let local_socket = if invocation.is_local() {
+        socket_directory.join(&socket_name)
+    } else {
+        socket_directory.join(format!("frontend-{}-{socket_name}", std::process::id()))
+    };
     let backend = if invocation.is_local() {
         command::backend(&repository, &local_socket)
     } else {
-        let uid = remote_uid(&invocation.ssh_args)?;
+        let uid = remote_uid.expect("remote UID was resolved above");
         let remote_socket = PathBuf::from(format!("/run/user/{uid}/nix-secrets/{socket_name}"));
         command::remote_backend(
             &invocation.ssh_args,
@@ -44,12 +60,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &remote_socket,
         )?
     };
+    progress("Starting/Connecting backend...")?;
+    let mut launcher = if invocation.is_local() {
+        startup::ProcessLauncher::persistent()
+    } else {
+        startup::ProcessLauncher::ephemeral(&local_socket)
+    };
     let connection = startup::connect_or_start(
         &local_socket,
         &backend,
-        &mut startup::ProcessLauncher,
+        &mut launcher,
         Duration::from_secs(20),
     )?;
+    if remote_uid.is_none() {
+        progress("Connected.")?;
+    }
+    progress("Evaluating Nix...")?;
+    let schema = evaluate(&invocation.ssh_args, &repository)?;
     let provider = invocation
         .identity
         .map(AgeCommandProvider::identity_file)
@@ -67,6 +94,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let rows = controller.rows()?;
     ui::run(rows, &mut controller)?;
     Ok(())
+}
+
+fn progress(message: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{message}")?;
+    stdout.flush()
 }
 
 fn evaluate(

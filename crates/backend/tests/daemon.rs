@@ -1,9 +1,9 @@
 use nix_secrets_core::framing::{read_json, write_json};
-use nix_secrets_core::{EncryptedSecret, Request, Response, SecretPath};
+use nix_secrets_core::{ApprovalRequest, EncryptedSecret, Request, Response, SecretPath};
 use serde_json::json;
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -106,6 +106,102 @@ fn list(socket: &Path) -> Response {
     let mut stream = UnixStream::connect(socket).unwrap();
     write_json(&mut stream, &Request::List).unwrap();
     read_json(&mut stream).unwrap().unwrap()
+}
+
+fn call(stream: &mut UnixStream, request: Request) -> Response {
+    write_json(stream, &request).unwrap();
+    read_json(stream).unwrap().unwrap()
+}
+
+#[test]
+fn concurrent_launches_share_the_live_approval_broker() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("backend.sock");
+    let manifest_path = directory.path().join("manifest.json");
+    fs::write(&manifest_path, manifest(&socket)).unwrap();
+
+    let mut first = start(directory.path(), &socket, Some(&manifest_path), None);
+    if !await_socket(&mut first, &socket) {
+        return;
+    }
+    let original_inode = fs::metadata(&socket).unwrap().ino();
+    let mut frontend_one = UnixStream::connect(&socket).unwrap();
+    assert!(matches!(
+        call(&mut frontend_one, Request::RegisterFrontend),
+        Response::FrontendRegistered
+    ));
+    let approval = ApprovalRequest {
+        id: "same-broker".into(),
+        target: "target.example".into(),
+        secrets: vec!["host.services.mail.password".into()],
+    };
+    let mut submitter = UnixStream::connect(&socket).unwrap();
+    assert!(matches!(
+        call(
+            &mut submitter,
+            Request::SubmitApproval { request: approval }
+        ),
+        Response::ApprovalState { .. }
+    ));
+
+    // A second launch sees the same live backend and must never unlink the
+    // socket or create a second approval broker.
+    let mut second = start(directory.path(), &socket, Some(&manifest_path), None);
+    thread::sleep(Duration::from_millis(150));
+    assert!(second.try_wait().unwrap().is_none());
+    assert_eq!(fs::metadata(&socket).unwrap().ino(), original_inode);
+    let mut frontend_two = UnixStream::connect(&socket).unwrap();
+    assert!(matches!(
+        call(&mut frontend_two, Request::RegisterFrontend),
+        Response::FrontendRegistered
+    ));
+    assert!(matches!(
+        call(&mut frontend_two, Request::PollApprovals),
+        Response::Approvals { requests } if requests.len() == 1 && requests[0].id == "same-broker"
+    ));
+
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while second.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(second.try_wait().unwrap().is_some());
+}
+
+#[test]
+fn attached_ssh_channel_exits_when_its_client_disconnects() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("backend.sock");
+    let manifest_path = directory.path().join("manifest.json");
+    fs::write(&manifest_path, manifest(&socket)).unwrap();
+    let mut owner = start(directory.path(), &socket, Some(&manifest_path), None);
+    if !await_socket(&mut owner, &socket) {
+        return;
+    }
+    let inode = fs::metadata(&socket).unwrap().ino();
+    let mut attached = Command::new(env!("CARGO_BIN_EXE_nix-secrets-backend"))
+        .args(["--repository", directory.path().to_str().unwrap()])
+        .args(["--socket", socket.to_str().unwrap()])
+        .args(["--manifest", manifest_path.to_str().unwrap()])
+        .arg("--hold-channel")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(150));
+    assert!(attached.try_wait().unwrap().is_none());
+    assert_eq!(fs::metadata(&socket).unwrap().ino(), inode);
+    drop(attached.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while attached.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(attached.try_wait().unwrap().is_some());
+    assert!(owner.try_wait().unwrap().is_none());
+    owner.kill().unwrap();
+    owner.wait().unwrap();
 }
 
 #[test]

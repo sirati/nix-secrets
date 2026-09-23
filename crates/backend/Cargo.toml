@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 nix-secrets-core = { path = "../core" }
+rustix = { version = "1.1", features = ["fs", "net", "process"] }
 
 [dev-dependencies]
 serde_json = "1"

@@ -2,9 +2,10 @@
 
 mod cli;
 mod manifest;
+mod socket_lease;
 
 pub use cli::{Arguments, ParseError};
-pub use manifest::{MAX_MANIFEST_BYTES, evaluate_manifest, load_manifest};
+pub use manifest::{evaluate_manifest, load_manifest, MAX_MANIFEST_BYTES};
 
 use nix_secrets_core::{Backend, Schema, SecretStore};
 use std::env;
@@ -16,6 +17,13 @@ use std::path::{Path, PathBuf};
 
 pub fn run(arguments: Arguments) -> Result<(), Box<dyn Error>> {
     let repository = canonical_repository(&arguments.repository)?;
+    let lease = match socket_lease::acquire_or_attach(&arguments.socket)? {
+        socket_lease::Disposition::Owner(lease) => lease,
+        socket_lease::Disposition::Attached => {
+            socket_lease::watch_existing(&arguments.socket, arguments.hold_channel)?;
+            return Ok(());
+        }
+    };
     let input = match &arguments.manifest {
         Some(path) => load_manifest(path)?,
         None => evaluate_manifest(&repository)?,
@@ -24,6 +32,9 @@ pub fn run(arguments: Arguments) -> Result<(), Box<dyn Error>> {
     reject_non_file_store(&repository.join("nix-secrets.toml"))?;
     let store = SecretStore::new(repository.join("nix-secrets.toml"));
     let backend = Backend::bind(arguments.socket, schema, store)?;
+    // Keep the lock for the entire lifetime of this backend. A second launch
+    // attaches to this socket instead of replacing its approval broker.
+    let _lease = lease;
 
     // Binding is the readiness boundary: the private socket exists only after
     // the repository and freshly evaluated schema have passed validation.

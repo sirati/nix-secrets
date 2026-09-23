@@ -78,6 +78,7 @@ pub fn remote_backend(
     let local = backend(repository, remote_socket);
     let mut remote = vec![local.program];
     remote.extend(local.arguments);
+    remote.push("--hold-channel".into());
     let mut forwarding = vec![
         "-o".into(),
         "ExitOnForwardFailure=yes".into(),
@@ -168,6 +169,7 @@ mod tests {
         let actual = strings(&spec);
         assert_eq!(&actual[..3], ["ssh", "-o", "StrictHostKeyChecking=yes"]);
         assert!(actual.iter().all(|arg| !arg.contains("UserKnownHostsFile")));
+        assert!(actual.last().unwrap().contains("'--hold-channel'"));
         assert!(actual
             .iter()
             .any(|part| part == "/run/user/1/local:/run/user/1/remote"));

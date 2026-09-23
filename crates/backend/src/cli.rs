@@ -7,6 +7,7 @@ pub struct Arguments {
     pub repository: PathBuf,
     pub socket: PathBuf,
     pub manifest: Option<PathBuf>,
+    pub hold_channel: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -38,7 +39,15 @@ impl Arguments {
         let mut repository = None;
         let mut socket = None;
         let mut manifest = None;
+        let mut hold_channel = false;
         while let Some(option) = input.next() {
+            if option == "--hold-channel" {
+                if hold_channel {
+                    return Err(ParseError::Duplicate("--hold-channel"));
+                }
+                hold_channel = true;
+                continue;
+            }
             let (name, slot) = match option.to_str() {
                 Some("--repository") => ("--repository", &mut repository),
                 Some("--socket") => ("--socket", &mut socket),
@@ -61,6 +70,7 @@ impl Arguments {
             repository,
             socket,
             manifest,
+            hold_channel,
         })
     }
 }
@@ -88,6 +98,18 @@ mod tests {
         assert_eq!(
             parsed.manifest,
             Some(PathBuf::from("/nix/store/manifest.json"))
+        );
+        assert!(!parsed.hold_channel);
+        assert!(
+            Arguments::parse(args(&[
+                "--repository",
+                "/repo",
+                "--socket",
+                "/run/backend.sock",
+                "--hold-channel",
+            ]))
+            .unwrap()
+            .hold_channel
         );
     }
 
