@@ -1,10 +1,12 @@
 { pkgs, module }:
 
 let
-  key = name: pkgs.runCommand name { nativeBuildInputs = [ pkgs.openssh ]; } ''
-    mkdir "$out"
-    ssh-keygen -q -t ed25519 -N "" -C ${name} -f "$out/id"
-  '';
+  key =
+    name:
+    pkgs.runCommand name { nativeBuildInputs = [ pkgs.openssh ]; } ''
+      mkdir "$out"
+      ssh-keygen -q -t ed25519 -N "" -C ${name} -f "$out/id"
+    '';
   hostKey = key "storage-box-host-key";
   wrongHostKey = key "wrong-storage-box-host-key";
   unrelatedKey = key "unrelated-storage-box-key";
@@ -13,7 +15,13 @@ pkgs.testers.runNixOSTest {
   name = "nix-secrets-storage-box-bootstrap";
 
   nodes.machine = import ./storage-box-fixture.nix {
-    inherit pkgs module hostKey wrongHostKey unrelatedKey;
+    inherit
+      pkgs
+      module
+      hostKey
+      wrongHostKey
+      unrelatedKey
+      ;
   };
 
   testScript = ''
@@ -93,10 +101,7 @@ pkgs.testers.runNixOSTest {
         "install -m 0600 -o storagebox -g users ${unrelatedKey}/id.pub "
         "/var/lib/storagebox/.ssh/authorized_keys"
     )
-    machine.succeed(
-        "awk '{print \"[127.0.0.1]:23 \" $1 \" \" $2}' ${hostKey}/id.pub "
-        ">/run/storagebox-known-hosts; chmod 0444 /run/storagebox-known-hosts"
-    )
+    machine.succeed("runuser -u nobody -- cat /persistent/public-info/storage-box/known-hosts | grep '\\[127.0.0.1\\]:23 ssh-ed25519 '")
     original = machine.succeed("cat /var/lib/storagebox/.ssh/authorized_keys")
 
     unit = "nix-secrets-deployer@probe.service"
@@ -127,7 +132,7 @@ pkgs.testers.runNixOSTest {
         "-i /persistent/secrets/backup/backup/storage-box-key -p 23 "
         "-o BatchMode=yes -o StrictHostKeyChecking=yes "
         "-o PasswordAuthentication=no -o KbdInteractiveAuthentication=no "
-        "-o UserKnownHostsFile=/run/storagebox-known-hosts "
+        "-o UserKnownHostsFile=/persistent/public-info/storage-box/known-hosts "
         "storagebox@127.0.0.1 true"
     )
     machine.succeed(auth)
@@ -144,10 +149,7 @@ pkgs.testers.runNixOSTest {
     machine.reboot()
     machine.wait_for_unit("sshd.service")
     assert machine.succeed(f"sha256sum {private_key}").split()[0] == first_hash
-    machine.succeed(
-        "awk '{print \"[127.0.0.1]:23 \" $1 \" \" $2}' ${hostKey}/id.pub "
-        ">/run/storagebox-known-hosts; chmod 0444 /run/storagebox-known-hosts"
-    )
+    machine.succeed("runuser -u nobody -- cat /persistent/public-info/storage-box/known-hosts | grep '\\[127.0.0.1\\]:23 ssh-ed25519 '")
     machine.succeed(auth)
   '';
 }

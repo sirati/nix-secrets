@@ -26,6 +26,8 @@ pub struct StorageBoxBootstrap {
     pub port: u16,
     pub user: String,
     pub host_public_keys: Vec<String>,
+    #[serde(default)]
+    pub known_hosts_file: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -34,6 +36,8 @@ pub struct TargetSecret {
     pub identifier: String,
     pub recipient_ids: Vec<String>,
     pub destination: Destination,
+    #[serde(default)]
+    pub public_info: Option<PublicInfoAttestation>,
     pub current_version_id: Option<String>,
 }
 
@@ -64,6 +68,15 @@ pub struct ExpectedSecret {
     pub identifier: String,
     pub recipient_ids: Vec<String>,
     pub destination: Destination,
+    pub public_info: Option<PublicInfoAttestation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicInfoAttestation {
+    pub shared_id: String,
+    pub expected_ssh_host: String,
+    pub expected_ssh_port: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

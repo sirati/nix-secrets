@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use nix_secrets_deploy::{
-    load_and_validate_manifest, load_target_state, run_generated_tasks, system_hostname, Deployer,
-    DeploymentBatch, SecretDeployment,
+    install_public_default, load_and_validate_manifest, load_target_state, run_generated_tasks,
+    system_hostname, Deployer, DeploymentBatch, SecretDeployment,
 };
 use nix_secrets_transport::serve_deployment;
 use std::io;
@@ -19,7 +19,36 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os();
     let _program = args.next();
-    if args.next().as_deref() != Some(std::ffi::OsStr::new("--manifest")) {
+    let first = args.next();
+    if first.as_deref() == Some(std::ffi::OsStr::new("--install-public-default")) {
+        let manifest_flag = args.next();
+        let manifest = args.next();
+        let identifier_flag = args.next();
+        let identifier = args.next();
+        let source_flag = args.next();
+        let source = args.next();
+        let version_flag = args.next();
+        let version = args.next();
+        if manifest_flag.as_deref() != Some(std::ffi::OsStr::new("--manifest"))
+            || identifier_flag.as_deref() != Some(std::ffi::OsStr::new("--identifier"))
+            || source_flag.as_deref() != Some(std::ffi::OsStr::new("--source"))
+            || version_flag.as_deref() != Some(std::ffi::OsStr::new("--version"))
+            || args.next().is_some()
+        {
+            return Err("invalid public default invocation".into());
+        }
+        let identifier = identifier.ok_or("missing identifier")?;
+        let version = version.ok_or("missing version")?;
+        return install_public_default(
+            Path::new(&manifest.ok_or("missing manifest")?),
+            &system_hostname()?,
+            identifier.to_str().ok_or("identifier is not UTF-8")?,
+            Path::new(&source.ok_or("missing source")?),
+            version.to_str().ok_or("version is not UTF-8")?,
+        )
+        .map_err(Into::into);
+    }
+    if first.as_deref() != Some(std::ffi::OsStr::new("--manifest")) {
         return Err("usage: secret-deploy --manifest ABSOLUTE-NIX-STORE-JSON".into());
     }
     let manifest = args.next().ok_or("--manifest requires a path")?;
@@ -44,7 +73,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::path::Path::new(&manifest);
     let hostname = system_hostname()?;
     let deployer = Deployer::persistent();
-    let state = load_target_state(path, &hostname, &deployer.current_versions()?)?;
+    let public_deployer = Deployer::public_info();
+    let mut current = deployer.current_versions()?;
+    current.extend(public_deployer.current_versions()?);
+    let state = load_target_state(path, &hostname, &current)?;
     let stdin = io::stdin();
     let stdout = io::stdout();
     serve_deployment(stdin.lock(), stdout.lock(), state, |mut batch| {
@@ -70,9 +102,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let resolved = load_and_validate_manifest(path, &hostname, &local)
             .map_err(|error| error.to_string())?;
         let audit_details = resolved.audit_details();
-        let previous = deployer
-            .deploy_with_previous(&resolved)
-            .map_err(|error| error.to_string())?;
+        let (secrets, public) = resolved.partition();
+        let mut previous = std::collections::BTreeMap::new();
+        if !public.is_empty() {
+            previous.extend(
+                public_deployer
+                    .deploy_with_previous(&public)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        if !secrets.is_empty() {
+            previous.extend(
+                deployer
+                    .deploy_with_previous(&secrets)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
         let audit = audit::event(
             &hostname,
             &local.requested_identifiers,
@@ -88,9 +133,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         eprintln!("nix-secrets-audit: {audit}");
         Ok((
-            deployer
-                .current_versions()
-                .map_err(|error| error.to_string())?,
+            {
+                let mut versions = deployer
+                    .current_versions()
+                    .map_err(|error| error.to_string())?;
+                versions.extend(
+                    public_deployer
+                        .current_versions()
+                        .map_err(|error| error.to_string())?,
+                );
+                versions
+            },
             generated.public_keys,
         ))
     })?;

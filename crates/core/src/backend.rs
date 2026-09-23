@@ -35,6 +35,36 @@ pub enum Request {
     Remove {
         path: SecretPath,
     },
+    RemoveIfVersion {
+        path: SecretPath,
+        expected_version: Vec<u8>,
+    },
+    GetGeneratedPublicKey {
+        path: SecretPath,
+    },
+    SetGeneratedPublicKeyIfVersion {
+        path: SecretPath,
+        value: crate::GeneratedPublicKey,
+        expected_version: Option<String>,
+    },
+    SetPublicKeyIfVersion {
+        path: SecretPath,
+        public_key: String,
+        expected_version: Vec<u8>,
+    },
+    ListPublicInfo,
+    GetPublicInfo {
+        shared_id: String,
+    },
+    SetPublicInfoIfVersion {
+        path: SecretPath,
+        value: crate::PublicInfoRecord,
+        expected_version: Option<String>,
+    },
+    RemovePublicInfoIfVersion {
+        path: SecretPath,
+        expected_version: String,
+    },
     RegisterFrontend,
     PollApprovals,
     SubmitApproval {
@@ -74,6 +104,15 @@ pub enum Response {
     Updated,
     Removed {
         existed: bool,
+    },
+    GeneratedPublicKey {
+        value: Option<crate::GeneratedPublicKey>,
+    },
+    PublicInfo {
+        value: Option<crate::PublicInfoRecord>,
+    },
+    PublicInfoEntries {
+        entries: std::collections::BTreeMap<String, crate::PublicInfoRecord>,
     },
     Error {
         message: String,
@@ -183,6 +222,61 @@ fn handle_client(
                 .map_err(|error| error.to_string()),
             Request::Remove { path } => store
                 .remove(schema, &path)
+                .map(|existed| Response::Removed { existed })
+                .map_err(|error| error.to_string()),
+            Request::RemoveIfVersion {
+                path,
+                expected_version,
+            } => store
+                .remove_if_version(schema, &path, &expected_version)
+                .map(|existed| Response::Removed { existed })
+                .map_err(|error| error.to_string()),
+            Request::GetGeneratedPublicKey { path } => store
+                .generated_public_key(&path)
+                .map(|value| Response::GeneratedPublicKey { value })
+                .map_err(|error| error.to_string()),
+            Request::SetGeneratedPublicKeyIfVersion {
+                path,
+                value,
+                expected_version,
+            } => store
+                .set_generated_public_key_if_version(
+                    schema,
+                    &path,
+                    value,
+                    expected_version.as_deref(),
+                )
+                .map(|()| Response::Updated)
+                .map_err(|error| error.to_string()),
+            Request::SetPublicKeyIfVersion {
+                path,
+                public_key,
+                expected_version,
+            } => store
+                .set_public_key_if_version(schema, &path, public_key, &expected_version)
+                .map(|()| Response::Updated)
+                .map_err(|error| error.to_string()),
+            Request::ListPublicInfo => store
+                .list_public_info()
+                .map(|entries| Response::PublicInfoEntries { entries })
+                .map_err(|error| error.to_string()),
+            Request::GetPublicInfo { shared_id } => store
+                .get_public_info(&shared_id)
+                .map(|value| Response::PublicInfo { value })
+                .map_err(|error| error.to_string()),
+            Request::SetPublicInfoIfVersion {
+                path,
+                value,
+                expected_version,
+            } => store
+                .set_public_info_if_version(schema, &path, value, expected_version.as_deref())
+                .map(|()| Response::Updated)
+                .map_err(|error| error.to_string()),
+            Request::RemovePublicInfoIfVersion {
+                path,
+                expected_version,
+            } => store
+                .remove_public_info_if_version(schema, &path, &expected_version)
                 .map(|existed| Response::Removed { existed })
                 .map_err(|error| error.to_string()),
             Request::RegisterFrontend => with_broker(broker, |state| {

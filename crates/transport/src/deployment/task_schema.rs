@@ -24,7 +24,7 @@ pub(super) fn validate_task_spec(
         return Err(DeploymentError::Invalid("invalid storage box endpoint"));
     }
     let mut unique = BTreeSet::new();
-    if bootstrap.host_public_keys.is_empty()
+    if (bootstrap.host_public_keys.is_empty() == bootstrap.known_hosts_file.is_none())
         || bootstrap
             .host_public_keys
             .iter()
@@ -33,6 +33,13 @@ pub(super) fn validate_task_spec(
         return Err(DeploymentError::Invalid(
             "invalid pinned storage box host key",
         ));
+    }
+    if bootstrap
+        .known_hosts_file
+        .as_deref()
+        .is_some_and(|path| !path.starts_with("/persistent/public-info/") || path.contains(".."))
+    {
+        return Err(DeploymentError::Invalid("invalid knownHostsFile path"));
     }
     validate_output(identifier, output)
 }

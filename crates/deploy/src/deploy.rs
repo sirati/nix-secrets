@@ -52,6 +52,13 @@ impl Deployer {
         }
     }
 
+    pub fn public_info() -> Self {
+        Self {
+            root: PathBuf::from("/persistent/public-info"),
+            require_root_owner: true,
+        }
+    }
+
     pub fn at(root: impl Into<PathBuf>) -> Result<Self, DeployError> {
         let root = root.into();
         if !root.is_absolute() {

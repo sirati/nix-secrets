@@ -1,5 +1,6 @@
-use crate::tree::Row;
+use crate::tree::{Row, RowCategory};
 use std::fmt;
+use std::time::Instant;
 use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,11 +19,26 @@ pub struct TaskApproval {
     pub identifier: String,
     pub input_is_set: bool,
     pub output_is_set: Option<bool>,
+    pub requires_input: bool,
 }
 
 #[derive(Eq, PartialEq)]
 pub enum Mode {
     Browse,
+    Help {
+        scroll: u16,
+    },
+    Search {
+        query: String,
+    },
+    DeleteConfirm {
+        path: String,
+    },
+    Reveal {
+        path: String,
+        value: Zeroizing<Vec<u8>>,
+        scroll: u16,
+    },
     Edit {
         path: String,
         value: Zeroizing<Vec<u8>>,
@@ -53,6 +69,16 @@ impl fmt::Debug for Mode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Browse => formatter.write_str("Browse"),
+            Self::Help { scroll } => formatter.debug_tuple("Help").field(scroll).finish(),
+            Self::Search { query } => formatter.debug_tuple("Search").field(query).finish(),
+            Self::DeleteConfirm { path } => {
+                formatter.debug_tuple("DeleteConfirm").field(path).finish()
+            }
+            Self::Reveal { path, .. } => formatter
+                .debug_struct("Reveal")
+                .field("path", path)
+                .field("value", &"<redacted>")
+                .finish(),
             Self::Edit { path, .. } => formatter
                 .debug_struct("Edit")
                 .field("path", path)
@@ -96,30 +122,124 @@ pub struct Model {
     pub selected: usize,
     pub mode: Mode,
     pub message: Option<String>,
+    pub message_since: Option<Instant>,
+    pub filter: ViewFilter,
+    pub human_only: bool,
+    pub search: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ViewFilter {
+    All,
+    Keys,
+    Passwords,
+    PublicInfo,
+}
+
+impl ViewFilter {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Keys,
+            Self::Keys => Self::Passwords,
+            Self::Passwords => Self::PublicInfo,
+            Self::PublicInfo => Self::All,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Keys => "keys",
+            Self::Passwords => "passwords",
+            Self::PublicInfo => "public info",
+        }
+    }
 }
 
 impl Model {
+    pub fn update_rows(&mut self, rows: Vec<Row>) {
+        let selected_path = self.selected().and_then(|row| row.path.clone());
+        self.rows = rows;
+        if let Some(path) = selected_path {
+            self.selected = self
+                .visible_rows()
+                .iter()
+                .position(|index| self.rows[*index].path.as_deref() == Some(path.as_str()))
+                .unwrap_or(0);
+        } else {
+            self.selected = self
+                .selected
+                .min(self.visible_rows().len().saturating_sub(1));
+        }
+    }
     pub fn new(rows: Vec<Row>) -> Self {
         Self {
             rows,
             selected: 0,
             mode: Mode::Browse,
             message: None,
+            message_since: None,
+            filter: ViewFilter::All,
+            human_only: false,
+            search: String::new(),
         }
     }
 
     pub fn selected(&self) -> Option<&Row> {
-        self.rows.get(self.selected)
+        self.visible_rows()
+            .get(self.selected)
+            .and_then(|index| self.rows.get(*index))
+    }
+
+    pub fn visible_rows(&self) -> Vec<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let visible = match self.filter {
+                    ViewFilter::All => true,
+                    ViewFilter::Keys => row.category == RowCategory::Key,
+                    ViewFilter::Passwords => row.category == RowCategory::Password,
+                    ViewFilter::PublicInfo => row.category == RowCategory::PublicInfo,
+                };
+                let human_visible = !self.human_only || row.human_facing;
+                let needle = self.search.to_ascii_lowercase();
+                let searchable = format!(
+                    "{} {} {}",
+                    row.name,
+                    row.path.as_deref().unwrap_or(""),
+                    row.description.as_deref().unwrap_or("")
+                )
+                .to_ascii_lowercase();
+                (visible && human_visible && searchable.contains(&needle)).then_some(index)
+            })
+            .collect()
+    }
+
+    pub fn cycle_filter(&mut self) {
+        self.filter = self.filter.next();
+        self.selected = 0;
+        self.message = Some(format!("showing {}", self.filter.name()));
+    }
+
+    pub fn toggle_human(&mut self) {
+        self.human_only = !self.human_only;
+        self.selected = 0;
+        self.message = Some(
+            if self.human_only {
+                "showing human-facing items"
+            } else {
+                "showing all audiences"
+            }
+            .into(),
+        );
     }
 
     pub fn move_by(&mut self, amount: isize) {
-        if self.rows.is_empty() {
+        let count = self.visible_rows().len();
+        if count == 0 {
             return;
         }
-        self.selected = self
-            .selected
-            .saturating_add_signed(amount)
-            .min(self.rows.len() - 1);
+        self.selected = self.selected.saturating_add_signed(amount).min(count - 1);
     }
 
     pub fn begin_value(&mut self, value: Vec<u8>) {
@@ -145,6 +265,18 @@ impl Model {
         }
         self.mode = Mode::Browse;
         self.message = Some(format!("saved {path}"));
+    }
+
+    pub fn mark_deleted(&mut self, path: &str) {
+        if let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.path.as_deref() == Some(path))
+        {
+            row.is_set = false;
+        }
+        self.mode = Mode::Browse;
+        self.message = Some(format!("deleted {path}"));
     }
 
     pub fn apply_task_status(&mut self, request: &ApprovalRequest) {
@@ -174,6 +306,9 @@ mod tests {
             is_task: false,
             can_generate: false,
             output_is_set: None,
+            description: None,
+            category: RowCategory::Other,
+            human_facing: false,
         }
     }
 

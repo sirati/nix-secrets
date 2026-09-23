@@ -2,7 +2,8 @@ use crate::manifest::load_schema;
 use crate::{DeployError, SecretDeployment};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use nix::unistd::{Group, User};
-use nix_secrets_core::{GeneratedSecretType, SecretPath};
+use nix_secrets_core::schema::SecretNode;
+use nix_secrets_core::{GeneratedSecretType, Schema, SecretKind, SecretPath};
 use nix_secrets_storagebox_bootstrap::{
     ClientContribution, DevUrandom, Engine, OsKeyGenerator, Output, RusshBackend, StorageBoxTask,
     SystemClock,
@@ -11,7 +12,7 @@ use nix_secrets_transport::TaskEntry;
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use zeroize::Zeroizing;
 
@@ -43,10 +44,13 @@ pub fn run_generated_tasks(
         let generated = spec.generated_secret;
         validate_output(&path, &generated.output)?;
         let mode = parse_mode(&generated.output.mode)?;
-        let password = decode_password(&entry.password_base64)?;
         let contribution = decode_contribution(&entry.client_contribution_base64)?;
         if matches!(generated.secret_type, GeneratedSecretType::LocalSshKey) {
-            let _ = password;
+            if !entry.password_base64.is_empty() {
+                return Err(invalid(
+                    "local SSH key task must not have a bootstrap password",
+                ));
+            }
             use nix_secrets_storagebox_bootstrap::KeyGenerator;
             let mut entropy = DevUrandom::open().map_err(task_error)?;
             std::io::Write::write_all(&mut entropy, contribution.expose()).map_err(task_error)?;
@@ -81,6 +85,12 @@ pub fn run_generated_tasks(
         let bootstrap = generated
             .bootstrap
             .ok_or_else(|| invalid("storage box bootstrap missing"))?;
+        let pinned_host_keys = if let Some(file) = bootstrap.known_hosts_file.as_deref() {
+            read_attested_known_hosts(&schema, hostname, file, &bootstrap.host, bootstrap.port)?
+        } else {
+            bootstrap.host_public_keys
+        };
+        let password = decode_password(&entry.password_base64)?;
         let task = StorageBoxTask {
             schema_version: 1,
             task_id: entry.identifier.clone(),
@@ -88,7 +98,7 @@ pub fn run_generated_tasks(
             storage_box_host: bootstrap.host,
             storage_box_user: bootstrap.user,
             port: bootstrap.port,
-            pinned_host_keys: bootstrap.host_public_keys,
+            pinned_host_keys,
             output: Output {
                 path: generated.output.path.clone(),
                 owner: generated.output.owner,
@@ -111,6 +121,7 @@ pub fn run_generated_tasks(
                 existing.as_ref().map(|value| value.as_str()),
             )
             .map_err(task_error)?;
+        public_keys.insert(entry.identifier.clone(), key.public_key.clone());
         outputs.push(SecretDeployment {
             identifier: entry.identifier.clone(),
             version_id: entry.version_id.clone(),
@@ -121,6 +132,72 @@ pub fn run_generated_tasks(
         deployments: outputs,
         public_keys,
     })
+}
+
+fn read_attested_known_hosts(
+    schema: &Schema,
+    hostname: &str,
+    file: &str,
+    host: &str,
+    port: u16,
+) -> Result<Vec<String>, DeployError> {
+    let host_schema = schema
+        .0
+        .get(hostname)
+        .ok_or_else(|| invalid("host is absent from manifest"))?;
+    fn matching(node: &SecretNode, file: &str, host: &str, port: u16) -> bool {
+        match node {
+            SecretNode::Secret(leaf) => {
+                matches!(leaf.kind, SecretKind::PublicInfo)
+                    && leaf.destination.path == file
+                    && leaf.expected_ssh_host.as_deref() == Some(host)
+                    && leaf.expected_ssh_port == Some(port)
+            }
+            SecretNode::Branch(children) => children
+                .values()
+                .any(|child| matching(child, file, host, port)),
+            SecretNode::Generated(_) => false,
+        }
+    }
+    if !host_schema
+        .service_groups
+        .values()
+        .flat_map(|services| services.values())
+        .any(|node| matching(node, file, host, port))
+    {
+        return Err(invalid(
+            "knownHostsFile is not an attested public-info destination",
+        ));
+    }
+    let mut handle = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(file)?;
+    let meta = handle.metadata()?;
+    if !meta.is_file()
+        || meta.uid() != 0
+        || meta.gid() != 0
+        || meta.permissions().mode() & 0o777 != 0o644
+        || meta.len() > 4096
+    {
+        return Err(invalid(
+            "knownHostsFile has invalid ownership, mode, or length",
+        ));
+    }
+    let mut value = String::new();
+    handle.read_to_string(&mut value)?;
+    nix_secrets_core::schema::validate_ssh_known_hosts(&value, host, port)
+        .map_err(|error| invalid(error))?;
+    let line = value.trim_end_matches('\n');
+    let mut parts = line.split_ascii_whitespace();
+    let _host = parts.next();
+    let algorithm = parts
+        .next()
+        .ok_or_else(|| invalid("missing knownHostsFile algorithm"))?;
+    let encoded = parts
+        .next()
+        .ok_or_else(|| invalid("missing knownHostsFile key"))?;
+    Ok(vec![format!("{algorithm} {encoded}")])
 }
 
 fn decode_password(value: &str) -> Result<Zeroizing<Vec<u8>>, DeployError> {

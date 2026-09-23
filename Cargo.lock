@@ -1350,6 +1350,7 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_json",
+ "ssh-key 0.6.7",
  "tempfile",
  "thiserror",
  "toml",
@@ -1378,6 +1379,7 @@ dependencies = [
  "nix-secrets-transport",
  "serde",
  "serde_json",
+ "ssh-key 0.6.7",
  "tempfile",
  "time",
  "zeroize",
@@ -1396,6 +1398,7 @@ dependencies = [
  "ratatui",
  "rustix 1.1.5",
  "serde_json",
+ "ssh-key 0.6.7",
  "zeroize",
 ]
 

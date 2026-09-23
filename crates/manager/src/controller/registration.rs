@@ -25,9 +25,29 @@ impl Controller {
             else {
                 return Err("generated key response did not match the schema".into());
             };
+            let (stamp, public_key) = match generated.generated_secret.secret_type {
+                nix_secrets_core::GeneratedSecretType::LocalSshKey => {
+                    let (stamp, key) = parse_dated_key(dated_key)?;
+                    (Some(stamp), key)
+                }
+                nix_secrets_core::GeneratedSecretType::StorageBoxSshKey => {
+                    let key = ssh_key::PublicKey::from_openssh(dated_key)
+                        .map_err(|_| "invalid target Storage Box public key")?;
+                    if key.algorithm() != ssh_key::Algorithm::Ed25519 {
+                        return Err("target Storage Box key is not Ed25519".into());
+                    }
+                    (None, dated_key.as_str())
+                }
+            };
+            self.save_generated_public_key(
+                &source,
+                generated.generated_secret.secret_type,
+                public_key,
+            )?;
             let Some(destination_id) = generated.generated_secret.register_at else {
                 continue;
             };
+            let stamp = stamp.ok_or("Storage Box task cannot register an authorized key")?;
             let destination = SecretPath::parse(&destination_id).map_err(|e| e.to_string())?;
             let LeafSpec::Stored(target) =
                 self.schema.leaf(&destination).map_err(|e| e.to_string())?
@@ -39,7 +59,6 @@ impl Controller {
                     "public key registration destination lacks named-key validation".into(),
                 );
             }
-            let (stamp, public_key) = parse_dated_key(dated_key)?;
             let name = format!("{source_host}-{stamp}");
             let recipients = target
                 .recipient_ids
@@ -79,6 +98,24 @@ impl Controller {
                     current.map(|record| record.version_id.clone()),
                 ) {
                     Ok(()) => {
+                        let saved = self
+                            .client
+                            .get(&destination)
+                            .map_err(|e| e.to_string())?
+                            .ok_or("registered public key disappeared after save")?;
+                        let saved = EncryptedSecret {
+                            format_version: saved.format_version,
+                            version_id: saved.version_id,
+                            recipient_ids: saved.recipient_ids,
+                            age_ciphertext: saved.age_ciphertext,
+                        };
+                        let verified = decrypt_secret(&destination_id, &saved, &self.provider)
+                            .map_err(|e| e.to_string())?;
+                        if verified.as_slice() != updated.as_bytes() {
+                            return Err(
+                                "registered public key failed read-back verification".into()
+                            );
+                        }
                         registered = true;
                         break;
                     }

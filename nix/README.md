@@ -5,6 +5,20 @@ secret as a leaf with a deployment destination. Configuration contains public
 metadata only. A password leaf may declare `valueType = "password"` and optional
 consumer format limits. The TUI offers password and passphrase generation as
 an operator choice.
+Use `valueType = "key"` for private keys shown in the key-only view. An optional
+`description` on any leaf is shown when it is selected. Set
+`humanFacing = true` for values people enter or use directly; the TUI can
+restrict its view to these leaves. Generated password/passphrase choices are
+available for every password leaf, and consumer constraints describe only the
+receiving program's format limits. Set
+`destination.contentType = "openssh-private-key"` or `"openssh-public-key"`
+when the consumer requires that format; the frontend and target both reject
+malformed key material. `named-ssh-ed25519-public-keys` remains available for
+the authorized-key inventory.
+For a stored OpenSSH private key, the TUI derives its public half when setting
+the value and saves that public key beside the ciphertext in TOML. The `p`
+hotkey copies the public key without decrypting the private key. Target-generated
+keys save their returned public metadata after a compare-and-set and read-back.
 
 ```nix
 {
@@ -79,10 +93,42 @@ The normalized leaf has `kind = "generated"`. Ordinary destination leaves have
 service readiness checks. Host keys are complete, pinned OpenSSH public-key
 lines; duplicate pins and ports other than the Storage Box SSH port 23 fail
 schema validation.
+For a host key maintained as public information, use
+`bootstrap.knownHostsFile = "/persistent/public-info/storage-box/known-hosts"`
+instead of `hostPublicKeys`. The target requires that path to be an attested
+public-info destination for the same host and port, then reads and validates
+the current file before connecting. It never fetches or accepts a host key on
+its own.
 
-`defaultRecipientPublicKeys` is inherited by every leaf. A service can set
-`recipientPublicKeys`, a subtree can set `_recipientPublicKeys`, and a leaf can
-set `recipientPublicKeys`.
+To name recipients once, use
+`recipientPublicKeys = { primary = "ssh-ed25519 ..."; };` and
+`defaultRecipientNames = [ "primary" ];` at `services.nixSecrets`. A service
+can set `recipientNames`, a subtree `_recipientNames`, and a leaf
+`recipientNames`. Existing `defaultRecipientPublicKeys`, service
+`recipientPublicKeys`, subtree `_recipientPublicKeys`, and leaf
+`recipientPublicKeys` lists remain supported. New TOML records refer to a
+versioned recipient name; the top-level registry retains older identities
+after rotation.
+
+Public information uses a leaf with `kind = "public-info"`,
+`sharedPublicId = "storage-box/known-hosts"`, `expectedSshHost`, and
+`expectedSshPort`. Its destination is the corresponding
+`/persistent/public-info/storage-box/known-hosts`, owned by root with mode
+`0644` and `contentType = "ssh-known-hosts"`. The value is one exact Ed25519
+`[host]:port` known-hosts line, stored in plaintext under
+`[public_info."storage-box/known-hosts"]` in `nix-secrets.toml`. The same value
+can be deployed to multiple hosts; each target checks the host, port, key
+format, and destination again. Public-info leaves never create a
+secrets-readiness waiter.
+
+Set `installDefaultIfMissing = true` on a public-info leaf and
+`publicInfoInventoryFile = "/absolute/path/to/nix-secrets.toml"` to embed only
+that public value as a first-boot default. Evaluation reads the TOML file and
+copies the selected public value into a small store file. A Rust one-shot
+installs it into a managed public-info generation only when the destination is
+absent; later NixOS switches leave deployed rotations intact. If the TOML
+entry is unset, no default unit is generated. The inventory path must be
+readable during Nix evaluation.
 
 The normalized public inventory is available as
 `config.services.nixSecrets.evaluated`. Its outer shape is

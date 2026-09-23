@@ -1,4 +1,6 @@
-use crate::schema::{LeafSpec, Schema, SchemaError, SecretPath};
+use crate::schema::{
+    LeafSpec, Schema, SchemaError, SecretKind, SecretPath, validate_ssh_known_hosts,
+};
 use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -9,6 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
+mod generated_metadata;
+mod persistence;
+mod public_info;
+mod validation;
+use validation::{hydrate_record, validate_public_metadata, validate_record};
+
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -18,10 +26,31 @@ pub struct EncryptedSecret {
     /// Opaque random identifier generated whenever the value is replaced.
     #[serde(with = "base64_bytes")]
     pub version_id: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recipient_ids: Vec<String>,
+    /// Registry references keep repeated recipient fingerprints out of TOML records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recipient_refs: Vec<String>,
     /// A complete age file encoded for TOML storage.
     #[serde(with = "base64_bytes")]
     pub age_ciphertext: Vec<u8>,
+    /// Plaintext public half of an OpenSSH private key, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedPublicKey {
+    pub version_id: String,
+    pub public_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicInfoRecord {
+    pub version_id: String,
+    pub value: String,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -29,6 +58,12 @@ pub struct EncryptedSecret {
 struct StoreDocument {
     #[serde(default)]
     secrets: BTreeMap<String, EncryptedSecret>,
+    #[serde(default)]
+    generated_public_keys: BTreeMap<String, GeneratedPublicKey>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    recipient_registry: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    public_info: BTreeMap<String, PublicInfoRecord>,
 }
 
 pub struct SecretStore {
@@ -50,6 +85,12 @@ pub enum StoreError {
     RecipientMismatch,
     #[error("stored age record metadata is invalid")]
     InvalidRecord,
+    #[error("public key metadata does not match the evaluated secret type")]
+    InvalidPublicKey,
+    #[error("recipient registry reference is missing or inconsistent")]
+    InvalidRecipientRegistry,
+    #[error("public-info value or schema is invalid")]
+    InvalidPublicInfo,
     #[error("secret version changed during update")]
     VersionConflict,
 }
@@ -63,12 +104,22 @@ impl SecretStore {
 
     pub fn get(&self, path: &SecretPath) -> Result<Option<EncryptedSecret>, StoreError> {
         self.with_lock(false, |document| {
-            Ok(document.secrets.get(&path.to_string()).cloned())
+            document
+                .secrets
+                .get(&path.to_string())
+                .map(|record| hydrate_record(document, record))
+                .transpose()
         })
     }
 
     pub fn list(&self) -> Result<BTreeMap<String, EncryptedSecret>, StoreError> {
-        self.with_lock(false, |document| Ok(document.secrets.clone()))
+        self.with_lock(false, |document| {
+            document
+                .secrets
+                .iter()
+                .map(|(path, record)| Ok((path.clone(), hydrate_record(document, record)?)))
+                .collect()
+        })
     }
 
     pub fn set(
@@ -94,17 +145,26 @@ impl SecretStore {
         &self,
         schema: &Schema,
         path: &SecretPath,
-        envelope: EncryptedSecret,
+        mut envelope: EncryptedSecret,
         expected_version: Option<Option<&[u8]>>,
     ) -> Result<(), StoreError> {
-        let recipients = match schema.leaf(path)? {
-            LeafSpec::Stored(spec) => spec.recipient_ids,
-            LeafSpec::Generated(spec) => spec.recipient_ids,
+        let leaf = schema.leaf(path)?;
+        if matches!(&leaf, LeafSpec::Stored(spec) if matches!(spec.kind, SecretKind::PublicInfo)) {
+            return Err(StoreError::InvalidPublicInfo);
+        }
+        let recipients = match &leaf {
+            LeafSpec::Stored(spec) => &spec.recipient_ids,
+            LeafSpec::Generated(spec) => &spec.recipient_ids,
         };
-        if recipients != envelope.recipient_ids {
+        if *recipients != envelope.recipient_ids {
             return Err(StoreError::RecipientMismatch);
         }
+        validate_public_metadata(&leaf, envelope.public_key.as_deref())?;
         validate_record(&envelope)?;
+        let names = match &leaf {
+            LeafSpec::Stored(spec) => &spec.recipient_names,
+            LeafSpec::Generated(spec) => &spec.recipient_names,
+        };
         self.with_lock(true, |document| {
             if let Some(expected) = expected_version {
                 let actual = document
@@ -115,92 +175,76 @@ impl SecretStore {
                     return Err(StoreError::VersionConflict);
                 }
             }
+            if !names.is_empty() {
+                if names.len() != envelope.recipient_ids.len() {
+                    return Err(StoreError::InvalidRecipientRegistry);
+                }
+                let mut refs = Vec::with_capacity(names.len());
+                for (name, id) in names.iter().zip(&envelope.recipient_ids) {
+                    let reference = document
+                        .recipient_registry
+                        .iter()
+                        .find(|(reference, value)| {
+                            reference.starts_with(&format!("{name}#")) && *value == id
+                        })
+                        .map(|(reference, _)| reference.clone())
+                        .unwrap_or_else(|| {
+                            let mut revision = 0_u32;
+                            loop {
+                                let reference = format!("{name}#{revision}");
+                                if !document.recipient_registry.contains_key(&reference) {
+                                    break reference;
+                                }
+                                revision += 1;
+                            }
+                        });
+                    document
+                        .recipient_registry
+                        .entry(reference.clone())
+                        .or_insert_with(|| id.clone());
+                    refs.push(reference);
+                }
+                envelope.recipient_refs = refs;
+                envelope.recipient_ids.clear();
+            } else {
+                envelope.recipient_refs.clear();
+            }
             document.secrets.insert(path.to_string(), envelope);
             Ok(())
         })
     }
 
     pub fn remove(&self, schema: &Schema, path: &SecretPath) -> Result<bool, StoreError> {
-        schema.leaf(path)?;
+        if matches!(schema.leaf(path)?, LeafSpec::Stored(spec) if matches!(spec.kind, SecretKind::PublicInfo))
+        {
+            return Err(StoreError::InvalidPublicInfo);
+        }
         self.with_lock(true, |document| {
             Ok(document.secrets.remove(&path.to_string()).is_some())
         })
     }
 
-    fn with_lock<T>(
+    pub fn remove_if_version(
         &self,
-        write: bool,
-        action: impl FnOnce(&mut StoreDocument) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(&self.lock_path)?;
-        flock(
-            &lock,
-            if write {
-                FlockOperation::LockExclusive
-            } else {
-                FlockOperation::LockShared
-            },
-        )
-        .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))?;
-        let mut document = self.read_document()?;
-        let result = action(&mut document)?;
-        if write {
-            self.write_document(parent, &document)?;
+        schema: &Schema,
+        path: &SecretPath,
+        expected_version: &[u8],
+    ) -> Result<bool, StoreError> {
+        if matches!(schema.leaf(path)?, LeafSpec::Stored(spec) if matches!(spec.kind, SecretKind::PublicInfo))
+        {
+            return Err(StoreError::InvalidPublicInfo);
         }
-        Ok(result)
+        self.with_lock(true, |document| {
+            let actual = document
+                .secrets
+                .get(&path.to_string())
+                .map(|value| value.version_id.as_slice());
+            if actual != Some(expected_version) {
+                return Err(StoreError::VersionConflict);
+            }
+            Ok(document.secrets.remove(&path.to_string()).is_some())
+        })
     }
-
-    fn read_document(&self) -> Result<StoreDocument, StoreError> {
-        match fs::read_to_string(&self.path) {
-            Ok(value) => Ok(toml::from_str(&value)?),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(StoreDocument::default()),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    fn write_document(&self, parent: &Path, document: &StoreDocument) -> Result<(), StoreError> {
-        let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let name = format!(".nix-secrets.{}.{}.tmp", std::process::id(), id);
-        let temp_path = parent.join(name);
-        let mut temp = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp_path)?;
-        let result = (|| {
-            temp.write_all(toml::to_string_pretty(document)?.as_bytes())?;
-            temp.sync_all()?;
-            fs::rename(&temp_path, &self.path)?;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
-            File::open(parent)?.sync_all()?;
-            Ok::<_, StoreError>(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(temp_path);
-        }
-        result
-    }
-}
-
-fn validate_record(record: &EncryptedSecret) -> Result<(), StoreError> {
-    const MAX_CIPHERTEXT_BYTES: usize = 64 * 1024 * 1024;
-    if record.format_version != 1
-        || record.version_id.len() != 16
-        || record.recipient_ids.is_empty()
-        || record.age_ciphertext.is_empty()
-        || record.age_ciphertext.len() > MAX_CIPHERTEXT_BYTES
-    {
-        return Err(StoreError::InvalidRecord);
-    }
-    Ok(())
 }
 
 mod base64_bytes {

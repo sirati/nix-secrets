@@ -276,7 +276,9 @@ fn evaluates_with_fixed_nix_arguments_and_persists_only_ciphertext() {
         format_version: 1,
         version_id: vec![7; 16],
         recipient_ids: vec!["recipient".into()],
+        recipient_refs: vec![],
         age_ciphertext: b"age-encrypted-record".to_vec(),
+        public_key: None,
     };
     write_json(&mut stream, &Request::Set { path, envelope }).unwrap();
     assert!(matches!(

@@ -4,8 +4,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use nix::unistd::{Group, User};
 use nix_secrets_core::schema::{Destination, GeneratedSecretType, Schema, SecretNode};
 use nix_secrets_transport::{
-    Destination as WireDestination, StorageBoxBootstrap as WireBootstrap, TargetSecret,
-    TargetState, TargetTask, LOCAL_SSH_KEY, STORAGE_BOX_SSH_KEY,
+    Destination as WireDestination, PublicInfoAttestation, StorageBoxBootstrap as WireBootstrap,
+    TargetSecret, TargetState, TargetTask, LOCAL_SSH_KEY, STORAGE_BOX_SSH_KEY,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -22,6 +22,7 @@ struct Expected {
 struct ManifestEntry {
     service: String,
     destination: Destination,
+    public_info: Option<PublicInfoAttestation>,
 }
 
 #[derive(Default)]
@@ -120,6 +121,13 @@ fn flatten_target(
                     mode: leaf.destination.mode.clone(),
                     consumer_units: leaf.consumer_units.clone(),
                 },
+                public_info: leaf.shared_public_id.as_ref().map(|shared_id| {
+                    PublicInfoAttestation {
+                        shared_id: shared_id.clone(),
+                        expected_ssh_host: leaf.expected_ssh_host.clone().unwrap_or_default(),
+                        expected_ssh_port: leaf.expected_ssh_port.unwrap_or_default(),
+                    }
+                }),
                 current_version_id: versions.get(&identifier).cloned(),
             });
         }
@@ -140,6 +148,7 @@ fn flatten_target(
                     port: bootstrap.port,
                     user: bootstrap.user.clone(),
                     host_public_keys: bootstrap.host_public_keys.clone(),
+                    known_hosts_file: bootstrap.known_hosts_file.clone(),
                 }),
                 current_version_id: versions.get(&identifier).cloned(),
             });
@@ -247,10 +256,47 @@ fn validate_manifest(
         let contents = STANDARD
             .decode(&supplied.contents_base64)
             .map_err(|_| DeployError::Invalid(format!("invalid base64 for {identifier}")))?;
+        if let Some(public) = &manifest_entry.public_info {
+            let text = std::str::from_utf8(&contents)
+                .map_err(|_| DeployError::Invalid("public-info value is not UTF-8".into()))?;
+            nix_secrets_core::schema::validate_ssh_known_hosts(
+                text,
+                &public.expected_ssh_host,
+                public.expected_ssh_port,
+            )
+            .map_err(|error| DeployError::Invalid(error.into()))?;
+            if manifest_entry.destination.path
+                != format!("/persistent/public-info/{}", public.shared_id)
+            {
+                return Err(DeployError::Invalid(
+                    "public-info destination does not match its shared ID".into(),
+                ));
+            }
+        }
         if manifest_entry.destination.content_type.as_deref()
             == Some("named-ssh-ed25519-public-keys")
         {
             validate_named_ssh_keys(&contents)?;
+        }
+        match manifest_entry.destination.content_type.as_deref() {
+            Some("openssh-private-key") => {
+                let text = std::str::from_utf8(&contents)
+                    .map_err(|_| DeployError::Invalid("SSH private key is not UTF-8".into()))?;
+                let key = ssh_key::PrivateKey::from_openssh(text)
+                    .map_err(|_| DeployError::Invalid("invalid OpenSSH private key".into()))?;
+                if key.is_encrypted() {
+                    return Err(DeployError::Invalid(
+                        "OpenSSH private key requires an interactive passphrase".into(),
+                    ));
+                }
+            }
+            Some("openssh-public-key") => {
+                let text = std::str::from_utf8(&contents)
+                    .map_err(|_| DeployError::Invalid("SSH public key is not UTF-8".into()))?;
+                ssh_key::PublicKey::from_openssh(text.trim())
+                    .map_err(|_| DeployError::Invalid("invalid OpenSSH public key".into()))?;
+            }
+            _ => {}
         }
         let audit_key_names = if manifest_entry.destination.content_type.as_deref()
             == Some("named-ssh-ed25519-public-keys")

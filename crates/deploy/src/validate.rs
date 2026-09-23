@@ -19,7 +19,13 @@ pub(crate) fn validate(batch: &ResolvedBatch) -> Result<Vec<ValidatedSecret<'_>>
         .map(|spec| {
             validate_name("service", &spec.service)?;
             validate_name("secret", &spec.secret)?;
-            validate_mode(spec.mode)?;
+            if spec.class == crate::SecretClass::PublicInfo {
+                if spec.mode != 0o644 {
+                    return Err(DeployError::Invalid("public-info mode must be 0644".into()));
+                }
+            } else {
+                validate_mode(spec.mode)?;
+            }
             if spec.identifier.is_empty() || spec.version_id.is_empty() {
                 return Err(DeployError::Invalid(
                     "secret identifier and version must not be empty".into(),

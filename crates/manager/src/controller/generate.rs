@@ -55,7 +55,7 @@ pub(super) fn generate_compatible(
         GenerateKind::Passphrase => {
             let words = crate::generator::eff_large_words();
             std::iter::once(8)
-                .chain((6..=24).filter(|count| *count != 8))
+                .chain((2..=24).filter(|count| *count != 8))
                 .map(|count| crate::generator::GeneratorOptions::Passphrase {
                     words: count,
                     separator: "-".into(),
@@ -67,10 +67,19 @@ pub(super) fn generate_compatible(
     for options in candidates {
         for _ in 0..16 {
             let value = crate::generator::generate(&options).map_err(|error| error.to_string())?;
-            if constraints.is_none_or(|c| {
-                std::str::from_utf8(&value).is_ok_and(|text| c.accepts(text).is_ok())
-            }) {
-                return Ok(value);
+            let suffixes: &[&str] = if kind == GenerateKind::Passphrase {
+                &["", "1", "!", "-1!", "A1!", "_A1!", ".A1!"]
+            } else {
+                &[""]
+            };
+            for suffix in suffixes {
+                let mut candidate = value.clone();
+                candidate.extend_from_slice(suffix.as_bytes());
+                if constraints.is_none_or(|c| {
+                    std::str::from_utf8(&candidate).is_ok_and(|text| c.accepts(text).is_ok())
+                }) {
+                    return Ok(candidate);
+                }
             }
         }
     }
@@ -98,6 +107,19 @@ mod value_tests {
     fn passphrase_is_operator_choice() {
         let value = generate_compatible(GenerateKind::Passphrase, None).unwrap();
         assert_eq!(value.iter().filter(|byte| **byte == b'-').count(), 7);
+    }
+
+    #[test]
+    fn passphrase_can_satisfy_consumer_special_character_suffix() {
+        let constraints = ConsumerConstraints {
+            cannot_handle_shorter_than: Some(10),
+            cannot_handle_longer_than: Some(100),
+            matching_regex: Some("[a-z-]+[0-9]!".into()),
+        };
+        let value = generate_compatible(GenerateKind::Passphrase, Some(&constraints)).unwrap();
+        let text = std::str::from_utf8(&value).unwrap();
+        assert!(text.ends_with("1!"));
+        assert!(constraints.accepts(text).is_ok());
     }
 
     #[test]

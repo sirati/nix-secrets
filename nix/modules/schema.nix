@@ -1,4 +1,9 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   cfg = config.services.nixSecrets;
@@ -10,6 +15,11 @@ let
         type = lib.types.nullOr (lib.types.listOf lib.types.str);
         default = null;
         description = "SSH public keys overriding the inherited recipients.";
+      };
+      recipientNames = lib.mkOption {
+        type = lib.types.nullOr (lib.types.listOf lib.types.str);
+        default = null;
+        description = "Named encryption recipients overriding the inherited names.";
       };
       consumerUnits = lib.mkOption {
         type = lib.types.listOf (lib.types.strMatching ".+[.]service");
@@ -27,14 +37,26 @@ let
     };
   };
 
-  serviceValue = value:
-    value // lib.optionalAttrs (value.recipientPublicKeys == null) {
+  serviceValue =
+    value:
+    value
+    // lib.optionalAttrs (value.recipientPublicKeys == null) {
       recipientPublicKeys = cfg.defaultRecipientPublicKeys;
+    }
+    // lib.optionalAttrs (value.recipientNames == null) {
+      recipientNames = if value.recipientPublicKeys == null then cfg.defaultRecipientNames else [ ];
     };
 
   normalizeServiceSet = values: lib.mapAttrs (_: serviceValue) values;
   evaluated = secretsLib.normalizeHost {
-    inherit (cfg) hostName socketPath defaultRecipientPublicKeys deployment;
+    inherit (cfg)
+      hostName
+      socketPath
+      defaultRecipientPublicKeys
+      recipientPublicKeys
+      defaultRecipientNames
+      deployment
+      ;
     services = normalizeServiceSet cfg.services;
     userServices = lib.mapAttrs (_: normalizeServiceSet) cfg.userServices;
   };
@@ -45,11 +67,73 @@ let
   ) (builtins.attrValues serviceGroups);
   destinationPaths = map (
     leaf:
-    if leaf.kind or null == "generated" then
-      leaf.generatedSecret.output.path
-    else
-      leaf.destination.path
+    if leaf.kind or null == "generated" then leaf.generatedSecret.output.path else leaf.destination.path
   ) leaves;
+  collectPublic =
+    prefix: tree:
+    lib.concatMap (
+      name:
+      let
+        node = tree.${name};
+        identifier = "${prefix}.${name}";
+      in
+      if node ? destination || node ? generatedSecret then
+        lib.optional ((node.kind or "secret") == "public-info" && (node.installDefaultIfMissing or false)) {
+          inherit identifier;
+          leaf = node;
+        }
+      else
+        collectPublic identifier node
+    ) (builtins.attrNames tree);
+  publicEntries = lib.concatMap (
+    namespace:
+    lib.concatMap (
+      service:
+      collectPublic "${cfg.hostName}.${namespace}.${service}" serviceGroups.${namespace}.${service}
+    ) (builtins.attrNames serviceGroups.${namespace})
+  ) (builtins.attrNames serviceGroups);
+  inventory =
+    if cfg.publicInfoInventoryFile == null || !(builtins.pathExists cfg.publicInfoInventoryFile) then
+      { }
+    else
+      builtins.fromTOML (builtins.readFile cfg.publicInfoInventoryFile);
+  publicRecords = inventory.public_info or { };
+  publicDefaults = builtins.filter (
+    entry: builtins.hasAttr entry.leaf.sharedPublicId publicRecords
+  ) publicEntries;
+  defaultUnit =
+    entry:
+    let
+      hash = builtins.substring 0 16 (builtins.hashString "sha256" entry.identifier);
+      record = publicRecords.${entry.leaf.sharedPublicId};
+      value = record.value;
+      source = pkgs.writeText "nix-secrets-public-default-${hash}" value;
+    in
+    lib.nameValuePair "nix-secrets-public-default-${hash}" {
+      description = "Install declared public information if absent";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "local-fs.target" ];
+      unitConfig.RequiresMountsFor = [ "/persistent/public-info" ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = lib.escapeShellArgs [
+          "${cfg.receiver.package}/bin/secret-deploy"
+          "--install-public-default"
+          "--manifest"
+          (toString config.system.build.nixSecretsManifest)
+          "--identifier"
+          entry.identifier
+          "--source"
+          (toString source)
+          "--version"
+          (builtins.hashString "sha256" value)
+        ];
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ReadWritePaths = [ "/persistent/public-info" ];
+        UMask = "0022";
+      };
+    };
 in
 {
   options.services.nixSecrets = {
@@ -87,6 +171,21 @@ in
       default = [ ];
       description = "Default SSH public keys used to wrap secret encryption keys.";
     };
+    recipientPublicKeys = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      description = "Named SSH public keys used as encryption recipients.";
+    };
+    defaultRecipientNames = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = "Default names from recipientPublicKeys for secret encryption.";
+    };
+    publicInfoInventoryFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Optional absolute TOML path read at evaluation; only selected public_info values enter generated defaults.";
+    };
     services = lib.mkOption {
       type = lib.types.attrsOf serviceType;
       default = { };
@@ -105,16 +204,17 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [{
-      assertion = builtins.length destinationPaths
-        == builtins.length (lib.unique destinationPaths);
-      message = "services.nixSecrets secret destinations must be globally unique";
-    }];
+    assertions = [
+      {
+        assertion = builtins.length destinationPaths == builtins.length (lib.unique destinationPaths);
+        message = "services.nixSecrets secret destinations must be globally unique";
+      }
+    ];
     services.nixSecrets.evaluated = evaluated;
     system.build.nixSecretsManifest = pkgs.writeText "nix-secrets-${cfg.hostName}.json" (
       builtins.toJSON evaluated
     );
-    environment.etc."nix-secrets/manifest.json".source =
-      config.system.build.nixSecretsManifest;
+    environment.etc."nix-secrets/manifest.json".source = config.system.build.nixSecretsManifest;
+    systemd.services = lib.listToAttrs (map defaultUnit publicDefaults);
   };
 }

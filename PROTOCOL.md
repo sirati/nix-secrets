@@ -122,7 +122,21 @@ remaining compatible with the same schema leaf, recipients, and destination.
    `nix-secrets.toml`. Other frontends see the update on their next read.
 
 The backend serializes updates under an advisory lock and atomically replaces
-the complete ciphertext store.
+the complete TOML store. Named recipients are stored as versioned references
+such as `primary#0`; one top-level registry holds the corresponding key
+identity. Existing records with inline `recipient_ids` remain readable, and
+rotating a named key adds a new registry revision without changing old records.
+Stored OpenSSH private-key records carry the derived public key as plaintext
+metadata next to the ciphertext. A target-generated key registers its returned
+public half through a version-checked update and read-back; a retry reuses an
+existing target private key.
+
+Public-info leaves use a separate plaintext TOML table keyed by stable
+`sharedPublicId`. Their updates and deletions use compare-and-set. Deployment
+is still requested for a whole target and attested against the Nix manifest.
+The privileged target validates the exact known-hosts host, port, Ed25519 key,
+destination, ownership, and mode before publishing a world-readable file in
+`/persistent/public-info`. These values do not enter secret readiness gates.
 
 ## Deployment transport
 
@@ -176,9 +190,10 @@ owners are rejected.
 ## Generated-secret tasks
 
 A generated leaf has `kind = "generated"` and a `generatedSecret` declaration
-instead of a direct destination. Its canonical identifier remains the map key
-in `nix-secrets.toml`. The age ciphertext at that key contains the ephemeral
-task input; it is never interpreted as the generated output.
+instead of a direct destination. Storage Box tasks store an encrypted bootstrap
+password at their canonical identifier; that input is never interpreted as
+the generated output. Local SSH key tasks need no stored input and are absent
+from the editable TUI tree. They are generated on the target during deployment.
 
 The `storage-box-ssh-key` task declares its output destination and public
 bootstrap parameters: Storage Box host, port, user and one or more complete
@@ -186,9 +201,10 @@ pinned OpenSSH host public-key lines. Selection and target-state messages keep
 ordinary secrets and tasks in distinct arrays. This prevents a receiver from
 silently treating a task password as file contents.
 
-After target-state comparison and approval, a task entry contains the stable
-identifier, ciphertext version, password and exactly 32 frontend CSPRNG bytes.
-The password and contribution are zeroized and are carried only inside the
+After target-state comparison and approval, a Storage Box task entry contains
+the stable identifier, ciphertext version, password and exactly 32 frontend
+CSPRNG bytes. A local SSH key task uses no password. Sensitive inputs are
+zeroized and carried only inside the
 authenticated SSH stream. The receiver rejects an entry if its task type,
 identifier, version, recipients, output or bootstrap metadata differs from the
 Nix-generated manifest.

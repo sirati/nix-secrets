@@ -14,6 +14,7 @@ nix-secrets-transport = { path = "../transport" }
 ratatui = "0.29"
 rustix = { version = "1", features = ["net", "process"] }
 serde_json = "1"
+ssh-key = "0.6.7"
 zeroize = "1"
 
 [[bin]]

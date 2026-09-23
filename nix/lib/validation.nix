@@ -42,17 +42,27 @@ let
       throw "secret destination is missing: ${lib.concatStringsSep ", " missing}"
     else if extra != [ ] then
       throw "secret destination has unknown fields: ${lib.concatStringsSep ", " extra}"
-    else if destination ? contentType && destination.contentType != "named-ssh-ed25519-public-keys" then
-      throw "unsupported secret content type"
     else if
       destination ? contentType
+      && !(builtins.elem destination.contentType [
+        "named-ssh-ed25519-public-keys"
+        "openssh-private-key"
+        "openssh-public-key"
+      ])
+    then
+      throw "unsupported secret content type"
+    else if
+      (destination.contentType or null) == "named-ssh-ed25519-public-keys"
       && (
         !(destination ? authorizedForUser)
         || builtins.match "[A-Za-z0-9_-]{1,32}" destination.authorizedForUser == null
       )
     then
       throw "SSH key inventory requires authorizedForUser"
-    else if destination ? authorizedForUser && !(destination ? contentType) then
+    else if
+      destination ? authorizedForUser
+      && (destination.contentType or null) != "named-ssh-ed25519-public-keys"
+    then
       throw "authorizedForUser requires a content type"
     else if !validCategory then
       throw "secret category must be setup, service, or backup"
@@ -67,6 +77,37 @@ let
       ])
     then
       throw "secret destination mode must be 0400 or 0440"
+    else
+      destination;
+
+  validatePublicDestination =
+    sharedId: destination:
+    let
+      expected = "/persistent/public-info/${sharedId}";
+      parts = lib.splitString "/" sharedId;
+      validPart = part: builtins.match "[A-Za-z0-9_-]+" part != null && part != "." && part != "..";
+    in
+    if builtins.length parts != 2 || !(builtins.all validPart parts) then
+      throw "public-info sharedPublicId has invalid path components"
+    else if destination.path != expected || destination.category != "public-info" then
+      throw "public-info destination must be ${expected} with category public-info"
+    else if
+      destination.owner != "root" || destination.group != "root" || destination.mode != "0644"
+    then
+      throw "public-info destination must be root:root 0644"
+    else if (destination.contentType or null) != "ssh-known-hosts" then
+      throw "public-info currently requires contentType=ssh-known-hosts"
+    else if
+      builtins.attrNames destination != [
+        "category"
+        "contentType"
+        "group"
+        "mode"
+        "owner"
+        "path"
+      ]
+    then
+      throw "public-info destination has unknown fields"
     else
       destination;
 
@@ -139,12 +180,18 @@ let
         "host"
         "port"
         "user"
-        "hostPublicKeys"
       ];
       bootstrapMissing = builtins.filter (name: !(builtins.hasAttr name bootstrap)) bootstrapRequired;
-      bootstrapExtra = builtins.filter (name: !(builtins.elem name bootstrapRequired)) (
-        attrNames bootstrap
-      );
+      bootstrapExtra = builtins.filter (
+        name:
+        !(builtins.elem name (
+          bootstrapRequired
+          ++ [
+            "hostPublicKeys"
+            "knownHostsFile"
+          ]
+        ))
+      ) (attrNames bootstrap);
       keys = bootstrap.hostPublicKeys or [ ];
     in
     if missing != [ ] then
@@ -176,9 +223,19 @@ let
     else if generated.type == "storage-box-ssh-key" && bootstrap.port != 23 then
       throw "storage-box bootstrap port must be 23"
     else if
-      generated.type == "storage-box-ssh-key" && (keys == [ ] || !(builtins.all validSshPublicKey keys))
+      generated.type == "storage-box-ssh-key"
+      && ((keys == [ ]) == !(bootstrap ? knownHostsFile) || !(builtins.all validSshPublicKey keys))
     then
-      throw "storage-box bootstrap hostPublicKeys must contain complete OpenSSH public key lines"
+      throw "storage-box bootstrap requires either hostPublicKeys or knownHostsFile"
+    else if
+      generated.type == "storage-box-ssh-key"
+      && bootstrap ? knownHostsFile
+      && (
+        builtins.match "/persistent/public-info/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)+" bootstrap.knownHostsFile
+        == null
+      )
+    then
+      throw "storage-box bootstrap knownHostsFile must be a persistent public-info path"
     else if
       generated.type == "storage-box-ssh-key" && builtins.length keys != builtins.length (lib.unique keys)
     then
@@ -190,6 +247,7 @@ in
 {
   inherit
     validateDestination
+    validatePublicDestination
     validSshPublicKey
     validateConsumerConstraints
     validateGeneratedSecret

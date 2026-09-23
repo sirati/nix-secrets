@@ -4,11 +4,15 @@ use std::fmt;
 use thiserror::Error;
 
 mod generated;
-mod validation;
+mod path;
+mod registry;
+use registry::{missing, synthetic_path, validate_named_recipients, validate_shared_public_specs};
+pub(crate) mod validation;
 mod value;
 pub use generated::{
     GeneratedKind, GeneratedSecret, GeneratedSecretLeaf, GeneratedSecretType, StorageBoxBootstrap,
 };
+pub use validation::validate_ssh_known_hosts;
 use validation::{validate_component, validate_namespace, validate_tree};
 pub use value::{ConsumerConstraints, ValueType};
 
@@ -22,6 +26,8 @@ pub struct HostMetadata {
     #[serde(rename = "socketPath")]
     pub socket_path: String,
     pub deployment: DeploymentMetadata,
+    #[serde(rename = "recipientPublicKeys", default)]
+    pub recipient_public_keys: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -51,10 +57,24 @@ pub enum SecretNode {
 #[serde(deny_unknown_fields)]
 pub struct SecretLeaf {
     pub kind: SecretKind,
-    #[serde(rename = "recipientPublicKeys")]
+    #[serde(rename = "sharedPublicId", default)]
+    pub shared_public_id: Option<String>,
+    #[serde(rename = "expectedSshHost", default)]
+    pub expected_ssh_host: Option<String>,
+    #[serde(rename = "expectedSshPort", default)]
+    pub expected_ssh_port: Option<u16>,
+    #[serde(rename = "installDefaultIfMissing", default)]
+    pub install_default_if_missing: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "humanFacing", default)]
+    pub human_facing: bool,
+    #[serde(rename = "recipientPublicKeys", default)]
     pub recipient_public_keys: Vec<String>,
-    #[serde(rename = "recipientIds")]
+    #[serde(rename = "recipientIds", default)]
     pub recipient_ids: Vec<String>,
+    #[serde(rename = "recipientNames", default)]
+    pub recipient_names: Vec<String>,
     pub destination: Destination,
     #[serde(rename = "consumerUnits")]
     pub consumer_units: Vec<String>,
@@ -68,6 +88,8 @@ pub struct SecretLeaf {
 pub enum SecretKind {
     #[serde(rename = "secret")]
     Secret,
+    #[serde(rename = "public-info")]
+    PublicInfo,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -91,8 +113,16 @@ pub struct SecretPath(Vec<String>);
 #[derive(Clone, Debug)]
 pub struct SecretSpec {
     pub path: SecretPath,
+    pub kind: SecretKind,
+    pub shared_public_id: Option<String>,
+    pub expected_ssh_host: Option<String>,
+    pub expected_ssh_port: Option<u16>,
+    pub install_default_if_missing: bool,
+    pub description: Option<String>,
+    pub human_facing: bool,
     pub recipient_public_keys: Vec<String>,
     pub recipient_ids: Vec<String>,
+    pub recipient_names: Vec<String>,
     pub destination: Destination,
     pub consumer_units: Vec<String>,
     pub value_type: Option<ValueType>,
@@ -102,8 +132,11 @@ pub struct SecretSpec {
 #[derive(Clone, Debug)]
 pub struct GeneratedSecretSpec {
     pub path: SecretPath,
+    pub description: Option<String>,
+    pub human_facing: bool,
     pub recipient_public_keys: Vec<String>,
     pub recipient_ids: Vec<String>,
+    pub recipient_names: Vec<String>,
     pub generated_secret: GeneratedSecret,
     pub consumer_units: Vec<String>,
     pub value_type: Option<ValueType>,
@@ -148,34 +181,6 @@ pub enum SchemaLoadError {
     Schema(#[from] SchemaError),
 }
 
-impl SecretPath {
-    pub fn new(parts: impl IntoIterator<Item = String>) -> Result<Self, SchemaError> {
-        let parts: Vec<_> = parts.into_iter().collect();
-        if parts.len() < 4 {
-            return Err(SchemaError::TooShort);
-        }
-        for part in &parts {
-            validate_component(part)?;
-        }
-        validate_namespace(&parts[1])?;
-        Ok(Self(parts))
-    }
-
-    pub fn parse(path: &str) -> Result<Self, SchemaError> {
-        Self::new(path.split('.').map(str::to_owned))
-    }
-
-    pub fn components(&self) -> &[String] {
-        &self.0
-    }
-}
-
-impl fmt::Display for SecretPath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.join("."))
-    }
-}
-
 impl Schema {
     pub fn from_json(input: &str) -> Result<Self, SchemaLoadError> {
         let schema: Self = serde_json::from_str(input)?;
@@ -184,6 +189,7 @@ impl Schema {
     }
 
     pub fn validate(&self) -> Result<(), SchemaError> {
+        let mut public_specs = BTreeMap::<String, (String, u16)>::new();
         for (host_name, host) in &self.0 {
             validate_component(host_name)?;
             if !host.metadata.socket_path.starts_with('/') {
@@ -206,6 +212,12 @@ impl Schema {
                 for (service, tree) in services {
                     validate_component(service)?;
                     validate_tree(host_name, namespace, service, &[], tree)?;
+                    validate_named_recipients(
+                        host_name,
+                        tree,
+                        &host.metadata.recipient_public_keys,
+                    )?;
+                    validate_shared_public_specs(host_name, tree, &mut public_specs)?;
                 }
             }
         }
@@ -245,8 +257,16 @@ impl Schema {
             SecretNode::Branch(_) => Err(SchemaError::IsBranch(path.clone())),
             SecretNode::Secret(leaf) => Ok(LeafSpec::Stored(SecretSpec {
                 path: path.clone(),
+                kind: leaf.kind.clone(),
+                shared_public_id: leaf.shared_public_id.clone(),
+                expected_ssh_host: leaf.expected_ssh_host.clone(),
+                expected_ssh_port: leaf.expected_ssh_port,
+                install_default_if_missing: leaf.install_default_if_missing,
+                description: leaf.description.clone(),
+                human_facing: leaf.human_facing,
                 recipient_public_keys: leaf.recipient_public_keys.clone(),
                 recipient_ids: leaf.recipient_ids.clone(),
+                recipient_names: leaf.recipient_names.clone(),
                 destination: leaf.destination.clone(),
                 consumer_units: leaf.consumer_units.clone(),
                 value_type: leaf.value_type,
@@ -254,8 +274,11 @@ impl Schema {
             })),
             SecretNode::Generated(leaf) => Ok(LeafSpec::Generated(GeneratedSecretSpec {
                 path: path.clone(),
+                description: leaf.description.clone(),
+                human_facing: leaf.human_facing,
                 recipient_public_keys: leaf.recipient_public_keys.clone(),
                 recipient_ids: leaf.recipient_ids.clone(),
+                recipient_names: leaf.recipient_names.clone(),
                 generated_secret: leaf.generated_secret.clone(),
                 consumer_units: leaf.consumer_units.clone(),
                 value_type: leaf.value_type,
@@ -263,17 +286,4 @@ impl Schema {
             })),
         }
     }
-}
-
-fn missing(path: &SecretPath) -> SchemaError {
-    SchemaError::NotFound(path.clone())
-}
-
-fn synthetic_path(host: &str) -> SecretPath {
-    SecretPath(vec![
-        host.into(),
-        "services".into(),
-        "metadata".into(),
-        "socket".into(),
-    ])
 }

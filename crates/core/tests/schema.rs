@@ -124,3 +124,24 @@ fn generated_schema(port: u16, host_keys: Vec<&str>, unknown: Option<bool>) -> S
     })
     .to_string()
 }
+
+#[test]
+fn public_known_hosts_rejects_wrong_hosts_ports_and_tofu_syntax() {
+    use nix_secrets_core::schema::validate_ssh_known_hosts;
+    let key = KEY.split_ascii_whitespace().nth(1).unwrap();
+    let valid = format!("[box.example]:23 ssh-ed25519 {key}\n");
+    assert!(validate_ssh_known_hosts(&valid, "box.example", 23).is_ok());
+    for value in [
+        format!("[other.example]:23 ssh-ed25519 {key}"),
+        format!("[box.example]:22 ssh-ed25519 {key}"),
+        format!("*.example ssh-ed25519 {key}"),
+        format!("@revoked [box.example]:23 ssh-ed25519 {key}"),
+        format!("[box.example]:23 ssh-ed25519 {key}\n[box.example]:23 ssh-ed25519 {key}"),
+        format!("[box.example]:23  ssh-ed25519 {key}"),
+    ] {
+        assert!(
+            validate_ssh_known_hosts(&value, "box.example", 23).is_err(),
+            "accepted {value:?}"
+        );
+    }
+}

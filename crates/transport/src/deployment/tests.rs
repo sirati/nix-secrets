@@ -17,6 +17,7 @@ fn target_secret(identifier: &str) -> TargetSecret {
         identifier: identifier.into(),
         recipient_ids: vec!["key".into()],
         destination: destination(),
+        public_info: None,
         current_version_id: None,
     }
 }
@@ -34,6 +35,7 @@ fn task(identifier: &str, version: Option<&str>) -> TargetTask {
             port: 23,
             user: "u1".into(),
             host_public_keys: vec!["ssh-ed25519 AAAA".into()],
+            known_hosts_file: None,
         }),
         current_version_id: version.map(str::to_owned),
     }
@@ -55,6 +57,7 @@ fn expected(secret_ids: &[&str], tasks: &[TargetTask]) -> ExpectedTarget {
                 identifier: (*id).into(),
                 recipient_ids: vec!["key".into()],
                 destination: destination(),
+                public_info: None,
             })
             .collect(),
         tasks: tasks
@@ -110,6 +113,29 @@ fn task_contribution_is_exactly_32_bytes() {
         tasks: vec![task_entry(id, "v1", &[7; 32])],
     };
     assert!(validate_batch(&valid, &target).is_ok());
+}
+
+#[test]
+fn local_key_task_requires_no_bootstrap_password() {
+    let id = "host.services.mail.ssh-key";
+    let mut local = task(id, None);
+    local.task_type = LOCAL_SSH_KEY.into();
+    local.output.path = "/persistent/secrets/mail/service/ssh-key".into();
+    local.output.category = "service".into();
+    local.bootstrap = None;
+    let target = state(&[], vec![local]);
+    let mut entry = task_entry(id, "local-generated-v1", &[7; 32]);
+    entry.password_base64.clear();
+    let mut batch = DeploymentBatch {
+        version: 1,
+        requested_identifiers: vec![],
+        entries: vec![],
+        requested_tasks: vec![id.into()],
+        tasks: vec![entry],
+    };
+    assert!(validate_batch(&batch, &target).is_ok());
+    batch.tasks[0].password_base64 = STANDARD.encode(b"forbidden");
+    assert!(validate_batch(&batch, &target).is_err());
 }
 
 #[test]

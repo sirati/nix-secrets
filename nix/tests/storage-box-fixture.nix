@@ -1,10 +1,18 @@
-{ pkgs, module, hostKey, wrongHostKey, unrelatedKey }:
+{
+  pkgs,
+  module,
+  hostKey,
+  wrongHostKey,
+  unrelatedKey,
+}:
 
 { config, ... }:
 
 let
-  publicKey = path:
-    pkgs.lib.removeSuffix "\n" (builtins.readFile "${path}/id.pub");
+  publicKey = path: pkgs.lib.removeSuffix "\n" (builtins.readFile "${path}/id.pub");
+  hostPin = pkgs.lib.concatStringsSep " " (
+    pkgs.lib.take 2 (pkgs.lib.splitString " " (publicKey hostKey))
+  );
   output = name: {
     path = "/persistent/secrets/backup/backup/${name}";
     category = "backup";
@@ -18,6 +26,12 @@ let
     user = "storagebox";
     hostPublicKeys = [ (publicKey key) ];
   };
+  runtimeKnownHosts = "/persistent/public-info/storage-box/known-hosts";
+  knownHostsInventory = builtins.toFile "storage-box-public-info.toml" ''
+    [public_info."storage-box/known-hosts"]
+    version_id = "00000000000000000000000000000000"
+    value = "[127.0.0.1]:23 ${hostPin}\n"
+  '';
 in
 {
   imports = [ module ];
@@ -43,10 +57,12 @@ in
   services.openssh = {
     enable = true;
     ports = [ 23 ];
-    hostKeys = [{
-      path = "/persistent/storagebox-host-key";
-      type = "ed25519";
-    }];
+    hostKeys = [
+      {
+        path = "/persistent/storagebox-host-key";
+        type = "ed25519";
+      }
+    ];
     settings = {
       PasswordAuthentication = true;
       KbdInteractiveAuthentication = false;
@@ -61,13 +77,34 @@ in
 
   services.nixSecrets = {
     enable = true;
+    publicInfoInventoryFile = toString knownHostsInventory;
     defaultRecipientPublicKeys = [ (publicKey unrelatedKey) ];
     receiver.enable = true;
     services.backup.secrets = {
       storageBoxKey.generatedSecret = {
         type = "storage-box-ssh-key";
         output = output "storage-box-key";
-        bootstrap = bootstrap hostKey;
+        bootstrap = {
+          host = "127.0.0.1";
+          port = 23;
+          user = "storagebox";
+          knownHostsFile = runtimeKnownHosts;
+        };
+      };
+      known-hosts = {
+        kind = "public-info";
+        sharedPublicId = "storage-box/known-hosts";
+        expectedSshHost = "127.0.0.1";
+        expectedSshPort = 23;
+        installDefaultIfMissing = true;
+        destination = {
+          path = runtimeKnownHosts;
+          category = "public-info";
+          owner = "root";
+          group = "root";
+          mode = "0644";
+          contentType = "ssh-known-hosts";
+        };
       };
       rejectedKey.generatedSecret = {
         type = "storage-box-ssh-key";

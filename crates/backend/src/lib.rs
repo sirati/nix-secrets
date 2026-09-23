@@ -5,7 +5,7 @@ mod manifest;
 mod socket_lease;
 
 pub use cli::{Arguments, ParseError};
-pub use manifest::{evaluate_manifest, load_manifest, MAX_MANIFEST_BYTES};
+pub use manifest::{MAX_MANIFEST_BYTES, evaluate_manifest, load_manifest};
 
 use nix_secrets_core::{Backend, Schema, SecretStore};
 use std::env;

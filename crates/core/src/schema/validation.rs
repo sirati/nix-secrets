@@ -1,4 +1,4 @@
-use super::{Destination, GeneratedSecretLeaf, SchemaError, SecretNode, SecretPath};
+use super::{Destination, GeneratedSecretLeaf, SchemaError, SecretKind, SecretNode, SecretPath};
 use base64::Engine;
 
 pub(super) fn validate_tree(
@@ -20,14 +20,138 @@ pub(super) fn validate_tree(
         }
         SecretNode::Secret(leaf) => {
             let path = leaf_path(host, namespace, service, parents);
-            validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
-            validate_destination(&path, service, &leaf.destination)?;
-            validate_value(&path, leaf.value_type, leaf.consumer_constraints.as_ref())
+            validate_description(&path, leaf.description.as_deref())?;
+            match leaf.kind {
+                SecretKind::Secret => {
+                    if leaf.shared_public_id.is_some()
+                        || leaf.expected_ssh_host.is_some()
+                        || leaf.expected_ssh_port.is_some()
+                        || leaf.install_default_if_missing
+                    {
+                        return Err(invalid(
+                            &path,
+                            "public-info fields require kind=public-info",
+                        ));
+                    }
+                    validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
+                    validate_destination(&path, service, &leaf.destination)?;
+                    validate_value(&path, leaf.value_type, leaf.consumer_constraints.as_ref())
+                }
+                SecretKind::PublicInfo => {
+                    if !leaf.recipient_public_keys.is_empty()
+                        || !leaf.recipient_ids.is_empty()
+                        || !leaf.recipient_names.is_empty()
+                        || leaf.value_type.is_some()
+                        || leaf.consumer_constraints.is_some()
+                    {
+                        return Err(invalid(
+                            &path,
+                            "public-info cannot have encryption or private value settings",
+                        ));
+                    }
+                    validate_public_destination(&path, leaf)
+                }
+            }
         }
         SecretNode::Generated(leaf) => {
+            validate_description(
+                &leaf_path(host, namespace, service, parents),
+                leaf.description.as_deref(),
+            )?;
             validate_generated(leaf_path(host, namespace, service, parents), service, leaf)
         }
     }
+}
+
+fn validate_public_destination(
+    path: &SecretPath,
+    leaf: &super::SecretLeaf,
+) -> Result<(), SchemaError> {
+    let id = leaf
+        .shared_public_id
+        .as_deref()
+        .ok_or_else(|| invalid(path, "public-info has no sharedPublicId"))?;
+    if id.split('/').count() != 2
+        || id.split('/').any(|part| {
+            part.is_empty()
+                || part.len() > 64
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        })
+        || id.len() > 256
+    {
+        return Err(invalid(path, "invalid sharedPublicId"));
+    }
+    let destination = &leaf.destination;
+    if destination.path != format!("/persistent/public-info/{id}")
+        || destination.category != "public-info"
+        || destination.owner != "root"
+        || destination.group != "root"
+        || destination.mode != "0644"
+        || destination.content_type.as_deref() != Some("ssh-known-hosts")
+        || destination.authorized_for_user.is_some()
+    {
+        return Err(invalid(
+            path,
+            "public-info destination must be its root-owned 0644 known-hosts path",
+        ));
+    }
+    let host = leaf
+        .expected_ssh_host
+        .as_deref()
+        .ok_or_else(|| invalid(path, "expectedSshHost is required"))?;
+    if host.is_empty()
+        || host.len() > 253
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+        || leaf.expected_ssh_port.unwrap_or(0) == 0
+    {
+        return Err(invalid(path, "invalid expected SSH host or port"));
+    }
+    Ok(())
+}
+
+pub fn validate_ssh_known_hosts(value: &str, host: &str, port: u16) -> Result<(), &'static str> {
+    if value.len() > 4096 || value.contains('\r') {
+        return Err("known_hosts value is too large or contains carriage return");
+    }
+    let line = value.strip_suffix('\n').unwrap_or(value);
+    if line.contains('\n') {
+        return Err("known_hosts must contain exactly one key line");
+    }
+    let parts = line.split_ascii_whitespace().collect::<Vec<_>>();
+    if parts.len() != 3 || parts[0] != format!("[{host}]:{port}") || parts[1] != "ssh-ed25519" {
+        return Err("known_hosts host, port, or key type does not match the schema");
+    }
+    if parts
+        .iter()
+        .any(|part| part.contains(['*', '?', ',', '@', '|', '#']))
+    {
+        return Err("known_hosts markers, wildcards, and host lists are forbidden");
+    }
+    if line != format!("{} {} {}", parts[0], parts[1], parts[2]) {
+        return Err("known_hosts must use one canonical line");
+    }
+    let key = ssh_key::PublicKey::from_openssh(&format!("ssh-ed25519 {}", parts[2]))
+        .map_err(|_| "invalid Ed25519 known_hosts key")?;
+    if key.algorithm() != ssh_key::Algorithm::Ed25519 {
+        return Err("known_hosts key is not Ed25519");
+    }
+    Ok(())
+}
+
+fn validate_description(path: &SecretPath, description: Option<&str>) -> Result<(), SchemaError> {
+    if description.is_some_and(|value| {
+        value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+    }) {
+        return Err(invalid(
+            path,
+            "description must contain 1–512 printable bytes",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_generated(
@@ -72,13 +196,23 @@ fn validate_generated(
     if bootstrap.port != 23 {
         return Err(invalid(&path, "storage-box bootstrap port must be 23"));
     }
-    if bootstrap.host_public_keys.is_empty()
+    if (bootstrap.host_public_keys.is_empty() == bootstrap.known_hosts_file.is_none())
         || bootstrap
             .host_public_keys
             .iter()
             .any(|key| !valid_ssh_public_key(key))
     {
-        return Err(invalid(&path, "invalid pinned OpenSSH host public key"));
+        return Err(invalid(
+            &path,
+            "exactly one pinned host-key source is required",
+        ));
+    }
+    if bootstrap
+        .known_hosts_file
+        .as_deref()
+        .is_some_and(|file| !file.starts_with("/persistent/public-info/") || file.contains(".."))
+    {
+        return Err(invalid(&path, "invalid knownHostsFile path"));
     }
     let mut unique_keys = bootstrap.host_public_keys.clone();
     unique_keys.sort();
@@ -146,11 +280,12 @@ fn validate_destination(
     if !matches!(destination.mode.as_str(), "0400" | "0440") {
         return Err(invalid(path, "mode must be 0400 or 0440"));
     }
-    if destination
-        .content_type
-        .as_deref()
-        .is_some_and(|kind| kind != "named-ssh-ed25519-public-keys")
-    {
+    if destination.content_type.as_deref().is_some_and(|kind| {
+        !matches!(
+            kind,
+            "named-ssh-ed25519-public-keys" | "openssh-private-key" | "openssh-public-key"
+        )
+    }) {
         return Err(invalid(path, "unsupported secret content type"));
     }
     match (
@@ -164,6 +299,7 @@ fn validate_destination(
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)) => {}
         (None, None) => {}
+        (Some("openssh-private-key" | "openssh-public-key"), None) => {}
         _ => {
             return Err(invalid(
                 path,
@@ -182,7 +318,7 @@ fn validate_destination(
     Ok(())
 }
 
-fn valid_ssh_public_key(key: &str) -> bool {
+pub(crate) fn valid_ssh_public_key(key: &str) -> bool {
     if key.trim() != key || key.contains(['\r', '\n']) {
         return false;
     }

@@ -6,10 +6,16 @@ use super::{ConsumerConstraints, Destination, ValueType};
 #[serde(deny_unknown_fields)]
 pub struct GeneratedSecretLeaf {
     pub kind: GeneratedKind,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "humanFacing", default)]
+    pub human_facing: bool,
     #[serde(rename = "recipientPublicKeys")]
     pub recipient_public_keys: Vec<String>,
     #[serde(rename = "recipientIds")]
     pub recipient_ids: Vec<String>,
+    #[serde(rename = "recipientNames", default)]
+    pub recipient_names: Vec<String>,
     #[serde(rename = "generatedSecret")]
     pub generated_secret: GeneratedSecret,
     #[serde(rename = "consumerUnits")]
@@ -37,7 +43,7 @@ pub struct GeneratedSecret {
     pub register_at: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum GeneratedSecretType {
     #[serde(rename = "storage-box-ssh-key")]
     StorageBoxSshKey,
@@ -52,5 +58,8 @@ pub struct StorageBoxBootstrap {
     pub port: u16,
     pub user: String,
     #[serde(rename = "hostPublicKeys")]
+    #[serde(default)]
     pub host_public_keys: Vec<String>,
+    #[serde(rename = "knownHostsFile", default)]
+    pub known_hosts_file: Option<String>,
 }

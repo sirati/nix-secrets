@@ -1,5 +1,5 @@
 use crate::model::{ApprovalRequest, Mode, Model, TaskApproval};
-use crate::tree::Row;
+use crate::tree::{Row, RowCategory};
 use crate::ui::{drive, reduce, Action, Frontend, GenerateKind, SecretWriter, UiEvent};
 use std::collections::VecDeque;
 use std::io;
@@ -9,7 +9,7 @@ struct Writer {
     writes: Vec<Vec<u8>>,
     fail: bool,
     approval: Option<bool>,
-    requests: Vec<String>,
+    deletions: Vec<String>,
     poll_error: bool,
     approval_error: bool,
     copies: Vec<Vec<u8>>,
@@ -20,6 +20,10 @@ impl SecretWriter for Writer {
     }
     fn copy(&mut self, value: &[u8]) -> Result<(), String> {
         self.copies.push(value.to_vec());
+        Ok(())
+    }
+    fn copy_public(&mut self, _path: &str) -> Result<(), String> {
+        self.copies.push(b"ssh-ed25519 public-key".to_vec());
         Ok(())
     }
     fn write(
@@ -40,9 +44,12 @@ impl SecretWriter for Writer {
         self.approval = Some(accepted);
         Ok(None)
     }
-    fn request_deployment(&mut self, path: &str) -> Result<(), String> {
-        self.requests.push(path.into());
+    fn delete(&mut self, path: &str) -> Result<(), String> {
+        self.deletions.push(path.into());
         Ok(())
+    }
+    fn reveal(&mut self, _path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+        Ok(Zeroizing::new(b"stored-value".to_vec()))
     }
     fn poll_approval(&mut self) -> Result<Option<ApprovalRequest>, String> {
         if self.poll_error {
@@ -76,7 +83,22 @@ fn model(set: bool) -> Model {
         is_task: false,
         can_generate: true,
         output_is_set: None,
+        description: None,
+        category: RowCategory::Password,
+        human_facing: false,
     }])
+}
+
+#[test]
+fn browse_copy_secret_and_public_key_use_distinct_actions() {
+    let mut model = model(true);
+    let mut writer = writer();
+    reduce(&mut model, UiEvent::Character('c'), &mut writer);
+    reduce(&mut model, UiEvent::Character('p'), &mut writer);
+    assert_eq!(
+        writer.copies,
+        [b"stored-value".to_vec(), b"ssh-ed25519 public-key".to_vec()]
+    );
 }
 
 #[test]
@@ -149,6 +171,9 @@ fn task_approval_exposes_input_and_target_output_status() {
         is_task: true,
         can_generate: false,
         output_is_set: None,
+        description: None,
+        category: RowCategory::Password,
+        human_facing: false,
     }]);
     let mut writer = writer();
     let request = ApprovalRequest {
@@ -162,6 +187,7 @@ fn task_approval_exposes_input_and_target_output_status() {
             identifier: "h.services.backup.bootstrap".into(),
             input_is_set: true,
             output_is_set: Some(false),
+            requires_input: true,
         }],
     };
     assert_eq!(
@@ -195,7 +221,7 @@ fn writer() -> Writer {
         writes: vec![],
         fail: false,
         approval: None,
-        requests: vec![],
+        deletions: vec![],
         poll_error: false,
         approval_error: false,
         copies: vec![],
@@ -203,69 +229,4 @@ fn writer() -> Writer {
 }
 
 mod generation_tests;
-#[test]
-fn lost_lease_drops_the_modal_and_reports_expiry() {
-    let mut frontend = FakeFrontend {
-        events: VecDeque::from([UiEvent::Tick, UiEvent::Escape]),
-        draws: 0,
-    };
-    let mut writer = writer();
-    writer.poll_error = true;
-    let mut model = model(true);
-    model.mode = Mode::Approval(ApprovalRequest {
-        id: "id".into(),
-        target: "h".into(),
-        create: vec![],
-        replace: vec!["h.services.s.key".into()],
-        recipient_keys: vec![],
-        host_key: None,
-        tasks: vec![],
-    });
-    drive(&mut frontend, &mut writer, &mut model).unwrap();
-    assert!(matches!(model.mode, Mode::Browse));
-    assert_eq!(model.message.as_deref(), Some("approval lease was lost"));
-}
-
-#[test]
-fn task_provider_failure_keeps_approval_for_retry() {
-    let mut model = model(true);
-    let mut writer = writer();
-    let request = ApprovalRequest {
-        id: "id".into(),
-        target: "h".into(),
-        create: vec![],
-        replace: vec![],
-        recipient_keys: vec!["operator".into()],
-        host_key: None,
-        tasks: vec![TaskApproval {
-            identifier: "h.services.backup.bootstrap".into(),
-            input_is_set: true,
-            output_is_set: Some(false),
-        }],
-    };
-    model.mode = Mode::Approval(request);
-    writer.approval_error = true;
-    assert_eq!(
-        reduce(&mut model, UiEvent::Character('y'), &mut writer),
-        Action::Continue
-    );
-    assert!(matches!(model.mode, Mode::Approval(_)));
-    writer.approval_error = false;
-    assert_eq!(
-        reduce(&mut model, UiEvent::Character('y'), &mut writer),
-        Action::Approved
-    );
-}
-
-#[test]
-fn deploy_trigger_submits_only_a_set_selected_leaf() {
-    let mut set = model(true);
-    let mut writer = writer();
-    reduce(&mut set, UiEvent::Character('d'), &mut writer);
-    assert_eq!(writer.requests, ["h.services.s.key"]);
-
-    let mut unset = model(false);
-    reduce(&mut unset, UiEvent::Character('d'), &mut writer);
-    assert_eq!(writer.requests, ["h.services.s.key"]);
-    assert_eq!(unset.message.as_deref(), Some("secret is unset"));
-}
+mod navigation_tests;

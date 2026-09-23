@@ -8,6 +8,7 @@ mod validation;
 
 pub use client::{DeploymentClient, PreparedDeployment};
 pub use server::{read_wire_json, serve_deployment, write_wire_json};
+pub use types::PublicInfoAttestation;
 pub use types::*;
 #[cfg(test)]
 use validation::{validate_batch, validate_target};

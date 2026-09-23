@@ -1,12 +1,24 @@
 { pkgs, module }:
 
 let
-  testKey = pkgs.runCommand "nix-secrets-forward-test-key" {
-    nativeBuildInputs = [ pkgs.openssh ];
-  } ''
-    mkdir "$out"
-    ssh-keygen -q -t ed25519 -N "" -C vm-test -f "$out/id"
+  knownKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+  knownHostsInventory = builtins.toFile "test-public-info.toml" ''
+    [public_info."storage-box/known-hosts"]
+    version_id = "00000000000000000000000000000000"
+    value = "[box.example]:23 ${knownKey}\n"
   '';
+  publicDefaultUnit = "nix-secrets-public-default-${
+    builtins.substring 0 16 (builtins.hashString "sha256" "machine.services.backup.known-hosts")
+  }.service";
+  testKey =
+    pkgs.runCommand "nix-secrets-forward-test-key"
+      {
+        nativeBuildInputs = [ pkgs.openssh ];
+      }
+      ''
+        mkdir "$out"
+        ssh-keygen -q -t ed25519 -N "" -C vm-test -f "$out/id"
+      '';
 in
 pkgs.testers.runNixOSTest {
   name = "nix-secrets-deployment";
@@ -33,6 +45,7 @@ pkgs.testers.runNixOSTest {
     services.openssh.enable = true;
     services.nixSecrets = {
       enable = true;
+      publicInfoInventoryFile = toString knownHostsInventory;
       defaultRecipientPublicKeys = [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILXG+KfyD7ATstszFLEBBeA+dfXXoD8fxhLcSjtoiqGP"
       ];
@@ -80,6 +93,21 @@ pkgs.testers.runNixOSTest {
         contentType = "named-ssh-ed25519-public-keys";
         authorizedForUser = "receiver-test";
       };
+      services.backup.secrets.known-hosts = {
+        kind = "public-info";
+        sharedPublicId = "storage-box/known-hosts";
+        expectedSshHost = "box.example";
+        expectedSshPort = 23;
+        installDefaultIfMissing = true;
+        destination = {
+          path = "/persistent/public-info/storage-box/known-hosts";
+          category = "public-info";
+          owner = "root";
+          group = "root";
+          mode = "0644";
+          contentType = "ssh-known-hosts";
+        };
+      };
     };
     services.secretsReadyWaiter.enable = true;
     systemd.services.alpha-consumer.serviceConfig = {
@@ -93,8 +121,14 @@ pkgs.testers.runNixOSTest {
       ExecStart = "${pkgs.coreutils}/bin/touch /persistent/beta-started";
     };
     systemd.services.nmbl-mark-boot-success = {
-      requires = [ "alpha-consumer.service" "beta-consumer.service" ];
-      after = [ "alpha-consumer.service" "beta-consumer.service" ];
+      requires = [
+        "alpha-consumer.service"
+        "beta-consumer.service"
+      ];
+      after = [
+        "alpha-consumer.service"
+        "beta-consumer.service"
+      ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
@@ -247,7 +281,7 @@ pkgs.testers.runNixOSTest {
         assert state['tasks'][0]['bootstrap'] is None
         s.sendall(wire({{'version':1,'requested_identifiers':[],'entries':[],
             'requested_tasks':['{identifier}'],'tasks':[{{'identifier':'{identifier}',
-            'version_id':'v1','password_base64':base64.b64encode(b'task-authorization').decode(),
+            'version_id':'v1','password_base64':str(),
             'client_contribution_base64':base64.b64encode(bytes([11])*32).decode()}}]}}))
         result=receive(s)
         assert result['status']=='applied'
@@ -258,10 +292,50 @@ pkgs.testers.runNixOSTest {
         encoded = base64.b64encode(script.encode()).decode()
         machine.succeed(f"echo {encoded} | base64 -d >/root/local-key.py; python3 /root/local-key.py")
 
+    def deploy_public(value, expected_status="applied"):
+        identifier = "machine.services.backup.known-hosts"
+        selection = base64.b64encode(wire({"identifiers": [identifier]})).decode()
+        batch = base64.b64encode(wire({"version": 1, "requested_identifiers": [identifier], "entries": [{
+            "identifier": identifier,
+            "version_id": str(uuid.uuid4()),
+            "contents_base64": base64.b64encode(value.encode()).decode(),
+        }]})).decode()
+        script = textwrap.dedent(f"""
+        import base64,json,socket
+        def exact(sock,n):
+            out=bytes()
+            while len(out)<n:
+                part=sock.recv(n-len(out)); assert part; out+=part
+            return out
+        def receive(sock):
+            n=int.from_bytes(exact(sock,4),'big'); return json.loads(exact(sock,n))
+        sock=socket.socket(socket.AF_UNIX); sock.connect('{socket}')
+        sock.sendall(base64.b64decode('{selection}'))
+        state=receive(sock)
+        assert state['secrets'][0]['recipient_ids']==[]
+        assert state['secrets'][0]['public_info']['shared_id']=='storage-box/known-hosts'
+        sock.sendall(base64.b64decode('{batch}'))
+        result=receive(sock)
+        assert result['status']=='{expected_status}', result
+        sock.close()
+        """)
+        encoded = base64.b64encode(script.encode()).decode()
+        machine.succeed(f"echo {encoded} | base64 -d >/root/public-deploy.py; python3 /root/public-deploy.py")
+
     machine.start(allow_reboot=True)
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("sshd.service")
     machine.wait_for_unit("nix-secrets-deployer.socket")
+    machine.succeed("systemctl show ${publicDefaultUnit} -p Result --value | grep '^success$'")
+    machine.succeed("runuser -u nobody -- cat /persistent/public-info/storage-box/known-hosts | grep '\\[box.example\\]:23 ssh-ed25519 '")
+    assert "secrets-ready-waiter-backup.service" not in machine.succeed("systemctl list-unit-files 'secrets-ready-waiter-*.service' --no-legend")
+    old_public = machine.succeed("cat /persistent/public-info/storage-box/known-hosts")
+    new_key = " ".join(machine.succeed("cat ${testKey}/id.pub").split()[:2])
+    deploy_public("[wrong.example]:23 " + new_key + "\n", expected_status="rejected")
+    assert machine.succeed("cat /persistent/public-info/storage-box/known-hosts") == old_public
+    deploy_public("[box.example]:23 " + new_key + "\n")
+    machine.succeed("runuser -u nobody -- cat /persistent/public-info/storage-box/known-hosts | grep '\\[box.example\\]:23 ssh-ed25519 '")
+    assert machine.succeed("cat /persistent/public-info/storage-box/known-hosts") != old_public
     machine.succeed("install -d -m 0700 /root/.ssh")
     machine.succeed("install -m 0600 ${testKey}/id /root/forward-key")
     machine.succeed(
@@ -334,6 +408,7 @@ pkgs.testers.runNixOSTest {
 
     machine.reboot()
     machine.wait_for_unit("multi-user.target")
+    assert machine.succeed("cat /persistent/public-info/storage-box/known-hosts") != old_public
     machine.succeed("grep alpha-two /persistent/secrets/alpha/service/token")
     machine.succeed("test -e /persistent/boot-success")
   '';

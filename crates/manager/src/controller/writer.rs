@@ -2,6 +2,75 @@ use super::generate::{generate_compatible, validate_password_value};
 use super::*;
 
 impl SecretWriter for Controller {
+    fn refresh_rows(&mut self) -> Result<Option<Vec<Row>>, String> {
+        self.rows().map(Some).map_err(|error| error.to_string())
+    }
+    fn copy_public(&mut self, path: &str) -> Result<(), String> {
+        let parsed = SecretPath::parse(path).map_err(|error| error.to_string())?;
+        let LeafSpec::Stored(spec) = self
+            .schema
+            .leaf(&parsed)
+            .map_err(|error| error.to_string())?
+        else {
+            return Err("select a stored OpenSSH private key".into());
+        };
+        if spec.destination.content_type.as_deref() != Some("openssh-private-key") {
+            return Err("selected item is not an OpenSSH private key".into());
+        }
+        let record = self
+            .client
+            .get(&parsed)
+            .map_err(|error| error.to_string())?
+            .ok_or("secret is unset")?;
+        let public = record
+            .public_key
+            .ok_or("public key metadata is missing; replace the private key to derive it")?;
+        ssh_key::PublicKey::from_openssh(&public)
+            .map_err(|_| "stored public key metadata is invalid")?;
+        self.copy(public.as_bytes())
+    }
+    fn reveal(&mut self, path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+        let path = SecretPath::parse(path).map_err(|error| error.to_string())?;
+        if self.public_spec(&path)?.is_some() {
+            return self.reveal_public_info(&path);
+        }
+        if !matches!(
+            self.schema.leaf(&path).map_err(|error| error.to_string())?,
+            LeafSpec::Stored(_) | LeafSpec::Generated(_)
+        ) {
+            return Err("not a stored secret".into());
+        }
+        let record = self
+            .client
+            .get(&path)
+            .map_err(|error| error.to_string())?
+            .ok_or("secret is unset")?;
+        let envelope = EncryptedSecret {
+            format_version: record.format_version,
+            version_id: record.version_id,
+            recipient_ids: record.recipient_ids,
+            age_ciphertext: record.age_ciphertext,
+        };
+        decrypt_secret(&path.to_string(), &envelope, &self.provider)
+            .map_err(|error| error.to_string())
+    }
+
+    fn delete(&mut self, path: &str) -> Result<(), String> {
+        let path = SecretPath::parse(path).map_err(|error| error.to_string())?;
+        if self.public_spec(&path)?.is_some() {
+            return self.delete_public_info(&path);
+        }
+        let record = self
+            .client
+            .get(&path)
+            .map_err(|error| error.to_string())?
+            .ok_or("secret is already unset")?;
+        self.client
+            .remove_if_version(&path, record.version_id)
+            .map_err(|error| error.to_string())?
+            .then_some(())
+            .ok_or_else(|| "secret is already unset".into())
+    }
     fn generate(&mut self, path: &str, kind: GenerateKind) -> Result<Zeroizing<Vec<u8>>, String> {
         let path = SecretPath::parse(path).map_err(|error| error.to_string())?;
         let leaf = self.schema.leaf(&path).map_err(|error| error.to_string())?;
@@ -32,12 +101,26 @@ impl SecretWriter for Controller {
             Ok(spec) => spec,
             Err(error) => return Err((error.to_string(), value)),
         };
+        if matches!(&spec, LeafSpec::Stored(leaf) if matches!(leaf.kind, nix_secrets_core::SecretKind::PublicInfo))
+        {
+            return match self.save_public_info(&parsed, &value) {
+                Ok(()) => Ok(Action::Saved(parsed.to_string())),
+                Err(error) => Err((error, value)),
+            };
+        }
         let (value_type, constraints) = match &spec {
             LeafSpec::Stored(spec) => (spec.value_type, spec.consumer_constraints.as_ref()),
             LeafSpec::Generated(spec) => (spec.value_type, spec.consumer_constraints.as_ref()),
         };
         if let Err(error) = validate_password_value(value_type, constraints, &value) {
             return Err((error, value));
+        }
+        if let LeafSpec::Stored(spec) = &spec {
+            if let Err(error) =
+                super::ssh_validation::validate(spec.destination.content_type.as_deref(), &value)
+            {
+                return Err((error, value));
+            }
         }
         let (recipient_ids, recipient_public_keys) = match &spec {
             LeafSpec::Stored(spec) => (&spec.recipient_ids, &spec.recipient_public_keys),
@@ -51,12 +134,30 @@ impl SecretWriter for Controller {
                 ssh_public_key: key,
             })
             .collect::<Vec<_>>();
-        match self
-            .client
-            .set(&parsed, &value, &recipients, &self.provider)
-        {
+        let result = match &spec {
+            LeafSpec::Stored(spec)
+                if spec.destination.content_type.as_deref() == Some("openssh-private-key") =>
+            {
+                let public = match super::ssh_validation::derive_public(
+                    spec.destination.content_type.as_deref(),
+                    &value,
+                ) {
+                    Ok(Some(public)) => public,
+                    Ok(None) => {
+                        return Err(("OpenSSH public derivation is unavailable".into(), value))
+                    }
+                    Err(error) => return Err((error, value)),
+                };
+                self.save_private_key(&parsed, &value, &recipients, public)
+            }
+            _ => self
+                .client
+                .set(&parsed, &value, &recipients, &self.provider)
+                .map_err(|error| error.to_string()),
+        };
+        match result {
             Ok(()) => Ok(Action::Saved(parsed.to_string())),
-            Err(error) => Err((error.to_string(), value)),
+            Err(error) => Err((error, value)),
         }
     }
 
@@ -211,23 +312,41 @@ impl SecretWriter for Controller {
             .map_err(|error| error.to_string())?;
         Ok(None)
     }
+}
 
-    fn request_deployment(&mut self, path: &str) -> Result<(), String> {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let path = SecretPath::parse(path).map_err(|error| error.to_string())?;
-        let target = path
-            .components()
-            .first()
-            .cloned()
-            .ok_or("secret has no target")?;
-        let nonce = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = format!("manager-{}-{nonce}", std::process::id());
-        self.client
-            .submit_approval(ApprovalRequest {
-                id,
-                target,
-                secrets: vec![path.to_string()],
-            })
-            .map_err(|error| error.to_string())
+impl Controller {
+    fn save_private_key(
+        &mut self,
+        path: &SecretPath,
+        private: &[u8],
+        recipients: &[Recipient<'_>],
+        public: String,
+    ) -> Result<(), String> {
+        let version = self
+            .client
+            .set_private_key(path, private, recipients, &self.provider, public.clone())
+            .map_err(|error| error.to_string())?;
+        let stored = self
+            .client
+            .get(path)
+            .map_err(|error| error.to_string())?
+            .ok_or("private key record disappeared after save")?;
+        if stored.version_id != version || stored.public_key.as_deref() != Some(public.as_str()) {
+            return Err("private/public key record failed read-back verification".into());
+        }
+        let envelope = EncryptedSecret {
+            format_version: stored.format_version,
+            version_id: stored.version_id,
+            recipient_ids: stored.recipient_ids,
+            age_ciphertext: stored.age_ciphertext,
+        };
+        let decrypted = decrypt_secret(&path.to_string(), &envelope, &self.provider)
+            .map_err(|error| error.to_string())?;
+        let derived =
+            super::ssh_validation::derive_public(Some("openssh-private-key"), &decrypted)?;
+        if decrypted.as_slice() != private || derived.as_deref() != Some(public.as_str()) {
+            return Err("stored private key does not match public metadata".into());
+        }
+        Ok(())
     }
 }

@@ -29,6 +29,23 @@ pub struct AuditDetail {
 }
 
 impl ResolvedBatch {
+    pub fn partition(mut self) -> (Self, Self) {
+        let mut secrets = Vec::new();
+        let mut public = Vec::new();
+        for entry in self.entries.drain(..) {
+            if entry.class == SecretClass::PublicInfo {
+                public.push(entry);
+            } else {
+                secrets.push(entry);
+            }
+        }
+        (Self { entries: secrets }, Self { entries: public })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn audit_details(&self) -> BTreeMap<String, AuditDetail> {
         self.entries
             .iter()
@@ -66,6 +83,7 @@ pub enum SecretClass {
     Setup,
     Service,
     Backup,
+    PublicInfo,
 }
 
 impl SecretClass {
@@ -74,6 +92,7 @@ impl SecretClass {
             Self::Setup => "setup",
             Self::Service => "service",
             Self::Backup => "backup",
+            Self::PublicInfo => "",
         }
     }
 }

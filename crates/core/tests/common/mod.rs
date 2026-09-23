@@ -41,6 +41,8 @@ pub fn envelope(value: &str) -> EncryptedSecret {
         format_version: 1,
         version_id: [value.len() as u8; 16].to_vec(),
         recipient_ids: vec!["recipient-id".into()],
+        recipient_refs: vec![],
         age_ciphertext: format!("age-file-{value}").into_bytes(),
+        public_key: None,
     }
 }

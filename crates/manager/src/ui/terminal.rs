@@ -59,35 +59,113 @@ impl Frontend for CrosstermFrontend {
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, model: &Model) {
-    let areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(4)])
-        .split(frame.area());
-    let items = model.rows.iter().map(item).collect::<Vec<_>>();
+    let area = frame.area();
+    let legend_height = if area.height >= 7 { 2 } else { 1 }.min(area.height);
+    let status_height = area.height.saturating_sub(legend_height).min(1);
+    let detail_height = area
+        .height
+        .saturating_sub(legend_height + status_height)
+        .min(2);
+    let main_height = area.height - legend_height - status_height - detail_height;
+    let main = ratatui::layout::Rect {
+        height: main_height,
+        ..area
+    };
+    let detail = ratatui::layout::Rect {
+        y: area.y + main_height,
+        height: detail_height,
+        ..area
+    };
+    let status = ratatui::layout::Rect {
+        y: detail.y + detail_height,
+        height: status_height,
+        ..area
+    };
+    let legend = ratatui::layout::Rect {
+        y: status.y + status_height,
+        height: legend_height,
+        ..area
+    };
+
+    if main.height > 0 {
+        match &model.mode {
+            Mode::Reveal { value, scroll, .. } => {
+                let text = std::str::from_utf8(value).unwrap_or("<binary value: use c to copy>");
+                frame.render_widget(
+                    Paragraph::new(text)
+                        .scroll((*scroll, 0))
+                        .wrap(Wrap { trim: false }),
+                    main,
+                );
+            }
+            Mode::Help { scroll } => {
+                frame.render_widget(
+                    Paragraph::new(help_text())
+                        .scroll((*scroll, 0))
+                        .wrap(Wrap { trim: false }),
+                    main,
+                );
+            }
+            _ => render_tree(frame, model, main),
+        }
+    }
+    if detail.height > 0 {
+        frame.render_widget(
+            Paragraph::new(prompt(model)).wrap(Wrap { trim: false }),
+            detail,
+        );
+    }
+    if status.height > 0 {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Status: {}",
+                model.message.as_deref().unwrap_or("ready")
+            )),
+            status,
+        );
+    }
+    if legend.height > 0 {
+        frame.render_widget(
+            Paragraph::new(legend_text(model, legend.width)).wrap(Wrap { trim: false }),
+            legend,
+        );
+    }
+}
+
+fn render_tree(frame: &mut ratatui::Frame<'_>, model: &Model, area: ratatui::layout::Rect) {
+    let items = model
+        .visible_rows()
+        .into_iter()
+        .map(|index| item(&model.rows[index]))
+        .collect::<Vec<_>>();
     let mut state =
         ListState::default().with_selected((!items.is_empty()).then_some(model.selected));
-    let list = List::new(items)
-        .block(Block::default().title("Secrets").borders(Borders::ALL))
-        .highlight_symbol("> ");
-    frame.render_stateful_widget(list, areas[0], &mut state);
-    frame.render_widget(
-        Paragraph::new(prompt(model))
-            .block(Block::default().title("Action").borders(Borders::ALL))
-            .wrap(Wrap { trim: false }),
-        areas[1],
-    );
+    let list = List::new(items).highlight_symbol("> ");
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn prompt(model: &Model) -> String {
     match &model.mode {
-        Mode::Browse => model.message.clone().unwrap_or_else(|| {
-            let generate = model
+        Mode::Browse => {
+            let description = model
                 .selected()
-                .filter(|row| row.can_generate)
-                .map(|_| " · g: generate")
-                .unwrap_or_default();
-            format!("Enter: edit · paste: set{generate} · d: deploy · Esc: quit")
-        }),
+                .and_then(|row| row.description.as_deref())
+                .unwrap_or("");
+            format!(
+                "Selected: {}\n{} · type: {} · audience: {}",
+                model
+                    .selected()
+                    .map(|row| row.path.as_deref().unwrap_or(&row.name))
+                    .unwrap_or("none"),
+                description,
+                model.filter.name(),
+                if model.human_only { "human" } else { "all" }
+            )
+        }
+        Mode::Help { .. } => "All actions are described above. Use ↑↓ to scroll.".into(),
+        Mode::Search { query } => format!("Search: {query} · Enter: keep filter · Esc: clear"),
+        Mode::DeleteConfirm { path } => format!("Delete {path} from encrypted store? y/n"),
+        Mode::Reveal { .. } => "Esc: hide".into(),
         Mode::Edit { value, .. } => format!(
             "value: {}  (Enter saves, Esc cancels)",
             "•".repeat(value.len())
@@ -127,6 +205,33 @@ fn prompt(model: &Model) -> String {
     }
 }
 
+fn legend_text(model: &Model, width: u16) -> String {
+    if width < 45 {
+        return match model.mode {
+            Mode::Browse => "↑↓ move · Enter edit · ? help".into(),
+            Mode::Help { .. } => "↑↓ scroll · Esc close".into(),
+            Mode::Reveal { .. } => "↑↓ scroll · c copy · Esc hide".into(),
+            _ => "Enter accept · Esc cancel · ? help from browse".into(),
+        };
+    }
+    match model.mode {
+        Mode::Browse => "Navigate: ↑↓ move · / search · f type · h audience · ? help\nValues: Enter edit · paste set · g generate · r reveal · c copy · p public · d delete · Esc quit".into(),
+        Mode::Help { .. } => "Help: ↑↓ scroll · Esc or ? close".into(),
+        Mode::Reveal { .. } => "Reveal: ↑↓ scroll · c copy · Enter or Esc hide".into(),
+        Mode::Search { .. } => "Search: type query · Backspace erase · Enter keep · Esc clear".into(),
+        Mode::Approval(_) => "Deployment: y approve · n reject · Esc reject".into(),
+        Mode::DeleteConfirm { .. } | Mode::Replace { .. } => "Confirm: y proceed · n cancel · Esc cancel".into(),
+        Mode::GenerateChoice { .. } => "Generate: p password · w passphrase · Esc cancel".into(),
+        Mode::GeneratedPreview { .. } => "Preview: r reveal · c copy · Enter save · Esc discard".into(),
+        Mode::ProviderFailure { .. } => "Provider: r retry · Esc cancel".into(),
+        Mode::Edit { .. } => "Edit: type or paste · Backspace erase · Enter save · Esc cancel".into(),
+    }
+}
+
+fn help_text() -> &'static str {
+    "NAVIGATE\n↑ / ↓  Move between visible items\n/  Search names, identifiers, and descriptions\nf  Cycle all, private keys, passwords, and public info\nh  Toggle human-facing items\n?  Show or close this help\n\nEDIT\nEnter  Edit selected value; Enter again saves\nPaste  Set from clipboard; replacement asks first\ng  Generate password or passphrase for a password field\nr  Reveal selected value\nc  Copy the selected value\np  Copy the public half of a stored OpenSSH private key\nd  Delete selected value after confirmation\n\nDEPLOYMENT\nA target deployer requests one server's values.\ny  Approve the verified target and displayed changes\nn / Esc  Reject the request\n\nEsc  Leave a view, or quit from the tree"
+}
+
 fn item(row: &Row) -> ListItem<'static> {
     let indent = "  ".repeat(row.depth);
     if !row.is_secret() {
@@ -160,10 +265,56 @@ fn set_status(set: bool) -> &'static str {
 }
 
 fn task_status(task: &crate::model::TaskApproval) -> String {
-    format!(
-        "{} (input {}, output {})",
-        task.identifier,
-        set_status(task.input_is_set),
-        task.output_is_set.map(set_status).unwrap_or("unknown")
-    )
+    if task.requires_input {
+        format!(
+            "{} (bootstrap {}, output {})",
+            task.identifier,
+            set_status(task.input_is_set),
+            task.output_is_set.map(set_status).unwrap_or("unknown")
+        )
+    } else {
+        format!(
+            "{} (generated on target; output {})",
+            task.identifier,
+            task.output_is_set.map(set_status).unwrap_or("unknown")
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn line(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn compact_footer_keeps_status_and_hotkeys_on_separate_rows() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
+        let mut model = Model::new(vec![]);
+        model.message = Some("test result".into());
+        terminal.draw(|frame| render(frame, &model)).unwrap();
+        assert!(line(&terminal, 3).contains("Status: test result"));
+        assert!(line(&terminal, 4).contains("? help"));
+        model.mode = Mode::Help { scroll: 0 };
+        terminal.draw(|frame| render(frame, &model)).unwrap();
+        assert!(line(&terminal, 3).contains("Status: test result"));
+        assert!(line(&terminal, 4).contains("Esc close"));
+    }
+
+    #[test]
+    fn wide_footer_keeps_both_legend_lines_below_status() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        let mut model = Model::new(vec![]);
+        model.message = Some("copied".into());
+        terminal.draw(|frame| render(frame, &model)).unwrap();
+        assert!(line(&terminal, 9).contains("Status: copied"));
+        assert!(line(&terminal, 10).contains("Navigate:"));
+        assert!(line(&terminal, 11).contains("Values:"));
+    }
 }

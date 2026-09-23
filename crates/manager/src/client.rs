@@ -1,7 +1,7 @@
 use nix_secrets_core::framing::{read_json, write_json};
 use nix_secrets_core::{
-    ApprovalRequest, ApprovalStatus, Decision, EncryptedSecret as StoredSecret, Request, Response,
-    SecretPath,
+    ApprovalRequest, ApprovalStatus, Decision, EncryptedSecret as StoredSecret, GeneratedPublicKey,
+    PublicInfoRecord, Request, Response, SecretPath,
 };
 use nix_secrets_crypto::{encrypt_secret, CryptoProvider, Recipient};
 use std::collections::BTreeMap;
@@ -13,6 +13,55 @@ pub struct BackendClient {
 }
 
 impl BackendClient {
+    pub fn list_public_info(&mut self) -> io::Result<BTreeMap<String, PublicInfoRecord>> {
+        match self.exchange(&Request::ListPublicInfo)? {
+            Response::PublicInfoEntries { entries } => Ok(entries),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn get_public_info(&mut self, shared_id: &str) -> io::Result<Option<PublicInfoRecord>> {
+        match self.exchange(&Request::GetPublicInfo {
+            shared_id: shared_id.into(),
+        })? {
+            Response::PublicInfo { value } => Ok(value),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn set_public_info_if_version(
+        &mut self,
+        path: &SecretPath,
+        value: PublicInfoRecord,
+        expected_version: Option<String>,
+    ) -> io::Result<()> {
+        match self.exchange(&Request::SetPublicInfoIfVersion {
+            path: path.clone(),
+            value,
+            expected_version,
+        })? {
+            Response::Updated => Ok(()),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn remove_public_info_if_version(
+        &mut self,
+        path: &SecretPath,
+        expected_version: String,
+    ) -> io::Result<bool> {
+        match self.exchange(&Request::RemovePublicInfoIfVersion {
+            path: path.clone(),
+            expected_version,
+        })? {
+            Response::Removed { existed } => Ok(existed),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
     pub fn new(stream: UnixStream) -> Self {
         Self { stream }
     }
@@ -20,6 +69,104 @@ impl BackendClient {
     pub fn list(&mut self) -> io::Result<BTreeMap<String, StoredSecret>> {
         match self.exchange(&Request::List)? {
             Response::Secrets { entries } => Ok(entries),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn get(&mut self, path: &SecretPath) -> io::Result<Option<StoredSecret>> {
+        match self.exchange(&Request::Get { path: path.clone() })? {
+            Response::Secret { envelope } => Ok(envelope),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn generated_public_key(
+        &mut self,
+        path: &SecretPath,
+    ) -> io::Result<Option<GeneratedPublicKey>> {
+        match self.exchange(&Request::GetGeneratedPublicKey { path: path.clone() })? {
+            Response::GeneratedPublicKey { value } => Ok(value),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn set_generated_public_key_if_version(
+        &mut self,
+        path: &SecretPath,
+        value: GeneratedPublicKey,
+        expected_version: Option<String>,
+    ) -> io::Result<()> {
+        match self.exchange(&Request::SetGeneratedPublicKeyIfVersion {
+            path: path.clone(),
+            value,
+            expected_version,
+        })? {
+            Response::Updated => Ok(()),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn set_public_key_if_version(
+        &mut self,
+        path: &SecretPath,
+        public_key: String,
+        expected_version: Vec<u8>,
+    ) -> io::Result<()> {
+        match self.exchange(&Request::SetPublicKeyIfVersion {
+            path: path.clone(),
+            public_key,
+            expected_version,
+        })? {
+            Response::Updated => Ok(()),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn set_private_key(
+        &mut self,
+        path: &SecretPath,
+        plaintext: &[u8],
+        recipients: &[Recipient<'_>],
+        provider: &impl CryptoProvider,
+        public_key: String,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let expected_version = self.get(path)?.map(|record| record.version_id);
+        let encrypted = encrypt_secret(&path.to_string(), plaintext, recipients, provider)?;
+        let version = encrypted.version_id.clone();
+        let envelope = StoredSecret {
+            format_version: encrypted.format_version,
+            version_id: encrypted.version_id,
+            recipient_ids: encrypted.recipient_ids,
+            recipient_refs: vec![],
+            age_ciphertext: encrypted.age_ciphertext,
+            public_key: Some(public_key),
+        };
+        match self.exchange(&Request::SetIfVersion {
+            path: path.clone(),
+            envelope,
+            expected_version,
+        })? {
+            Response::Updated => Ok(version),
+            Response::Error { message } => Err(message.into()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub fn remove_if_version(
+        &mut self,
+        path: &SecretPath,
+        expected_version: Vec<u8>,
+    ) -> io::Result<bool> {
+        match self.exchange(&Request::RemoveIfVersion {
+            path: path.clone(),
+            expected_version,
+        })? {
+            Response::Removed { existed } => Ok(existed),
+            Response::Error { message } => Err(io::Error::other(message)),
             response => Err(unexpected(response)),
         }
     }
@@ -138,7 +285,9 @@ impl BackendClient {
             format_version: encrypted.format_version,
             version_id: encrypted.version_id,
             recipient_ids: encrypted.recipient_ids,
+            recipient_refs: vec![],
             age_ciphertext: encrypted.age_ciphertext,
+            public_key: None,
         };
         let request = match expected_version {
             Some(expected_version) => Request::SetIfVersion {

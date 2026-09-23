@@ -1,5 +1,5 @@
 use nix_secrets_core::schema::SecretNode;
-use nix_secrets_core::{Schema, ValueType};
+use nix_secrets_core::{Schema, SecretKind, ValueType};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -11,6 +11,18 @@ pub struct Row {
     pub is_task: bool,
     pub can_generate: bool,
     pub output_is_set: Option<bool>,
+    pub description: Option<String>,
+    pub category: RowCategory,
+    pub human_facing: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RowCategory {
+    Branch,
+    Password,
+    Key,
+    PublicInfo,
+    Other,
 }
 
 impl Row {
@@ -24,6 +36,14 @@ impl Row {
 }
 
 pub fn rows(configuration: &Schema, set_paths: &BTreeSet<String>) -> Vec<Row> {
+    rows_with_public(configuration, set_paths, &BTreeSet::new())
+}
+
+pub fn rows_with_public(
+    configuration: &Schema,
+    set_paths: &BTreeSet<String>,
+    public_ids: &BTreeSet<String>,
+) -> Vec<Row> {
     let mut output = Vec::new();
     for (host_name, host) in &configuration.0 {
         output.push(branch(0, host_name));
@@ -36,6 +56,7 @@ pub fn rows(configuration: &Schema, set_paths: &BTreeSet<String>) -> Vec<Row> {
                     &format!("{host_name}.{namespace}.{service}"),
                     3,
                     set_paths,
+                    public_ids,
                     &mut output,
                 );
             }
@@ -49,6 +70,7 @@ fn visit(
     path: &str,
     depth: usize,
     set: &BTreeSet<String>,
+    public_ids: &BTreeSet<String>,
     output: &mut Vec<Row>,
 ) {
     match node {
@@ -56,22 +78,50 @@ fn visit(
             depth: depth.saturating_sub(1),
             name: path.rsplit('.').next().unwrap_or(path).to_owned(),
             path: Some(path.to_owned()),
-            is_set: set.contains(path),
+            is_set: if matches!(leaf.kind, SecretKind::PublicInfo) {
+                leaf.shared_public_id
+                    .as_ref()
+                    .is_some_and(|id| public_ids.contains(id))
+            } else {
+                set.contains(path)
+            },
             is_task: false,
             can_generate: leaf.value_type == Some(ValueType::Password),
             output_is_set: None,
+            description: leaf.description.clone(),
+            category: if matches!(leaf.kind, SecretKind::PublicInfo) {
+                RowCategory::PublicInfo
+            } else {
+                match leaf.value_type {
+                    Some(ValueType::Password) => RowCategory::Password,
+                    Some(ValueType::Key) => RowCategory::Key,
+                    None => RowCategory::Other,
+                }
+            },
+            human_facing: leaf.human_facing,
         }),
-        SecretNode::Generated(leaf) => output.push(Row {
-            depth: depth.saturating_sub(1),
-            name: path.rsplit('.').next().unwrap_or(path).to_owned(),
-            path: Some(path.to_owned()),
-            is_set: set.contains(path),
-            is_task: true,
-            can_generate: leaf.value_type == Some(ValueType::Password),
-            output_is_set: None,
-        }),
+        SecretNode::Generated(leaf)
+            if matches!(
+                leaf.generated_secret.secret_type,
+                nix_secrets_core::GeneratedSecretType::StorageBoxSshKey
+            ) =>
+        {
+            output.push(Row {
+                depth: depth.saturating_sub(1),
+                name: path.rsplit('.').next().unwrap_or(path).to_owned(),
+                path: Some(path.to_owned()),
+                is_set: set.contains(path),
+                is_task: true,
+                can_generate: leaf.value_type == Some(ValueType::Password),
+                output_is_set: None,
+                description: leaf.description.clone(),
+                category: RowCategory::Password,
+                human_facing: leaf.human_facing,
+            })
+        }
+        SecretNode::Generated(_) => {}
         SecretNode::Branch(children) => {
-            visit_children(children, path, depth, set, output);
+            visit_children(children, path, depth, set, public_ids, output);
         }
     }
 }
@@ -81,6 +131,7 @@ fn visit_children(
     parent: &str,
     depth: usize,
     set: &BTreeSet<String>,
+    public_ids: &BTreeSet<String>,
     output: &mut Vec<Row>,
 ) {
     for (name, node) in children {
@@ -88,7 +139,7 @@ fn visit_children(
         if matches!(node, SecretNode::Branch(_)) {
             output.push(branch(depth, name));
         }
-        visit(node, &path, depth + 1, set, output);
+        visit(node, &path, depth + 1, set, public_ids, output);
     }
 }
 
@@ -101,6 +152,9 @@ fn branch(depth: usize, name: &str) -> Row {
         is_task: false,
         can_generate: false,
         output_is_set: None,
+        description: None,
+        category: RowCategory::Branch,
+        human_facing: false,
     }
 }
 
@@ -123,6 +177,9 @@ mod tests {
                 is_task: false,
                 can_generate: false,
                 output_is_set: None,
+                description: None,
+                category: RowCategory::Other,
+                human_facing: false,
             }
         );
     }
@@ -135,5 +192,16 @@ mod tests {
         assert!(row.is_task());
         assert!(row.is_set);
         assert_eq!(row.output_is_set, None);
+    }
+
+    #[test]
+    fn target_generated_local_key_is_not_an_editable_row() {
+        let mut schema: serde_json::Value = serde_json::from_str(r#"{"host":{"metadata":{"socketPath":"/run/s","deployment":{"host":"host","destination":"secrets@host","port":22}},"services":{"mail":{"ssh-private-key":{"kind":"generated","recipientPublicKeys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin"],"recipientIds":["key"],"consumerUnits":[],"generatedSecret":{"type":"local-ssh-key","output":{"path":"/persistent/secrets/mail/service/ssh-private-key","category":"service","owner":"mail","group":"mail","mode":"0400","contentType":"openssh-private-key"}}}}}}}"#).unwrap();
+        schema["host"]["services"]["mail"]["ssh-private-key"]["description"] =
+            "Generated on target".into();
+        let schema = Schema::from_json(&schema.to_string()).unwrap();
+        assert!(rows(&schema, &BTreeSet::new())
+            .iter()
+            .all(|row| row.path.is_none()));
     }
 }

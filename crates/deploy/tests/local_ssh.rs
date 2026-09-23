@@ -35,7 +35,7 @@ fn local_key_stays_on_target_and_only_dated_public_key_is_returned() {
         &[TaskEntry {
             identifier: id.into(),
             version_id: "v1".into(),
-            password_base64: STANDARD.encode(b"authorization-token"),
+            password_base64: String::new(),
             client_contribution_base64: STANDARD.encode([9; 32]),
         }],
     )

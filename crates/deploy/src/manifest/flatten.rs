@@ -27,6 +27,13 @@ pub(super) fn flatten(
             let spec = ManifestEntry {
                 service: service.into(),
                 destination: leaf.destination.clone(),
+                public_info: leaf.shared_public_id.as_ref().map(|shared_id| {
+                    PublicInfoAttestation {
+                        shared_id: shared_id.clone(),
+                        expected_ssh_host: leaf.expected_ssh_host.clone().unwrap_or_default(),
+                        expected_ssh_port: leaf.expected_ssh_port.unwrap_or_default(),
+                    }
+                }),
             };
             if output.insert(identifier.clone(), spec).is_some() {
                 return Err(DeployError::Invalid(format!(
@@ -46,6 +53,7 @@ pub(super) fn flatten(
             let spec = ManifestEntry {
                 service: service.into(),
                 destination: leaf.generated_secret.output.clone(),
+                public_info: None,
             };
             if output.insert(identifier.clone(), spec).is_some() {
                 return Err(DeployError::Invalid(format!(
@@ -81,15 +89,33 @@ pub(super) fn expected_from_destination(
         "setup" => SecretClass::Setup,
         "service" => SecretClass::Service,
         "backup" => SecretClass::Backup,
+        "public-info" => SecretClass::PublicInfo,
         _ => {
             return Err(DeployError::Invalid(
                 "manifest has invalid secret category".into(),
             ))
         }
     };
-    let expected_parent = PathBuf::from("/persistent/secrets")
-        .join(service)
-        .join(class.directory());
+    let root = if class == SecretClass::PublicInfo {
+        "/persistent/public-info"
+    } else {
+        "/persistent/secrets"
+    };
+    let destination_service = if class == SecretClass::PublicInfo {
+        Path::new(&destination.path)
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                DeployError::Invalid("public-info destination has no service component".into())
+            })?
+    } else {
+        service
+    };
+    let mut expected_parent = PathBuf::from(root).join(destination_service);
+    if class != SecretClass::PublicInfo {
+        expected_parent.push(class.directory());
+    }
     let path = Path::new(&destination.path);
     if path.parent() != Some(expected_parent.as_path()) {
         return Err(DeployError::Invalid(format!(
@@ -118,9 +144,15 @@ pub(super) fn expected_from_destination(
         .unwrap_or(&destination.mode);
     let mode = u32::from_str_radix(mode_text, 8)
         .map_err(|_| DeployError::Invalid(format!("invalid mode: {}", destination.mode)))?;
-    crate::validate::validate_mode(mode)?;
+    if class == SecretClass::PublicInfo {
+        if mode != 0o644 {
+            return Err(DeployError::Invalid("public-info mode must be 0644".into()));
+        }
+    } else {
+        crate::validate::validate_mode(mode)?;
+    }
     Ok(Expected {
-        service: service.into(),
+        service: destination_service.into(),
         class,
         secret: secret.into(),
         owner,

@@ -1,0 +1,183 @@
+use super::*;
+
+#[test]
+fn lost_lease_drops_the_modal_and_reports_expiry() {
+    let mut frontend = FakeFrontend {
+        events: VecDeque::from([UiEvent::Tick, UiEvent::Escape]),
+        draws: 0,
+    };
+    let mut writer = writer();
+    writer.poll_error = true;
+    let mut model = model(true);
+    model.mode = Mode::Approval(ApprovalRequest {
+        id: "id".into(),
+        target: "h".into(),
+        create: vec![],
+        replace: vec!["h.services.s.key".into()],
+        recipient_keys: vec![],
+        host_key: None,
+        tasks: vec![],
+    });
+    drive(&mut frontend, &mut writer, &mut model).unwrap();
+    assert!(matches!(model.mode, Mode::Browse));
+    assert_eq!(model.message.as_deref(), Some("approval lease was lost"));
+}
+
+#[test]
+fn task_provider_failure_keeps_approval_for_retry() {
+    let mut model = model(true);
+    let mut writer = writer();
+    let request = ApprovalRequest {
+        id: "id".into(),
+        target: "h".into(),
+        create: vec![],
+        replace: vec![],
+        recipient_keys: vec!["operator".into()],
+        host_key: None,
+        tasks: vec![TaskApproval {
+            identifier: "h.services.backup.bootstrap".into(),
+            input_is_set: true,
+            output_is_set: Some(false),
+            requires_input: true,
+        }],
+    };
+    model.mode = Mode::Approval(request);
+    writer.approval_error = true;
+    assert_eq!(
+        reduce(&mut model, UiEvent::Character('y'), &mut writer),
+        Action::Continue
+    );
+    assert!(matches!(model.mode, Mode::Approval(_)));
+    writer.approval_error = false;
+    assert_eq!(
+        reduce(&mut model, UiEvent::Character('y'), &mut writer),
+        Action::Approved
+    );
+}
+
+#[test]
+fn deleting_a_set_leaf_requires_confirmation_and_never_requests_deployment() {
+    let mut set = model(true);
+    let mut writer = writer();
+    reduce(&mut set, UiEvent::Character('d'), &mut writer);
+    assert!(writer.deletions.is_empty());
+    assert!(matches!(set.mode, Mode::DeleteConfirm { .. }));
+    reduce(&mut set, UiEvent::Character('y'), &mut writer);
+    assert_eq!(writer.deletions, ["h.services.s.key"]);
+
+    let mut unset = model(false);
+    reduce(&mut unset, UiEvent::Character('d'), &mut writer);
+    assert_eq!(writer.deletions, ["h.services.s.key"]);
+    assert_eq!(
+        unset.message.as_deref(),
+        Some("select a set secret to delete")
+    );
+}
+
+#[test]
+fn reveal_is_explicit_and_hidden_on_escape() {
+    let mut model = model(true);
+    let mut writer = writer();
+    reduce(&mut model, UiEvent::Character('r'), &mut writer);
+    assert!(matches!(model.mode, Mode::Reveal { .. }));
+    assert!(!format!("{:?}", model.mode).contains("stored-value"));
+    reduce(&mut model, UiEvent::Escape, &mut writer);
+    assert!(matches!(model.mode, Mode::Browse));
+}
+
+#[test]
+fn filters_use_explicit_value_categories() {
+    let mut model = model(true);
+    model.rows.push(Row {
+        depth: 0,
+        name: "certificate".into(),
+        path: Some("h.services.s.certificate".into()),
+        is_set: true,
+        is_task: false,
+        can_generate: false,
+        output_is_set: None,
+        description: Some("TLS certificate chain".into()),
+        category: RowCategory::Other,
+        human_facing: false,
+    });
+    let mut writer = writer();
+    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    assert!(model.visible_rows().is_empty());
+    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    assert_eq!(model.visible_rows(), vec![0]);
+    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    assert!(model.visible_rows().is_empty());
+    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    assert_eq!(model.visible_rows(), vec![0, 1]);
+}
+
+#[test]
+fn public_info_has_its_own_filter_category() {
+    let mut model = model(false);
+    model.rows.push(Row {
+        depth: 0,
+        name: "known-hosts".into(),
+        path: Some("h.services.backup.known-hosts".into()),
+        is_set: true,
+        is_task: false,
+        can_generate: false,
+        output_is_set: None,
+        description: Some("Pinned SSH host identity".into()),
+        category: RowCategory::PublicInfo,
+        human_facing: false,
+    });
+    let mut writer = writer();
+    for _ in 0..3 {
+        reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    }
+    assert_eq!(model.visible_rows(), vec![1]);
+    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    assert_eq!(model.visible_rows(), vec![0, 1]);
+}
+
+#[test]
+fn refreshed_rows_preserve_selection_and_propagate_shared_public_status() {
+    let mut model = model(false);
+    let mut shared = model.rows[0].clone();
+    shared.name = "known-hosts".into();
+    shared.path = Some("h.services.backup.known-hosts".into());
+    shared.category = RowCategory::PublicInfo;
+    model.rows.push(shared);
+    model.selected = 1;
+    let mut refreshed = model.rows.clone();
+    refreshed[1].is_set = true;
+    model.update_rows(refreshed);
+    assert_eq!(model.selected().unwrap().name, "known-hosts");
+    assert!(model.selected().unwrap().is_set);
+}
+
+#[test]
+fn human_filter_and_search_compose() {
+    let mut model = model(true);
+    model.rows[0].human_facing = true;
+    model.rows[0].description = Some("Human login password".into());
+    model.rows.push(Row {
+        depth: 0,
+        name: "service-token".into(),
+        path: Some("h.services.s.service-token".into()),
+        is_set: true,
+        is_task: false,
+        can_generate: false,
+        output_is_set: None,
+        description: None,
+        category: RowCategory::Other,
+        human_facing: false,
+    });
+    let mut writer = writer();
+    reduce(&mut model, UiEvent::Character('h'), &mut writer);
+    assert_eq!(model.visible_rows(), vec![0]);
+    reduce(&mut model, UiEvent::Character('/'), &mut writer);
+    for character in "login".chars() {
+        reduce(&mut model, UiEvent::Character(character), &mut writer);
+    }
+    assert_eq!(model.visible_rows(), vec![0]);
+    reduce(&mut model, UiEvent::Character('z'), &mut writer);
+    assert!(model.visible_rows().is_empty());
+    reduce(&mut model, UiEvent::Escape, &mut writer);
+    assert_eq!(model.visible_rows(), vec![0]);
+}

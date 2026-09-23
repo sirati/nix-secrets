@@ -1,21 +1,26 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   cfg = config.services.nixSecrets.receiver;
   secrets = config.services.nixSecrets;
-  treeHasGeneratedSecret = tree:
+  treeHasGeneratedSecret =
+    tree:
     lib.any (
       name:
-      let node = tree.${name};
-      in builtins.isAttrs node && (
-        node ? generatedSecret || treeHasGeneratedSecret node
-      )
+      let
+        node = tree.${name};
+      in
+      builtins.isAttrs node && (node ? generatedSecret || treeHasGeneratedSecret node)
     ) (builtins.attrNames tree);
-  servicesHaveGeneratedSecret = services:
-    lib.any (service: treeHasGeneratedSecret service.secrets) (
-      builtins.attrValues services
-    );
-  hasGeneratedSecrets = servicesHaveGeneratedSecret secrets.services
+  servicesHaveGeneratedSecret =
+    services: lib.any (service: treeHasGeneratedSecret service.secrets) (builtins.attrValues services);
+  hasGeneratedSecrets =
+    servicesHaveGeneratedSecret secrets.services
     || lib.any servicesHaveGeneratedSecret (builtins.attrValues secrets.userServices);
 in
 {
@@ -69,9 +74,12 @@ in
         StandardError = "journal";
         ExecStart = lib.escapeShellArgs [
           "${cfg.package}/bin/secret-deploy"
-          "--manifest" (toString config.system.build.nixSecretsManifest)
-          "--audit-file" "/run/nix-secrets/audit/%i.json"
-          "--audit-group" cfg.auditGroup
+          "--manifest"
+          (toString config.system.build.nixSecretsManifest)
+          "--audit-file"
+          "/run/nix-secrets/audit/%i.json"
+          "--audit-group"
+          cfg.auditGroup
         ];
         UMask = "0077";
         CapabilityBoundingSet = [
@@ -91,8 +99,15 @@ in
         ProtectKernelTunables = true;
         ProtectProc = "invisible";
         ProtectSystem = "strict";
-        ReadWritePaths = [ "/persistent/secrets" "/run/nix-secrets/audit" ];
-        RestrictAddressFamilies = [ "AF_UNIX" ] ++ lib.optionals hasGeneratedSecrets [
+        ReadWritePaths = [
+          "/persistent/secrets"
+          "/persistent/public-info"
+          "/run/nix-secrets/audit"
+        ];
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+        ]
+        ++ lib.optionals hasGeneratedSecrets [
           "AF_INET"
           "AF_INET6"
         ];
@@ -100,7 +115,12 @@ in
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
         SystemCallArchitectures = "native";
-        SystemCallFilter = [ "@system-service" "~@mount" "~@reboot" "~@swap" ];
+        SystemCallFilter = [
+          "@system-service"
+          "~@mount"
+          "~@reboot"
+          "~@swap"
+        ];
       };
     };
 
@@ -108,6 +128,7 @@ in
       "d /run/nix-secrets 0711 root root - -"
       "d /run/nix-secrets/audit 0750 root ${cfg.auditGroup} - -"
       "d /persistent/secrets 0711 root root - -"
+      "d /persistent/public-info 0711 root root - -"
       "d /persistent/secrets/.generations 0711 root root - -"
     ];
   };

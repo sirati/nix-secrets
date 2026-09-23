@@ -4,7 +4,7 @@ use crate::model::ApprovalRequest as UiApproval;
 use crate::tree::Row;
 use crate::ui::{Action, GenerateKind, SecretWriter};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use nix_secrets_core::{ApprovalRequest, LeafSpec, Schema, SecretPath, ValueType};
+use nix_secrets_core::{ApprovalRequest, LeafSpec, Schema, SecretKind, SecretPath, ValueType};
 use nix_secrets_crypto::{decrypt_secret, AgeCommandProvider, EncryptedSecret, Recipient};
 use nix_secrets_transport::{
     DeployEntry, Destination, ExpectedSecret, ExpectedTarget, ExpectedTask, HostIdentity,
@@ -54,7 +54,12 @@ impl Controller {
 
     pub fn rows(&mut self) -> Result<Vec<Row>, Box<dyn std::error::Error>> {
         let set = self.client.list()?.into_keys().collect::<BTreeSet<_>>();
-        Ok(crate::tree::rows(&self.schema, &set))
+        let public = self
+            .client
+            .list_public_info()?
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        Ok(crate::tree::rows_with_public(&self.schema, &set, &public))
     }
 
     fn approval_details(
@@ -78,7 +83,9 @@ impl Controller {
             let spec = self.schema.leaf(&path).map_err(|error| error.to_string())?;
             match spec {
                 LeafSpec::Stored(spec) => {
-                    keys.extend(spec.recipient_ids);
+                    if !matches!(spec.kind, SecretKind::PublicInfo) {
+                        keys.extend(spec.recipient_ids);
+                    }
                     if let Some(state) = state {
                         if target_has_version(state, identifier)? {
                             replace.push(identifier.clone());
@@ -88,14 +95,22 @@ impl Controller {
                     }
                 }
                 LeafSpec::Generated(spec) => {
-                    keys.extend(spec.recipient_ids);
+                    if spec.generated_secret.secret_type
+                        != nix_secrets_core::GeneratedSecretType::LocalSshKey
+                    {
+                        keys.extend(spec.recipient_ids);
+                    }
                     let output_is_set = state
                         .map(|state| target_task_has_version(state, identifier))
                         .transpose()?;
                     tasks.push(crate::model::TaskApproval {
                         identifier: identifier.clone(),
-                        input_is_set: set.contains(identifier),
+                        input_is_set: spec.generated_secret.secret_type
+                            == nix_secrets_core::GeneratedSecretType::LocalSshKey
+                            || set.contains(identifier),
                         output_is_set,
+                        requires_input: spec.generated_secret.secret_type
+                            != nix_secrets_core::GeneratedSecretType::LocalSshKey,
                     });
                 }
             }
@@ -128,6 +143,50 @@ impl Controller {
         let mut deploy_entries = Vec::new();
         let mut task_entries = Vec::new();
         for identifier in &identifiers {
+            let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
+            let spec = self.schema.leaf(&path).map_err(|error| error.to_string())?;
+            if let LeafSpec::Stored(public) = &spec {
+                if matches!(public.kind, SecretKind::PublicInfo) {
+                    let id = public
+                        .shared_public_id
+                        .as_deref()
+                        .ok_or("public info has no shared ID")?;
+                    let record = self
+                        .client
+                        .get_public_info(id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("required public info is unset: {identifier}"))?;
+                    nix_secrets_core::schema::validate_ssh_known_hosts(
+                        &record.value,
+                        public
+                            .expected_ssh_host
+                            .as_deref()
+                            .ok_or("missing expected SSH host")?,
+                        public
+                            .expected_ssh_port
+                            .ok_or("missing expected SSH port")?,
+                    )
+                    .map_err(str::to_owned)?;
+                    deploy_entries.push(DeployEntry {
+                        identifier: identifier.clone(),
+                        version_id: record.version_id,
+                        contents_base64: STANDARD.encode(record.value.as_bytes()),
+                    });
+                    continue;
+                }
+            }
+            if matches!(&spec, LeafSpec::Generated(task) if task.generated_secret.secret_type == nix_secrets_core::GeneratedSecretType::LocalSshKey)
+            {
+                let contribution = crate::task::fresh_contribution()
+                    .map_err(|error| format!("OS randomness failed: {error}"))?;
+                task_entries.push(TaskEntry {
+                    identifier: identifier.clone(),
+                    version_id: "local-generated-v1".into(),
+                    password_base64: String::new(),
+                    client_contribution_base64: STANDARD.encode(&contribution[..]),
+                });
+                continue;
+            }
             let stored = entries
                 .get(identifier)
                 .ok_or_else(|| format!("required secret is unset: {identifier}"))?;
@@ -139,8 +198,7 @@ impl Controller {
             };
             let value = decrypt_secret(identifier, &record, &self.provider)
                 .map_err(|error| error.to_string())?;
-            let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
-            match self.schema.leaf(&path).map_err(|error| error.to_string())? {
+            match spec {
                 LeafSpec::Stored(_) => deploy_entries.push(DeployEntry {
                     identifier: identifier.clone(),
                     version_id: STANDARD.encode(&stored.version_id),
@@ -185,110 +243,11 @@ impl Controller {
 }
 
 mod generate;
+mod metadata;
+mod public_info;
 mod registration;
+mod ssh_validation;
 mod writer;
 
-fn expected_target(schema: &Schema, request: &ApprovalRequest) -> Result<ExpectedTarget, String> {
-    let mut secrets = Vec::new();
-    let mut tasks = Vec::new();
-    for identifier in &request.secrets {
-        let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
-        match schema.leaf(&path).map_err(|error| error.to_string())? {
-            LeafSpec::Stored(spec) => secrets.push(ExpectedSecret {
-                identifier: identifier.clone(),
-                recipient_ids: spec.recipient_ids,
-                destination: destination(spec.destination, spec.consumer_units),
-            }),
-            LeafSpec::Generated(spec) => tasks.push(ExpectedTask {
-                identifier: identifier.clone(),
-                task_type: match spec.generated_secret.secret_type {
-                    nix_secrets_core::GeneratedSecretType::StorageBoxSshKey => STORAGE_BOX_SSH_KEY,
-                    nix_secrets_core::GeneratedSecretType::LocalSshKey => {
-                        nix_secrets_transport::LOCAL_SSH_KEY
-                    }
-                }
-                .into(),
-                recipient_ids: spec.recipient_ids,
-                output: destination(spec.generated_secret.output, spec.consumer_units),
-                bootstrap: spec
-                    .generated_secret
-                    .bootstrap
-                    .map(|bootstrap| StorageBoxBootstrap {
-                        host: bootstrap.host,
-                        port: bootstrap.port,
-                        user: bootstrap.user,
-                        host_public_keys: bootstrap.host_public_keys,
-                    }),
-            }),
-        }
-    }
-    Ok(ExpectedTarget {
-        hostname: request.target.clone(),
-        secrets,
-        tasks,
-    })
-}
-
-fn destination(value: nix_secrets_core::Destination, consumer_units: Vec<String>) -> Destination {
-    Destination {
-        path: value.path,
-        category: value.category,
-        owner: value.owner,
-        group: value.group,
-        mode: value.mode,
-        consumer_units,
-    }
-}
-
-fn target_has_version(state: &TargetState, identifier: &str) -> Result<bool, String> {
-    state
-        .secrets
-        .iter()
-        .find(|secret| secret.identifier == identifier)
-        .map(|secret| secret.current_version_id.is_some())
-        .ok_or_else(|| format!("target omitted {identifier}"))
-}
-
-fn target_task_has_version(state: &TargetState, identifier: &str) -> Result<bool, String> {
-    state
-        .tasks
-        .iter()
-        .find(|task| task.identifier == identifier)
-        .map(|task| task.current_version_id.is_some())
-        .ok_or_else(|| format!("target omitted task {identifier}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use nix_secrets_transport::TargetSecret;
-
-    #[test]
-    fn target_state_is_authoritative_for_create_and_replace() {
-        let destination = Destination {
-            path: "/persistent/secrets/s/service/a".into(),
-            category: "service".into(),
-            owner: "s".into(),
-            group: "s".into(),
-            mode: "0400".into(),
-            consumer_units: vec![],
-        };
-        let secret = |identifier: &str, version: Option<&str>| TargetSecret {
-            identifier: identifier.into(),
-            recipient_ids: vec!["key".into()],
-            destination: destination.clone(),
-            current_version_id: version.map(str::to_owned),
-        };
-        let state = TargetState {
-            protocol_version: 1,
-            hostname: "host".into(),
-            secrets: vec![
-                secret("host.services.s.new", None),
-                secret("host.services.s.old", Some("version")),
-            ],
-            tasks: vec![],
-        };
-        assert!(!target_has_version(&state, "host.services.s.new").unwrap());
-        assert!(target_has_version(&state, "host.services.s.old").unwrap());
-    }
-}
+mod target;
+use target::{expected_target, target_has_version, target_task_has_version};

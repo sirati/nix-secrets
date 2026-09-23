@@ -46,6 +46,15 @@ Leaves are secrets. The TUI presents the structure as a file tree and marks
 each leaf `set` in green or `unset` in red. Pressing Enter opens a masked input
 editor. Pasting while a leaf is selected sets it from the clipboard. Replacing
 an existing value requires confirmation.
+Press `d` to delete a selected value after confirmation, `r` to reveal it,
+`c` to copy it, or `p` to copy the public half of a stored OpenSSH private key
+without decrypting. The revealed view closes on Escape. Press `f` to cycle
+through all items, private keys, passwords, and public information;
+`h` toggles human-facing items; `/` searches names,
+identifiers, and descriptions. The views compose. Key and password views use
+the declared `valueType`; untyped certificates and other values remain in the
+all-items view. A leaf's optional description appears when selected. Local
+keys generated on a target do not appear as editable leaves.
 
 For a password leaf, press `g` and choose `p` for a random password or `w` for
 a word passphrase. The preview starts masked; `r` reveals it, `c` copies it,
@@ -54,9 +63,10 @@ separate confirmation. Copy uses `wl-copy` with the value on standard input;
 the opt-in `nix-secrets-clipboard` package supplies it without adding a
 clipboard dependency to other package outputs.
 
-The declaration can set a default SSH encryption recipient for the whole tree
-and override it at any subtree or leaf. Transport host keys remain a separate
-use of SSH keys and authenticate connections.
+The declaration can name SSH encryption recipients once and select them by
+name for the whole tree, a subtree, or a leaf. Recipient rotations retain
+earlier key identities in the TOML registry so existing ciphertext remains
+decryptable. Transport host keys authenticate connections separately.
 
 ## Backend
 
@@ -73,7 +83,9 @@ a fixed `nix run` invocation and the freshly evaluated secret declaration.
 Several TUI frontends can share one backend. The backend serializes changes to
 `nix-secrets.toml` and replaces that file atomically.
 
-The backend stores ciphertext and public metadata in `nix-secrets.toml`.
+The backend stores ciphertext, recipient references, and public metadata in
+`nix-secrets.toml`. A shared public-information entry has one plaintext TOML
+value even when several hosts deploy it.
 Encryption and decryption happen in the TUI process.
 
 ## Encryption
@@ -109,13 +121,13 @@ key verification against its own `known_hosts`: a changed key is rejected and
 an unknown key requires a warning that also identifies any known names using
 that key.
 
-Press `d` on a set leaf to request deployment. The frontend sends that
-identifier to the authenticated target, which resolves it from its generated
-manifest and returns its current opaque version. The TUI then displays whether
-the value will be created or replaced and asks for approval. It decrypts an
-approved value locally and sends plaintext only inside the end-to-end SSH
-connection to the target. Unknown SSH host keys require a separate approval
-before the target manifest is read.
+The target deployer requests the secrets for a specific server. Connected
+frontends receive that request and show the target, the values to create or
+replace, and any target-generation tasks. The frontend compares the target's
+manifest with its evaluated schema, asks for approval, decrypts the requested
+values locally, and sends plaintext only inside the end-to-end SSH connection.
+Unknown SSH host keys require a separate approval before the target manifest
+is read. Editing or selecting one TUI item never initiates a deployment.
 
 The target validates the request again, stages the complete update, and then
 atomically publishes it below:
@@ -145,7 +157,8 @@ It queues a separate approval to deploy the changed inventory to its target.
 Declare its destination with `contentType = "named-ssh-ed25519-public-keys"`
 and `authorizedForUser = "<ssh-account>"`; the receiver then refuses values
 that are not unique named Ed25519 public keys. Registration uses a conditional
-write so two operators cannot silently overwrite each other's key inventory.
+write followed by a decrypt-and-compare read-back so two operators cannot
+silently overwrite each other's key inventory.
 Audit events include the receiving SSH account and key names.
 
 See [PROTOCOL.md](PROTOCOL.md) for message flow and

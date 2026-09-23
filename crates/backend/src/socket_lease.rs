@@ -1,6 +1,6 @@
 use nix_secrets_core::framing::{read_json, write_json};
 use nix_secrets_core::{Request, Response};
-use rustix::fs::{flock, openat, FlockOperation, Mode, OFlags, CWD};
+use rustix::fs::{CWD, FlockOperation, Mode, OFlags, flock, openat};
 use rustix::net::sockopt::socket_peercred;
 use rustix::process::geteuid;
 use std::fs::{self, File};
@@ -8,8 +8,8 @@ use std::io::{self, Read};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 

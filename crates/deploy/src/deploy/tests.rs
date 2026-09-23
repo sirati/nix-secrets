@@ -28,6 +28,41 @@ fn batch(first: &[u8], second: &[u8]) -> ResolvedBatch {
     }
 }
 
+#[test]
+fn public_info_is_world_readable_at_a_traversable_generation_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("public-info");
+    let deployer = Deployer::at(&root).unwrap();
+    let mut public = entry(
+        "storage-box",
+        "known-hosts",
+        b"[box.example]:23 ssh-ed25519 key\n",
+    );
+    public.class = SecretClass::PublicInfo;
+    public.mode = 0o644;
+    deployer
+        .deploy(&ResolvedBatch {
+            entries: vec![public],
+        })
+        .unwrap();
+    let path = root.join("storage-box/known-hosts");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "[box.example]:23 ssh-ed25519 key\n"
+    );
+    let resolved = std::fs::canonicalize(&path).unwrap();
+    let file = std::fs::metadata(&resolved).unwrap();
+    assert_eq!(file.permissions().mode() & 0o777, 0o644);
+    for ancestor in resolved.ancestors().take_while(|path| path != &temp.path()) {
+        if ancestor.is_dir() {
+            assert_ne!(
+                std::fs::metadata(ancestor).unwrap().permissions().mode() & 0o001,
+                0
+            );
+        }
+    }
+}
+
 fn visible_pair(root: &Path) -> (Vec<u8>, Vec<u8>) {
     (
         fs::read(root.join("mail/service/first")).unwrap(),

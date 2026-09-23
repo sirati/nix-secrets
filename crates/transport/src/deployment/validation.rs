@@ -79,7 +79,7 @@ pub(super) fn validate_target(
     }
     Ok(())
 }
-type SecretSpec = (Vec<String>, Destination);
+type SecretSpec = (Vec<String>, Destination, Option<PublicInfoAttestation>);
 type TaskSpec = (
     String,
     Vec<String>,
@@ -93,7 +93,11 @@ fn map_target_secrets(
     map_unique(items, |item| {
         (
             &item.identifier,
-            (item.recipient_ids.clone(), item.destination.clone()),
+            (
+                item.recipient_ids.clone(),
+                item.destination.clone(),
+                item.public_info.clone(),
+            ),
         )
     })
 }
@@ -103,7 +107,11 @@ fn map_expected_secrets(
     map_unique(items, |item| {
         (
             &item.identifier,
-            (item.recipient_ids.clone(), item.destination.clone()),
+            (
+                item.recipient_ids.clone(),
+                item.destination.clone(),
+                item.public_info.clone(),
+            ),
         )
     })
 }
@@ -226,7 +234,13 @@ fn validate_tasks(
                 .decode(&entry.password_base64)
                 .map_err(|_| DeploymentError::Invalid("invalid task password encoding"))?,
         );
-        if password.is_empty() || password.len() > MAX_PASSWORD_BYTES {
+        let local_key = available
+            .iter()
+            .any(|task| task.identifier == entry.identifier && task.task_type == LOCAL_SSH_KEY);
+        if (!local_key && password.is_empty())
+            || (local_key && !password.is_empty())
+            || password.len() > MAX_PASSWORD_BYTES
+        {
             return Err(DeploymentError::Invalid("invalid task password length"));
         }
         let contribution = Zeroizing::new(
