@@ -2,7 +2,12 @@ use crate::tree::{Row, RowCategory};
 use std::collections::VecDeque;
 use zeroize::Zeroizing;
 
+mod attributes;
+mod catalog;
+mod dialogs;
 mod visibility;
+pub use attributes::{Attribute, Facet, FacetMode};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalRequest {
@@ -26,6 +31,23 @@ pub struct TaskApproval {
 #[derive(Eq, PartialEq)]
 pub enum Mode {
     Browse,
+    Properties {
+        scroll: u16,
+    },
+    FacetCategories {
+        selected: usize,
+    },
+    FacetValues {
+        attribute: Attribute,
+        selected: usize,
+    },
+    FacetFirstChoice {
+        attribute: Attribute,
+        value: String,
+    },
+    TreeOrder {
+        selected: usize,
+    },
     Help {
         scroll: u16,
     },
@@ -88,6 +110,8 @@ pub struct Model {
     pub filter: ViewFilter,
     pub human_only: bool,
     pub search: String,
+    pub tree_order: Vec<Attribute>,
+    pub facets: BTreeMap<Attribute, Facet>,
 }
 
 pub struct VisibleRow {
@@ -130,6 +154,7 @@ impl Model {
     pub fn update_rows(&mut self, rows: Vec<Row>) {
         let selected_path = self.selected().and_then(|row| row.path.clone());
         self.rows = rows;
+        self.rebuild_tree();
         if let Some(path) = selected_path {
             self.selected = self
                 .visible_rows()
@@ -143,7 +168,8 @@ impl Model {
         }
     }
     pub fn new(rows: Vec<Row>) -> Self {
-        Self {
+        let structured = rows.iter().any(|row| row.identity.is_some());
+        let mut model = Self {
             rows,
             selected: 0,
             mode: Mode::Browse,
@@ -156,52 +182,19 @@ impl Model {
             filter: ViewFilter::Required,
             human_only: false,
             search: String::new(),
+            tree_order: Attribute::DEFAULT_TREE.to_vec(),
+            facets: BTreeMap::new(),
+        };
+        if structured {
+            model.rebuild_tree();
         }
+        model
     }
 
     pub fn selected(&self) -> Option<&Row> {
         self.visible_rows()
             .get(self.selected)
             .and_then(|index| self.rows.get(*index))
-    }
-
-    pub fn notify(&mut self, message: impl Into<String>) {
-        let message = message.into();
-        if self.message.as_deref() == Some(message.as_str())
-            || self
-                .notifications
-                .back()
-                .is_some_and(|queued| queued == &message)
-        {
-            return;
-        }
-        if self.message.is_none() {
-            self.message = Some(message);
-        } else {
-            self.notifications.push_back(message);
-        }
-    }
-
-    pub fn acknowledge(&mut self) {
-        self.message = self.notifications.pop_front();
-        self.modal_scroll = 0;
-        self.show_pending_approval();
-    }
-
-    pub fn offer_approval(&mut self, request: ApprovalRequest) {
-        self.apply_task_status(&request);
-        self.pending_approvals.push_back(request);
-        self.show_pending_approval();
-    }
-
-    pub fn show_pending_approval(&mut self) {
-        if self.message.is_none() && matches!(self.mode, Mode::Browse) {
-            if let Some(dialog) = self.pending_dialogs.pop_front() {
-                self.mode = dialog;
-            } else if let Some(request) = self.pending_approvals.pop_front() {
-                self.mode = Mode::Approval(request);
-            }
-        }
     }
 
     pub fn cycle_filter(&mut self) {
@@ -282,5 +275,7 @@ impl Model {
     }
 }
 
+#[cfg(test)]
+mod facet_tests;
 #[cfg(test)]
 mod tests;

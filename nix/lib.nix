@@ -54,6 +54,8 @@ let
         "description"
         "humanFacing"
         "externalInputRequired"
+        "identity"
+        "presentation"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in
@@ -133,6 +135,8 @@ let
         "description"
         "humanFacing"
         "externalInputRequired"
+        "identity"
+        "presentation"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in
@@ -233,6 +237,53 @@ let
     normalizeServiceNamed defaultKeys [ ] { } serviceName service;
   normalizeServices = defaultKeys: services: mapAttrs (normalizeService defaultKeys) services;
 
+  decorateIdentity =
+    host: scope: user: service: tree:
+    let
+      walk =
+        node:
+        mapAttrs (
+          name: value:
+          if value ? destination || value ? generatedSecret then
+            let
+              identity = value.identity or { };
+              presentation = value.presentation or { };
+              unknownIdentity = builtins.filter (
+                field: !(builtins.elem field [ "service" "responsibility" "namespace" "name" ])
+              ) (attrNames identity);
+              unknownPresentation = builtins.filter (
+                field: !(builtins.elem field [ "explanation" "facing" "type" ])
+              ) (attrNames presentation);
+              inferredType =
+                if (value.valueType or null) == "password" then "passphrase"
+                else if (value.kind or null) == "public-info" then
+                  if (value.destination.contentType or null) == "openssh-public-key" then "public-key" else "public-info"
+                else if ((value.destination or (value.generatedSecret.output or { })).contentType or null) == "openssh-private-key" then "private-key"
+                else if (value.valueType or null) == "key" then "key"
+                else "value";
+            in
+            if unknownIdentity != [ ] || unknownPresentation != [ ] then
+              throw "unknown identity or presentation fields for ${host}.${service}.${name}"
+            else
+              value
+              // {
+                identity = {
+                  inherit host scope user service name;
+                  responsibility = "main";
+                  namespace = null;
+                } // identity;
+                presentation = {
+                  explanation = value.description or "";
+                  facing = if value.externalInputRequired or false then "external" else if value.humanFacing or false then "human" else "generated";
+                  type = inferredType;
+                } // presentation;
+              }
+          else
+            walk value
+        ) node;
+    in
+    walk tree;
+
   normalizeHost =
     {
       hostName,
@@ -246,11 +297,14 @@ let
       serviceDisplayPaths ? { },
     }:
     let
-      system =
-        normalizeServicesNamed defaultRecipientPublicKeys defaultRecipientNames recipientPublicKeys
-          services;
+      system = mapAttrs (service: value: decorateIdentity hostName "system" null service value) (
+        normalizeServicesNamed defaultRecipientPublicKeys defaultRecipientNames recipientPublicKeys services
+      );
       users = mapAttrs (
-        _: normalizeServicesNamed defaultRecipientPublicKeys defaultRecipientNames recipientPublicKeys
+        user: values:
+        mapAttrs (service: value: decorateIdentity hostName "user" user service value) (
+          normalizeServicesNamed defaultRecipientPublicKeys defaultRecipientNames recipientPublicKeys values
+        )
       ) userServices;
     in
     {

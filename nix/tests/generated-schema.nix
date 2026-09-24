@@ -33,6 +33,20 @@ let
       ]
     )) true
   );
+  semantic = (secretsLib.normalizeHost {
+    hostName = "host";
+    socketPath = "/run/nix-secrets/backend.sock";
+    deployment = { host = "host"; destination = "secrets@host"; port = 22; };
+    defaultRecipientPublicKeys = [ key ];
+    services.backup.secrets.storage-key = (service 23 [ key ]).secrets.storage-key // {
+      identity = {
+        service = "mail";
+        responsibility = "backup";
+        namespace = "shared";
+        name = "storage-key";
+      };
+    };
+  }).host.services.backup.storage-key;
 in
 assert generated.kind == "generated";
 assert generated.generatedSecret.type == "storage-box-ssh-key";
@@ -40,4 +54,10 @@ assert generated.generatedSecret.bootstrap.port == 23;
 assert generated.valueType == "password";
 assert !invalidPort.success;
 assert !duplicatePins.success;
+assert semantic.identity.host == "host";
+assert semantic.identity.scope == "system";
+assert semantic.identity.user == null;
+assert semantic.identity.service == "mail";
+assert semantic.identity.namespace == "shared";
+assert semantic.presentation.type == "passphrase";
 true

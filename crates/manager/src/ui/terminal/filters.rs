@@ -48,8 +48,11 @@ pub(super) fn render_filters(
         },
         model.human_only,
     );
+    let filter = Button::new("F Filter", MouseTarget::Shortcut(Shortcut::Character('F')));
+    let tree = Button::new("T Tree", MouseTarget::Shortcut(Shortcut::Character('T')));
     let rows = if area.width < 70 {
         vec![
+            vec![filter, tree],
             vec![required, all, keys],
             vec![passwords, public],
             vec![everyone, human],
@@ -57,7 +60,7 @@ pub(super) fn render_filters(
     } else {
         vec![
             vec![required, all, keys, passwords, public],
-            vec![everyone, human],
+            vec![everyone, human, filter, tree],
         ]
     };
     draw_rows(frame, area, rows, model.hover, hits);

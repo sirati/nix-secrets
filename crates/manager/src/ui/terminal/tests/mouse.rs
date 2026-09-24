@@ -16,6 +16,8 @@ fn sample_model() -> Model {
             category: crate::tree::RowCategory::Branch,
             human_facing: false,
             external_input_required: false,
+            identity: None,
+            presentation: None,
         },
         Row {
             depth: 1,
@@ -31,6 +33,8 @@ fn sample_model() -> Model {
             category: crate::tree::RowCategory::Branch,
             human_facing: false,
             external_input_required: false,
+            identity: None,
+            presentation: None,
         },
         Row {
             depth: 2,
@@ -46,6 +50,8 @@ fn sample_model() -> Model {
             category: crate::tree::RowCategory::Branch,
             human_facing: false,
             external_input_required: false,
+            identity: None,
+            presentation: None,
         },
         Row {
             depth: 3,
@@ -66,6 +72,8 @@ fn sample_model() -> Model {
             category: crate::tree::RowCategory::Branch,
             human_facing: false,
             external_input_required: false,
+            identity: None,
+            presentation: None,
         },
         Row {
             depth: 4,
@@ -87,6 +95,8 @@ fn sample_model() -> Model {
             category: crate::tree::RowCategory::Password,
             human_facing: false,
             external_input_required: true,
+            identity: None,
+            presentation: None,
         },
     ]);
     model.selected = model.visible_tree_rows().len() - 1;
@@ -98,7 +108,7 @@ fn selected_pane_uses_display_ancestry_and_ellipsizes_only_explanation() {
     let model = sample_model();
     let wide = selected_text(&model, 120);
     assert!(
-        wide.starts_with("host > services > forgejo/backup/password (password) - A Unicode 🦀"),
+        wide.starts_with("host > services > forgejo/backup/password (passphrase) - A Unicode 🦀"),
         "{wide}"
     );
     assert!(!wide.contains("backup-forgejo"));
@@ -109,7 +119,7 @@ fn selected_pane_uses_display_ancestry_and_ellipsizes_only_explanation() {
     assert_eq!(
         narrow
             .replace('\n', "")
-            .split(" (password)")
+            .split(" (passphrase)")
             .next()
             .unwrap(),
         "host > services > forgejo/backup/password"
@@ -126,7 +136,7 @@ fn selected_pane_uses_display_ancestry_and_ellipsizes_only_explanation() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(screen.contains("host > services > forgejo/backup/"));
-    assert!(screen.contains("ord (password)"), "{screen}");
+    assert!(screen.contains("ord (passphrase)"), "{screen}");
 }
 
 #[test]
@@ -139,6 +149,8 @@ fn mouse_hits_match_rendered_controls_and_modal_takes_priority() {
         MouseTarget::Filter(2),
         MouseTarget::Tree(model.selected),
         MouseTarget::Shortcut(Shortcut::Character('?')),
+        MouseTarget::Shortcut(Shortcut::Character('F')),
+        MouseTarget::Shortcut(Shortcut::Character('T')),
     ] {
         let rect = hits
             .regions
@@ -175,4 +187,70 @@ fn mouse_hits_match_rendered_controls_and_modal_takes_priority() {
         .regions
         .iter()
         .any(|(_, target)| *target == MouseTarget::Tree(model.selected)));
+}
+
+#[test]
+fn facet_modal_items_are_clickable_and_hovered_without_underlying_hits() {
+    let mut model = sample_model();
+    model.mode = Mode::FacetCategories { selected: 0 };
+    let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+    let mut hits = HitMap::default();
+    terminal.draw(|frame| hits = render(frame, &model)).unwrap();
+    assert!(hits
+        .regions
+        .iter()
+        .all(|(_, target)| matches!(target, MouseTarget::ModalItem(_) | MouseTarget::Shortcut(_))));
+    let rect = hits
+        .regions
+        .iter()
+        .find(|(_, target)| *target == MouseTarget::ModalItem(3))
+        .unwrap()
+        .0;
+    assert_eq!(hits.get(rect.x, rect.y), Some(MouseTarget::ModalItem(3)));
+    model.hover = Some(MouseTarget::ModalItem(3));
+    terminal
+        .draw(|frame| {
+            render(frame, &model);
+        })
+        .unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(rect.x, rect.y)].bg,
+        Color::Rgb(70, 75, 85)
+    );
+}
+
+#[test]
+fn property_modal_shows_semantic_facets_and_stable_storage_identifier() {
+    let mut model = sample_model();
+    let selected = model.visible_rows()[model.selected];
+    model.rows[selected].identity = Some(nix_secrets_core::schema::SecretIdentity {
+        host: "host".into(),
+        scope: "system".into(),
+        user: None,
+        service: "forgejo".into(),
+        responsibility: "backup".into(),
+        namespace: Some("shared".into()),
+        name: "password".into(),
+    });
+    model.mode = Mode::Properties { scroll: 0 };
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            render(frame, &model);
+        })
+        .unwrap();
+    let screen = (0..30)
+        .map(|y| line(&terminal, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "Properties",
+        "Host: host",
+        "System/User: system",
+        "Responsibility: backup",
+        "Namespace: shared",
+        "Storage identifier: host.services.backup-forgejo.password",
+    ] {
+        assert!(screen.contains(expected), "missing {expected}: {screen}");
+    }
 }

@@ -16,6 +16,34 @@ separately administered system, such as a password set in a hosting provider's
 control panel. The TUI's **Required** view shows only leaves with this flag.
 It does not infer this property from password type, generator availability, or
 whether the value is currently set. The default is `false`.
+Each normalized leaf also has a semantic `identity` with `host`, `scope`,
+`user`, `service`, `responsibility`, `namespace`, and `name`. The first three
+come from the enclosing host and system/user service declaration. A leaf may
+override the other four:
+
+```nix
+identity = {
+  service = "mail";
+  responsibility = "backup";
+  namespace = "shared"; # omit for a value without a namespace
+  name = "passphrase";
+};
+presentation = {
+  explanation = "Passphrase for the mail backup repository";
+  facing = "generated"; # external, human, or another label
+  type = "passphrase"; # private-key, public-key, or another label
+};
+```
+
+The identity is unique across the evaluated inventory. `presentation` is
+optional and defaults from the existing description, facing flags, and value
+type. The dotted identifier from the existing Nix declaration remains the
+stable storage and deployment key, so changing the semantic identity or tree
+ordering does not rewrite encrypted TOML entries or target paths. Keep an
+existing declaration at its current path when adding these attributes.
+In the TUI, `F` opens attribute filters; `T` chooses and orders tree attributes;
+`P` shows all attributes of the selected value. Any attribute can be filtered
+whether it is in the tree or filter-only.
 Set
 `destination.contentType = "openssh-private-key"` or `"openssh-public-key"`
 when the consumer requires that format; the frontend and target both reject

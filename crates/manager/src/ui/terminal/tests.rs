@@ -111,6 +111,8 @@ fn narrow_terminal_retains_distinct_sections_and_all_filters() {
         assert!(screen.contains(title), "missing zone {title}");
     }
     for label in [
+        "F Filter",
+        "T Tree",
         "1 Required",
         "2 All",
         "3 Keys",

@@ -14,6 +14,8 @@ fn leaf(set: bool) -> Row {
         category: RowCategory::Other,
         human_facing: false,
         external_input_required: true,
+        identity: None,
+        presentation: None,
     }
 }
 

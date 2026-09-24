@@ -11,13 +11,13 @@ pub(super) struct Regions {
 pub(super) fn regions(area: Rect, selected_lines: u16) -> Regions {
     let (filters, selected, status, keys) = if area.height >= 17 {
         (
-            if area.width < 70 { 5 } else { 4 },
+            if area.width < 70 { 6 } else { 4 },
             (selected_lines + 2).max(3),
             3,
             if area.width < 70 { 3 } else { 4 },
         )
     } else if area.height >= 12 {
-        (if area.width < 70 { 5 } else { 4 }, 0, 2, 2)
+        (if area.width < 70 { 6 } else { 4 }, 0, 2, 2)
     } else {
         (
             area.height.min(3),

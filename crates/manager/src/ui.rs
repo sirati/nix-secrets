@@ -27,8 +27,10 @@ mod provider_failure;
 mod edit;
 use edit::{submit, submit_if_edit, submit_if_nonempty, truncate_character};
 
+mod facets;
 mod generated;
 mod mouse;
+mod prelude;
 mod terminal;
 
 pub use terminal::run;

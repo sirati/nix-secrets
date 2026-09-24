@@ -13,6 +13,7 @@ pub enum Shortcut {
 pub enum MouseTarget {
     Filter(u8),
     Tree(usize),
+    ModalItem(usize),
     Shortcut(Shortcut),
 }
 

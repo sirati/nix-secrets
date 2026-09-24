@@ -3,6 +3,45 @@ mod common;
 use nix_secrets_core::{GeneratedSecretType, LeafSpec, Schema, SchemaError, SecretPath, ValueType};
 use serde_json::json;
 
+#[test]
+fn semantic_identity_resolves_legacy_storage_id_and_rejects_duplicates() {
+    let mut document = serde_json::to_value(common::schema()).unwrap();
+    let identity = json!({
+        "host":"host", "scope":"system", "user":null,
+        "service":"mail", "responsibility":"main", "namespace":"shared", "name":"password"
+    });
+    let leaf = &mut document["host"]["services"]["mail"]["password"];
+    leaf["identity"] = identity.clone();
+    leaf["presentation"] =
+        json!({"explanation":"Mail login", "facing":"human", "type":"passphrase"});
+    let schema = Schema::from_json(&document.to_string()).unwrap();
+    let semantic = schema
+        .secret(&SecretPath::parse("host.services.mail.password").unwrap())
+        .unwrap()
+        .identity
+        .unwrap();
+    assert_eq!(
+        schema
+            .resolve_identity(&semantic)
+            .unwrap()
+            .unwrap()
+            .to_string(),
+        "host.services.mail.password"
+    );
+    let mut invalid = document.clone();
+    invalid["host"]["services"]["mail"]["password"]["presentation"]["explanation"] =
+        json!("first line\nsecond line");
+    assert!(
+        matches!(Schema::from_json(&invalid.to_string()), Err(nix_secrets_core::SchemaLoadError::Schema(SchemaError::InvalidValueDefinition(_, message))) if message == "invalid presentation metadata")
+    );
+    let mut duplicate = document["host"]["services"]["mail"]["password"].clone();
+    duplicate["destination"]["path"] = json!("/persistent/secrets/mail/service/second");
+    document["host"]["services"]["mail"]["second"] = duplicate;
+    assert!(
+        matches!(Schema::from_json(&document.to_string()), Err(nix_secrets_core::SchemaLoadError::Schema(SchemaError::InvalidValueDefinition(_, message))) if message == "duplicate semantic identity")
+    );
+}
+
 const KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin";
 

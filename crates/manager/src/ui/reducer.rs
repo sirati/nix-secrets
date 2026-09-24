@@ -1,51 +1,27 @@
 use super::*;
 
 pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter) -> Action {
-    if let UiEvent::Hover(target) = event {
-        model.hover = target;
-        return Action::Continue;
-    }
-    if let UiEvent::Click(target) = event {
-        return mouse::click(model, target, writer);
-    }
-    if let UiEvent::Approval(request) = event {
-        model.offer_approval(request);
-        return Action::Continue;
-    }
-    if model.message.is_some() {
-        match event {
-            UiEvent::Enter => model.acknowledge(),
-            UiEvent::Up => model.modal_scroll = model.modal_scroll.saturating_sub(1),
-            UiEvent::Down => model.modal_scroll = model.modal_scroll.saturating_add(1),
-            _ => {}
-        }
-        return Action::Continue;
-    }
-    if !matches!(
-        model.mode,
-        Mode::Browse
-            | Mode::Help { .. }
-            | Mode::Reveal { .. }
-            | Mode::Edit { .. }
-            | Mode::Search { .. }
-    ) {
-        match event {
-            UiEvent::Up => {
-                model.modal_scroll = model.modal_scroll.saturating_sub(1);
-                return Action::Continue;
-            }
-            UiEvent::Down => {
-                model.modal_scroll = model.modal_scroll.saturating_add(1);
-                return Action::Continue;
-            }
-            _ => {}
-        }
+    if let Some(action) = prelude::handle(model, &event, writer) {
+        return action;
     }
     let mode = std::mem::replace(&mut model.mode, Mode::Browse);
     match (mode, event) {
         (Mode::Browse, UiEvent::Up) => model.move_by(-1),
         (Mode::Browse, UiEvent::Down) => model.move_by(1),
         (Mode::Browse, UiEvent::Character('f')) => model.cycle_filter(),
+        (Mode::Browse, UiEvent::Character('F')) => {
+            model.set_filter(crate::model::ViewFilter::All);
+            model.set_human_only(false);
+            model.mode = Mode::FacetCategories { selected: 0 }
+        }
+        (Mode::Browse, UiEvent::Character('T')) => model.mode = Mode::TreeOrder { selected: 0 },
+        (
+            mode @ (Mode::FacetCategories { .. }
+            | Mode::FacetValues { .. }
+            | Mode::FacetFirstChoice { .. }
+            | Mode::TreeOrder { .. }),
+            event,
+        ) => facets::reduce(model, mode, event),
         (Mode::Browse, UiEvent::Character('h')) => model.toggle_human(),
         (Mode::Browse, UiEvent::Character('1')) => {
             model.set_filter(crate::model::ViewFilter::Required)
@@ -97,6 +73,23 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         (Mode::BulkProgress { .. }, UiEvent::Escape) => {}
         (Mode::BulkProgress { total, done }, _) => model.mode = Mode::BulkProgress { total, done },
         (Mode::Browse, UiEvent::Character('?')) => model.mode = Mode::Help { scroll: 0 },
+        (Mode::Browse, UiEvent::Character('P'))
+            if model.selected().is_some_and(|row| row.is_secret()) =>
+        {
+            model.mode = Mode::Properties { scroll: 0 }
+        }
+        (Mode::Properties { scroll }, UiEvent::Up) => {
+            model.mode = Mode::Properties {
+                scroll: scroll.saturating_sub(1),
+            }
+        }
+        (Mode::Properties { scroll }, UiEvent::Down) => {
+            model.mode = Mode::Properties {
+                scroll: scroll.saturating_add(1),
+            }
+        }
+        (Mode::Properties { .. }, UiEvent::Escape | UiEvent::Enter) => {}
+        (Mode::Properties { scroll }, _) => model.mode = Mode::Properties { scroll },
         (Mode::Help { scroll }, UiEvent::Up) => {
             model.mode = Mode::Help {
                 scroll: scroll.saturating_sub(1),

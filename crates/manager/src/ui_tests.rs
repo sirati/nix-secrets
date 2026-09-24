@@ -96,6 +96,8 @@ fn model(set: bool) -> Model {
         category: RowCategory::Password,
         human_facing: false,
         external_input_required: true,
+        identity: None,
+        presentation: None,
     }])
 }
 
@@ -188,6 +190,8 @@ fn task_approval_exposes_input_and_target_output_status() {
         category: RowCategory::Password,
         human_facing: false,
         external_input_required: true,
+        identity: None,
+        presentation: None,
     }]);
     let mut writer = writer();
     let request = ApprovalRequest {

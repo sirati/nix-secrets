@@ -1,4 +1,5 @@
 use nix_secrets_core::schema::SecretNode;
+use nix_secrets_core::schema::{SecretIdentity, SecretPresentation};
 use nix_secrets_core::{Schema, SecretKind, ValueType};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,6 +18,8 @@ pub struct Row {
     pub category: RowCategory,
     pub human_facing: bool,
     pub external_input_required: bool,
+    pub identity: Option<SecretIdentity>,
+    pub presentation: Option<SecretPresentation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,8 +142,18 @@ fn visit(
     match node {
         SecretNode::Secret(leaf) => output.push(Row {
             depth: depth.saturating_sub(1),
-            name: path.rsplit('.').next().unwrap_or(path).to_owned(),
-            display_segments: child_path(display_path, path.rsplit('.').next().unwrap_or(path)),
+            name: leaf
+                .identity
+                .as_ref()
+                .map(|identity| identity.name.clone())
+                .unwrap_or_else(|| path.rsplit('.').next().unwrap_or(path).to_owned()),
+            display_segments: child_path(
+                display_path,
+                leaf.identity
+                    .as_ref()
+                    .map(|identity| identity.name.as_str())
+                    .unwrap_or_else(|| path.rsplit('.').next().unwrap_or(path)),
+            ),
             path: Some(path.to_owned()),
             is_set: if matches!(leaf.kind, SecretKind::PublicInfo) {
                 leaf.shared_public_id
@@ -166,6 +179,8 @@ fn visit(
             },
             human_facing: leaf.human_facing,
             external_input_required: leaf.external_input_required,
+            identity: leaf.identity.clone(),
+            presentation: leaf.presentation.clone(),
         }),
         SecretNode::Generated(leaf)
             if matches!(
@@ -175,8 +190,18 @@ fn visit(
         {
             output.push(Row {
                 depth: depth.saturating_sub(1),
-                name: path.rsplit('.').next().unwrap_or(path).to_owned(),
-                display_segments: child_path(display_path, path.rsplit('.').next().unwrap_or(path)),
+                name: leaf
+                    .identity
+                    .as_ref()
+                    .map(|identity| identity.name.clone())
+                    .unwrap_or_else(|| path.rsplit('.').next().unwrap_or(path).to_owned()),
+                display_segments: child_path(
+                    display_path,
+                    leaf.identity
+                        .as_ref()
+                        .map(|identity| identity.name.as_str())
+                        .unwrap_or_else(|| path.rsplit('.').next().unwrap_or(path)),
+                ),
                 path: Some(path.to_owned()),
                 is_set: set.contains(path),
                 is_task: true,
@@ -187,6 +212,8 @@ fn visit(
                 category: RowCategory::Password,
                 human_facing: leaf.human_facing,
                 external_input_required: leaf.external_input_required,
+                identity: leaf.identity.clone(),
+                presentation: leaf.presentation.clone(),
             })
         }
         SecretNode::Generated(_) => {}
@@ -254,8 +281,13 @@ fn branch(depth: usize, name: &str, display_segments: Vec<String>) -> Row {
         category: RowCategory::Branch,
         human_facing: false,
         external_input_required: false,
+        identity: None,
+        presentation: None,
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+mod reorder;
+pub use reorder::reordered_rows;

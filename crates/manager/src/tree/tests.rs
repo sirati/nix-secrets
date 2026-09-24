@@ -26,6 +26,8 @@ fn builds_sorted_tree_and_marks_set_leaves() {
             category: RowCategory::Other,
             human_facing: false,
             external_input_required: false,
+            identity: None,
+            presentation: None,
         }
     );
 }
@@ -114,4 +116,17 @@ fn required_view_uses_external_anchor_flag_not_password_or_generator_kind() {
         .filter_map(|index| model.rows[index].path.as_deref())
         .collect::<Vec<_>>();
     assert_eq!(required, ["host.services.backup.storagebox-access"]);
+}
+
+#[test]
+fn semantic_name_is_used_instead_of_legacy_storage_leaf() {
+    let mut schema: serde_json::Value = serde_json::from_str(r#"{"host":{"metadata":{"socketPath":"/run/s","deployment":{"host":"host","destination":"secrets@host","port":22}},"services":{"mail":{"legacy-token":{"kind":"secret","recipientPublicKeys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin"],"recipientIds":["key"],"destination":{"path":"/persistent/secrets/mail/service/legacy-token","category":"service","owner":"mail","group":"mail","mode":"0400"},"consumerUnits":[]}}}}}"#).unwrap();
+    schema["host"]["services"]["mail"]["legacy-token"]["identity"] = serde_json::json!({
+        "host": "host", "scope": "system", "service": "mail", "responsibility": "main", "namespace": "alpha", "name": "credential"
+    });
+    let schema = Schema::from_json(&schema.to_string()).unwrap();
+    let row = rows(&schema, &BTreeSet::new()).pop().unwrap();
+    assert_eq!(row.name, "credential");
+    assert_eq!(row.display_segments.last().unwrap(), "credential");
+    assert_eq!(row.path.as_deref(), Some("host.services.mail.legacy-token"));
 }

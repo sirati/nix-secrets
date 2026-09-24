@@ -9,13 +9,15 @@ mod frontend;
 mod hit;
 mod layout;
 mod text;
+mod tree;
 use actions::hotkeys;
 use buttons::{draw_rows, wrap_buttons};
 use filters::render_filters;
 use frontend::CrosstermFrontend;
 use hit::HitMap;
 use layout::regions;
-use text::{help_text, prompt, selected_text};
+use text::{help_text, prompt, selected_text, selector_items, selector_selected};
+use tree::{render_tree, task_status};
 
 pub fn run(rows: Vec<Row>, writer: &mut impl SecretWriter) -> io::Result<()> {
     let mut frontend = CrosstermFrontend::setup()?;
@@ -83,6 +85,7 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
         match &model.mode {
             Mode::Browse => return,
             Mode::Help { scroll } => ("Help", help_text().to_owned(), *scroll),
+            Mode::Properties { scroll } => ("Properties", prompt(model), *scroll),
             Mode::Reveal { value, scroll, .. } => (
                 "Reveal",
                 format!(
@@ -100,10 +103,14 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
     hits.regions.clear();
     let width = area.width.min(80).max(1);
     let inner_width = width.saturating_sub(2).max(1) as usize;
-    let lines = body
-        .lines()
-        .map(|line| line.chars().count().div_ceil(inner_width).max(1))
-        .sum::<usize>();
+    let selector = selector_items(model);
+    let lines = if selector.is_some() {
+        body.lines().count()
+    } else {
+        body.lines()
+            .map(|line| line.chars().count().div_ceil(inner_width).max(1))
+            .sum::<usize>()
+    };
     let height = area.height.min((lines + 4).max(5) as u16);
     let box_area = Rect {
         x: area.x + (area.width - width) / 2,
@@ -122,13 +129,52 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
         width: box_area.width.saturating_sub(2),
         height: box_area.height.saturating_sub(4),
     };
-    frame.render_widget(
-        Paragraph::new(body)
-            .alignment(Alignment::Left)
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
-        body_area,
-    );
+    if let Some(items) = selector {
+        let top = selector_selected(model)
+            .unwrap_or(0)
+            .saturating_add(2)
+            .saturating_sub(body_area.height.saturating_sub(1) as usize) as u16;
+        let lines = body
+            .lines()
+            .enumerate()
+            .map(|(line, text)| {
+                let style = if line >= 2 && model.hover == Some(MouseTarget::ModalItem(line - 2)) {
+                    Style::default().bg(Color::Rgb(70, 75, 85))
+                } else {
+                    Style::default()
+                };
+                Line::styled(text.to_owned(), style)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(lines)
+                .alignment(Alignment::Left)
+                .scroll((top, 0)),
+            body_area,
+        );
+        for index in 0..items.len() {
+            let line = index + 2;
+            if line >= top as usize && line - (top as usize) < body_area.height as usize {
+                hits.add(
+                    Rect {
+                        x: body_area.x,
+                        y: body_area.y + (line - top as usize) as u16,
+                        width: body_area.width,
+                        height: 1,
+                    },
+                    MouseTarget::ModalItem(index),
+                );
+            }
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new(body)
+                .alignment(Alignment::Left)
+                .scroll((scroll, 0))
+                .wrap(Wrap { trim: false }),
+            body_area,
+        );
+    }
     if box_area.height >= 5 {
         let footer = Rect {
             x: box_area.x,
@@ -148,6 +194,11 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
 
 fn modal_title(mode: &Mode) -> &'static str {
     match mode {
+        Mode::FacetCategories { .. } => "Filter · attributes",
+        Mode::Properties { .. } => "Properties",
+        Mode::FacetValues { .. } => "Filter · values",
+        Mode::FacetFirstChoice { .. } => "Choose filter rule",
+        Mode::TreeOrder { .. } => "Tree attributes and order",
         Mode::Search { .. } => "Search",
         Mode::DeleteConfirm { .. } => "Delete",
         Mode::Edit { .. } => "Edit value",
@@ -159,94 +210,6 @@ fn modal_title(mode: &Mode) -> &'static str {
         Mode::ProviderFailure { .. } => "Provider error",
         Mode::Approval(_) => "Deployment request",
         _ => "Dialog",
-    }
-}
-
-fn render_tree(
-    frame: &mut ratatui::Frame<'_>,
-    model: &Model,
-    area: ratatui::layout::Rect,
-    hits: &mut HitMap,
-) {
-    let visible = model.visible_tree_rows();
-    let items = visible
-        .iter()
-        .enumerate()
-        .into_iter()
-        .map(|(index, visible)| {
-            let mut item = item(&model.rows[visible.index], visible.depth, &visible.label);
-            if model.hover == Some(MouseTarget::Tree(index)) {
-                item = item.style(Style::default().bg(Color::Rgb(70, 75, 85)));
-            }
-            item
-        })
-        .collect::<Vec<_>>();
-    let mut state =
-        ListState::default().with_selected((!items.is_empty()).then_some(model.selected));
-    let list = List::new(items)
-        .block(Block::default().title("Secrets").borders(Borders::ALL))
-        .highlight_symbol("> ");
-    frame.render_stateful_widget(list, area, &mut state);
-    let inner_height = area.height.saturating_sub(2) as usize;
-    for index in state.offset()..visible.len().min(state.offset() + inner_height) {
-        hits.add(
-            Rect {
-                x: area.x + 1,
-                y: area.y + 1 + (index - state.offset()) as u16,
-                width: area.width.saturating_sub(2),
-                height: 1,
-            },
-            MouseTarget::Tree(index),
-        );
-    }
-}
-
-fn item(row: &Row, depth: usize, name: &str) -> ListItem<'static> {
-    let indent = "  ".repeat(depth);
-    if !row.is_secret() {
-        return ListItem::new(format!("{indent}{name}/"));
-    }
-    let (status, color) = if row.is_set {
-        ("set", Color::Green)
-    } else {
-        ("unset", Color::Red)
-    };
-    let label = if row.is_task() {
-        format!(
-            "task · input {status} · output {}",
-            row.output_is_set.map(set_status).unwrap_or("unknown")
-        )
-    } else {
-        status.into()
-    };
-    ListItem::new(Line::from(vec![
-        Span::raw(format!("{indent}{name}  ")),
-        Span::styled(label, Style::default().fg(color)),
-    ]))
-}
-
-fn set_status(set: bool) -> &'static str {
-    if set {
-        "set"
-    } else {
-        "unset"
-    }
-}
-
-fn task_status(task: &crate::model::TaskApproval) -> String {
-    if task.requires_input {
-        format!(
-            "{} (bootstrap {}, output {})",
-            task.identifier,
-            set_status(task.input_is_set),
-            task.output_is_set.map(set_status).unwrap_or("unknown")
-        )
-    } else {
-        format!(
-            "{} (generated on target; output {})",
-            task.identifier,
-            task.output_is_set.map(set_status).unwrap_or("unknown")
-        )
     }
 }
 

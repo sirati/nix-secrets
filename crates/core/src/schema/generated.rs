@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{ConsumerConstraints, Destination, ValueType};
+use super::{ConsumerConstraints, Destination, SecretIdentity, SecretPresentation, ValueType};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -12,6 +12,10 @@ pub struct GeneratedSecretLeaf {
     pub human_facing: bool,
     #[serde(rename = "externalInputRequired", default)]
     pub external_input_required: bool,
+    #[serde(default)]
+    pub identity: Option<SecretIdentity>,
+    #[serde(default)]
+    pub presentation: Option<SecretPresentation>,
     #[serde(rename = "recipientPublicKeys")]
     pub recipient_public_keys: Vec<String>,
     #[serde(rename = "recipientIds")]

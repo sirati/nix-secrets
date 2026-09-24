@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
-use thiserror::Error;
 
+mod errors;
 mod generated;
+mod identity;
+mod spec;
+pub use errors::{SchemaError, SchemaLoadError};
+pub use spec::{GeneratedSecretSpec, LeafSpec, SecretSpec};
 mod path;
 mod registry;
 use registry::{missing, synthetic_path, validate_named_recipients, validate_shared_public_specs};
@@ -12,6 +16,7 @@ mod value;
 pub use generated::{
     GeneratedKind, GeneratedSecret, GeneratedSecretLeaf, GeneratedSecretType, StorageBoxBootstrap,
 };
+pub use identity::{SecretIdentity, SecretPresentation};
 pub use validation::validate_ssh_known_hosts;
 use validation::{validate_component, validate_namespace, validate_tree};
 pub use value::{ConsumerConstraints, ValueType};
@@ -73,6 +78,10 @@ pub struct SecretLeaf {
     pub human_facing: bool,
     #[serde(rename = "externalInputRequired", default)]
     pub external_input_required: bool,
+    #[serde(default)]
+    pub identity: Option<SecretIdentity>,
+    #[serde(default)]
+    pub presentation: Option<SecretPresentation>,
     #[serde(rename = "recipientPublicKeys", default)]
     pub recipient_public_keys: Vec<String>,
     #[serde(rename = "recipientIds", default)]
@@ -114,79 +123,6 @@ pub struct Destination {
 #[serde(transparent)]
 pub struct SecretPath(Vec<String>);
 
-#[derive(Clone, Debug)]
-pub struct SecretSpec {
-    pub path: SecretPath,
-    pub kind: SecretKind,
-    pub shared_public_id: Option<String>,
-    pub expected_ssh_host: Option<String>,
-    pub expected_ssh_port: Option<u16>,
-    pub install_default_if_missing: bool,
-    pub description: Option<String>,
-    pub human_facing: bool,
-    pub external_input_required: bool,
-    pub recipient_public_keys: Vec<String>,
-    pub recipient_ids: Vec<String>,
-    pub recipient_names: Vec<String>,
-    pub destination: Destination,
-    pub consumer_units: Vec<String>,
-    pub value_type: Option<ValueType>,
-    pub consumer_constraints: Option<ConsumerConstraints>,
-}
-
-#[derive(Clone, Debug)]
-pub struct GeneratedSecretSpec {
-    pub path: SecretPath,
-    pub description: Option<String>,
-    pub human_facing: bool,
-    pub external_input_required: bool,
-    pub recipient_public_keys: Vec<String>,
-    pub recipient_ids: Vec<String>,
-    pub recipient_names: Vec<String>,
-    pub generated_secret: GeneratedSecret,
-    pub consumer_units: Vec<String>,
-    pub value_type: Option<ValueType>,
-    pub consumer_constraints: Option<ConsumerConstraints>,
-}
-
-#[derive(Clone, Debug)]
-pub enum LeafSpec {
-    Stored(SecretSpec),
-    Generated(GeneratedSecretSpec),
-}
-
-#[derive(Debug, Error)]
-pub enum SchemaError {
-    #[error("secret path must have at least four components")]
-    TooShort,
-    #[error("invalid path component {0:?}")]
-    InvalidComponent(String),
-    #[error("invalid service namespace {0:?}")]
-    InvalidNamespace(String),
-    #[error("schema path does not exist: {0}")]
-    NotFound(SecretPath),
-    #[error("schema path is a branch: {0}")]
-    IsBranch(SecretPath),
-    #[error("schema path has the wrong leaf kind: {0}")]
-    WrongKind(SecretPath),
-    #[error("secret has no recipient public key: {0}")]
-    MissingPublicKey(SecretPath),
-    #[error("recipient key and identifier counts differ: {0}")]
-    RecipientCount(SecretPath),
-    #[error("invalid destination for {0}: {1}")]
-    InvalidDestination(SecretPath, String),
-    #[error("invalid value definition for {0}: {1}")]
-    InvalidValueDefinition(SecretPath, String),
-}
-
-#[derive(Debug, Error)]
-pub enum SchemaLoadError {
-    #[error("invalid JSON: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error(transparent)]
-    Schema(#[from] SchemaError),
-}
-
 impl Schema {
     pub fn from_json(input: &str) -> Result<Self, SchemaLoadError> {
         let schema: Self = serde_json::from_str(input)?;
@@ -195,6 +131,7 @@ impl Schema {
     }
 
     pub fn validate(&self) -> Result<(), SchemaError> {
+        self.identity_index()?;
         let mut public_specs = BTreeMap::<String, (String, u16)>::new();
         for (host_name, host) in &self.0 {
             validate_component(host_name)?;
@@ -304,6 +241,8 @@ impl Schema {
                 description: leaf.description.clone(),
                 human_facing: leaf.human_facing,
                 external_input_required: leaf.external_input_required,
+                identity: leaf.identity.clone(),
+                presentation: leaf.presentation.clone(),
                 recipient_public_keys: leaf.recipient_public_keys.clone(),
                 recipient_ids: leaf.recipient_ids.clone(),
                 recipient_names: leaf.recipient_names.clone(),
@@ -317,6 +256,8 @@ impl Schema {
                 description: leaf.description.clone(),
                 human_facing: leaf.human_facing,
                 external_input_required: leaf.external_input_required,
+                identity: leaf.identity.clone(),
+                presentation: leaf.presentation.clone(),
                 recipient_public_keys: leaf.recipient_public_keys.clone(),
                 recipient_ids: leaf.recipient_ids.clone(),
                 recipient_names: leaf.recipient_names.clone(),

@@ -1,5 +1,7 @@
 use super::*;
 
+mod facets;
+
 #[test]
 fn idle_ticks_do_not_redraw_the_terminal() {
     let mut frontend = FakeFrontend {
@@ -116,6 +118,8 @@ fn filters_use_explicit_value_categories() {
         category: RowCategory::Other,
         human_facing: false,
         external_input_required: true,
+        identity: None,
+        presentation: None,
     });
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('3'), &mut writer);
@@ -145,6 +149,8 @@ fn public_info_has_its_own_filter_category() {
         category: RowCategory::PublicInfo,
         human_facing: false,
         external_input_required: true,
+        identity: None,
+        presentation: None,
     });
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('5'), &mut writer);
@@ -189,6 +195,8 @@ fn human_filter_and_search_compose() {
         category: RowCategory::Other,
         human_facing: false,
         external_input_required: true,
+        identity: None,
+        presentation: None,
     });
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('h'), &mut writer);

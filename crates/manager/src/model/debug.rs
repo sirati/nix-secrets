@@ -5,6 +5,29 @@ impl fmt::Debug for Mode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Browse => formatter.write_str("Browse"),
+            Self::Properties { scroll } => {
+                formatter.debug_tuple("Properties").field(scroll).finish()
+            }
+            Self::FacetCategories { selected } => formatter
+                .debug_tuple("FacetCategories")
+                .field(selected)
+                .finish(),
+            Self::FacetValues {
+                attribute,
+                selected,
+            } => formatter
+                .debug_tuple("FacetValues")
+                .field(attribute)
+                .field(selected)
+                .finish(),
+            Self::FacetFirstChoice { attribute, value } => formatter
+                .debug_tuple("FacetFirstChoice")
+                .field(attribute)
+                .field(value)
+                .finish(),
+            Self::TreeOrder { selected } => {
+                formatter.debug_tuple("TreeOrder").field(selected).finish()
+            }
             Self::Help { scroll } => formatter.debug_tuple("Help").field(scroll).finish(),
             Self::Search { query } => formatter.debug_tuple("Search").field(query).finish(),
             Self::DeleteConfirm { path } => {

@@ -31,6 +31,22 @@ pub(super) fn click(
             };
             reduce(model, event, writer)
         }
+        MouseTarget::ModalItem(index) => match &mut model.mode {
+            Mode::FacetCategories { selected } | Mode::FacetValues { selected, .. } => {
+                *selected = index;
+                reduce(model, UiEvent::Enter, writer)
+            }
+            Mode::TreeOrder { selected } => {
+                *selected = index;
+                Action::Continue
+            }
+            Mode::FacetFirstChoice { .. } if index < 4 => reduce(
+                model,
+                UiEvent::Character(char::from_digit(index as u32 + 1, 10).unwrap()),
+                writer,
+            ),
+            _ => Action::Continue,
+        },
         _ => Action::Continue,
     }
 }

@@ -25,6 +25,9 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
             if narrow {
                 vec![
                     letter("? Help", '?'),
+                    letter("P Properties", 'P').enabled(editable),
+                    letter("F Filter", 'F'),
+                    letter("T Tree", 'T'),
                     letter("/ Search", '/'),
                     key("Enter Edit", Shortcut::Enter).enabled(editable),
                     letter("G Missing", 'G').enabled(missing),
@@ -32,6 +35,9 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
             } else {
                 vec![
                     letter("? Help", '?'),
+                    letter("P Properties", 'P').enabled(editable),
+                    letter("F Filter", 'F'),
+                    letter("T Tree", 'T'),
                     letter("/ Search", '/'),
                     key("Enter Edit", Shortcut::Enter).enabled(editable),
                     letter("g Generate", 'g').enabled(generatable),
@@ -44,7 +50,29 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                 ]
             }
         }
+        Mode::FacetCategories { .. } => vec![
+            key("Enter Open", Shortcut::Enter),
+            key("Esc Close", Shortcut::Escape),
+        ],
+        Mode::FacetValues { .. } => vec![
+            key("Enter Select", Shortcut::Enter),
+            key("Esc Categories", Shortcut::Escape),
+        ],
+        Mode::FacetFirstChoice { .. } => vec![
+            letter("1 Only this", '1'),
+            letter("2 Only others", '2'),
+            letter("3 Whitelist off", '3'),
+            letter("4 Blacklist off", '4'),
+            key("Esc Back", Shortcut::Escape),
+        ],
+        Mode::TreeOrder { .. } => vec![
+            letter("Space Toggle", ' '),
+            letter("[ Earlier", '['),
+            letter("] Later", ']'),
+            key("Esc Done", Shortcut::Escape),
+        ],
         Mode::Help { .. } => vec![key("Esc Close", Shortcut::Escape)],
+        Mode::Properties { .. } => vec![key("Esc Close", Shortcut::Escape)],
         Mode::Search { .. } => vec![
             key("Enter Keep", Shortcut::Enter),
             key("Esc Clear", Shortcut::Escape),
