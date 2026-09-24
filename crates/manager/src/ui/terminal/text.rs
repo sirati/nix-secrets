@@ -2,22 +2,7 @@ use super::*;
 
 pub(super) fn prompt(model: &Model) -> String {
     match &model.mode {
-        Mode::Browse => {
-            let description = model
-                .selected()
-                .and_then(|row| row.description.as_deref())
-                .unwrap_or("");
-            format!(
-                "Selected: {}\n{} · type: {} · audience: {}",
-                model
-                    .selected()
-                    .map(|row| row.path.as_deref().unwrap_or(&row.name))
-                    .unwrap_or("none"),
-                description,
-                model.filter.name(),
-                if model.human_only { "human" } else { "all" }
-            )
-        }
+        Mode::Browse => selected_text(model),
         Mode::Help { .. } => "All actions are described above. Use ↑↓ to scroll.".into(),
         Mode::Search { query } => format!("Search: {query} · Enter: keep filter · Esc: clear"),
         Mode::DeleteConfirm { path } => format!("Delete {path} from encrypted store? y/n"),
@@ -63,6 +48,22 @@ pub(super) fn prompt(model: &Model) -> String {
     }
 }
 
+pub(super) fn selected_text(model: &Model) -> String {
+    let description = model
+        .selected()
+        .and_then(|row| row.description.as_deref())
+        .unwrap_or("");
+    let path = model
+        .selected()
+        .map(|row| row.path.as_deref().unwrap_or(&row.name))
+        .unwrap_or("none");
+    if description.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}\n{description}")
+    }
+}
+
 pub(super) fn legend_text(model: &Model, width: u16) -> String {
     if width < 45 {
         return match model.mode {
@@ -73,7 +74,7 @@ pub(super) fn legend_text(model: &Model, width: u16) -> String {
         };
     }
     match model.mode {
-        Mode::Browse => "Navigate: ↑↓ move · / search · 1-4 type · 5-6 audience · ? help\nValues: Enter edit · paste set · g generate · G all missing · r reveal · c copy · p public · d delete · Esc quit".into(),
+        Mode::Browse => "↑↓ move · / search · 1–5 type · 6–7 audience · ? help\nEnter edit · g one · G missing · d delete · r reveal · c copy".into(),
         Mode::Help { .. } => "Help: ↑↓ scroll · Esc or ? close".into(),
         Mode::Reveal { .. } => "Reveal: ↑↓ scroll · c copy · Enter or Esc hide".into(),
         Mode::Search { .. } => "Search: type query · Backspace erase · Enter keep · Esc clear".into(),
@@ -89,5 +90,5 @@ pub(super) fn legend_text(model: &Model, width: u16) -> String {
 }
 
 pub(super) fn help_text() -> &'static str {
-    "NAVIGATE\n↑ / ↓  Move between visible items\n/  Search names, identifiers, and descriptions\n1 All · 2 Keys · 3 Passwords · 4 Public info\n5 All people · 6 Human-facing\n?  Show or close this help\n\nEDIT\nEnter  Edit selected value; Enter again saves\nPaste  Set from clipboard; replacement asks first\ng  Generate password or passphrase for one field\nG  Generate all missing passwords; keeps existing values\nr  Reveal selected value\nc  Copy the selected value\np  Copy the public half of a stored OpenSSH private key\nd  Delete selected value after confirmation\n\nDEPLOYMENT\nA target deployer requests one server's values.\ny  Approve the verified target and displayed changes\nn / Esc  Reject the request\n\nEnter  Acknowledge a notice\nEsc  Leave a view, or quit from the tree"
+    "NAVIGATE\n↑ / ↓  Move between visible items\n/  Search names, identifiers, and descriptions\n1 Required · 2 All · 3 Keys · 4 Passwords · 5 Public info\n6 Everyone · 7 Human-facing\n?  Show or close this help\n\nEDIT\nEnter  Edit selected value; Enter again saves\nPaste  Set from clipboard; replacement asks first\ng  Generate password or passphrase for one field\nG  Generate all missing passwords; keeps existing values\nr  Reveal selected value\nc  Copy the selected value\np  Copy the public half of a stored OpenSSH private key\nd  Delete selected value after confirmation\n\nDEPLOYMENT\nA target deployer requests one server's values.\ny  Approve the verified target and displayed changes\nn / Esc  Reject the request\n\nEnter  Acknowledge a notice\nEsc  Leave a view, or quit from the tree"
 }

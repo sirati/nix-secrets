@@ -2,8 +2,12 @@ use super::*;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::widgets::{Block, Borders, Clear};
 
+mod filters;
+mod layout;
 mod text;
-use text::{help_text, legend_text, prompt};
+use filters::render_filters;
+use layout::regions;
+use text::{help_text, legend_text, prompt, selected_text};
 
 pub fn run(rows: Vec<Row>, writer: &mut impl SecretWriter) -> io::Result<()> {
     let mut frontend = CrosstermFrontend::setup()?;
@@ -66,98 +70,45 @@ impl Frontend for CrosstermFrontend {
 
 fn render(frame: &mut ratatui::Frame<'_>, model: &Model) {
     let area = frame.area();
-    let toggle_height = area.height.min(if area.width < 70 { 5 } else { 4 });
-    let toggle = Rect {
-        height: toggle_height,
-        ..area
-    };
-    let remaining = area.height - toggle_height;
-    let legend_height = if remaining >= 7 { 2 } else { 1 }.min(remaining);
-    let detail_height = if matches!(model.mode, Mode::Browse) {
-        remaining.saturating_sub(legend_height).min(2)
-    } else {
-        0
-    };
-    let main_height = remaining - legend_height - detail_height;
-    let main = ratatui::layout::Rect {
-        y: area.y + toggle_height,
-        height: main_height,
-        ..area
-    };
-    let detail = ratatui::layout::Rect {
-        y: main.y + main_height,
-        height: detail_height,
-        ..area
-    };
-    let legend = ratatui::layout::Rect {
-        y: detail.y + detail_height,
-        height: legend_height,
-        ..area
-    };
-
-    frame.render_widget(
-        Paragraph::new(toggle_text(model, area.width))
-            .block(Block::default().title("View filters").borders(Borders::ALL)),
-        toggle,
-    );
-    if main.height > 0 {
-        render_tree(frame, model, main);
+    let zones = regions(area);
+    render_filters(frame, model, zones.filters);
+    if zones.tree.height > 0 {
+        render_tree(frame, model, zones.tree);
     }
-    if detail.height > 0 {
+    if zones.selected.height > 0 {
         frame.render_widget(
-            Paragraph::new(prompt(model)).wrap(Wrap { trim: false }),
-            detail,
+            Paragraph::new(selected_text(model))
+                .block(Block::default().title("Selected").borders(Borders::ALL))
+                .wrap(Wrap { trim: false }),
+            zones.selected,
         );
     }
-    if legend.height > 0 {
+    if zones.status.height > 0 {
+        let status = if model.message.is_some() {
+            "Notice pending · Enter acknowledges"
+        } else if matches!(model.mode, Mode::BulkProgress { .. }) {
+            "Generating passwords"
+        } else {
+            "Ready"
+        };
         frame.render_widget(
-            Paragraph::new(legend_text(model, legend.width)).wrap(Wrap { trim: false }),
-            legend,
+            Paragraph::new(status).block(Block::default().title("Status").borders(Borders::ALL)),
+            zones.status,
+        );
+    }
+    if zones.keys.height > 0 {
+        frame.render_widget(
+            Paragraph::new(legend_text(model, zones.keys.width))
+                .block(
+                    Block::default()
+                        .title("Keys · ? for help")
+                        .borders(Borders::ALL),
+                )
+                .wrap(Wrap { trim: false }),
+            zones.keys,
         );
     }
     render_modal(frame, model, area);
-}
-
-fn toggle_text(model: &Model, width: u16) -> String {
-    fn button(label: &str, selected: bool) -> String {
-        if selected {
-            format!("<{label}>")
-        } else {
-            format!("[{label}]")
-        }
-    }
-    let required = button(
-        "1 Required",
-        model.filter == crate::model::ViewFilter::Required,
-    );
-    let all = button("2 All", model.filter == crate::model::ViewFilter::All);
-    let keys = button("3 Keys", model.filter == crate::model::ViewFilter::Keys);
-    let passwords = button(
-        "4 Passwords",
-        model.filter == crate::model::ViewFilter::Passwords,
-    );
-    let public = button(
-        if width < 70 {
-            "5 Public"
-        } else {
-            "5 Public info"
-        },
-        model.filter == crate::model::ViewFilter::PublicInfo,
-    );
-    let everyone = button("6 Everyone", !model.human_only);
-    let human = button(
-        if width < 70 {
-            "7 Human"
-        } else {
-            "7 Human-facing"
-        },
-        model.human_only,
-    );
-    if width < 70 {
-        format!("{required} {all} {keys}\n{passwords} {public}\n{everyone} {human}")
-    } else {
-        format!("{required} {all} {keys} {passwords} {public}\n{everyone} {human}")
-    }
 }
 
 fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect) {
@@ -233,7 +184,9 @@ fn render_tree(frame: &mut ratatui::Frame<'_>, model: &Model, area: ratatui::lay
         .collect::<Vec<_>>();
     let mut state =
         ListState::default().with_selected((!items.is_empty()).then_some(model.selected));
-    let list = List::new(items).highlight_symbol("> ");
+    let list = List::new(items)
+        .block(Block::default().title("Secrets").borders(Borders::ALL))
+        .highlight_symbol("> ");
     frame.render_stateful_widget(list, area, &mut state);
 }
 

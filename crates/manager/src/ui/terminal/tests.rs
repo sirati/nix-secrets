@@ -1,5 +1,6 @@
 use super::*;
 use ratatui::backend::TestBackend;
+use ratatui::style::Modifier;
 
 fn line(terminal: &Terminal<TestBackend>, y: u16) -> String {
     let buffer = terminal.backend().buffer();
@@ -32,20 +33,84 @@ fn compact_terminal_renders_notice_modal_and_filter_bar() {
 }
 
 #[test]
-fn wide_terminal_keeps_filter_bar_and_legend_behind_modal() {
-    let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+fn wide_terminal_keeps_five_distinct_zones_and_inverse_selected_buttons() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     let mut model = Model::new(vec![]);
-    model.message = Some("copied".into());
     terminal.draw(|frame| render(frame, &model)).unwrap();
-    let screen = (0..12)
+    let screen = (0..24)
         .map(|y| line(&terminal, y))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(screen.contains("Notice"));
-    assert!(screen.contains("copied"));
-    assert!(screen.contains("<1 Required>"));
-    assert!(line(&terminal, 10).contains("Navigate:"));
-    assert!(line(&terminal, 11).contains("Values:"));
+    for title in ["Filters", "Secrets", "Selected", "Status", "Keys"] {
+        assert!(screen.contains(title), "missing zone {title}");
+    }
+    let zones = regions(terminal.backend().buffer().area);
+    assert!(zones.filters.bottom() <= zones.tree.y);
+    assert!(zones.tree.bottom() <= zones.selected.y);
+    assert!(zones.selected.bottom() <= zones.status.y);
+    assert!(zones.status.bottom() <= zones.keys.y);
+    assert!(line(&terminal, zones.filters.y + 1).contains("1 Required"));
+    assert!(!screen.contains("<1 Required>"));
+    assert!(button_reversed(&terminal, "1 Required"));
+    assert!(!button_reversed(&terminal, "2 All"));
+    model.set_filter(crate::model::ViewFilter::All);
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    assert!(!button_reversed(&terminal, "1 Required"));
+    assert!(button_reversed(&terminal, "2 All"));
+}
+
+fn button_reversed(terminal: &Terminal<TestBackend>, label: &str) -> bool {
+    let buffer = terminal.backend().buffer();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            if buffer[(x, y)].symbol() == &label[..1] {
+                let line = line(terminal, y);
+                if line.contains(label) {
+                    return buffer[(x, y)]
+                        .style()
+                        .add_modifier
+                        .contains(Modifier::REVERSED);
+                }
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn narrow_terminal_retains_distinct_sections_and_all_filters() {
+    let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+    let model = Model::new(vec![]);
+    terminal.draw(|frame| render(frame, &model)).unwrap();
+    let screen = (0..20)
+        .map(|y| line(&terminal, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for title in ["Filters", "Secrets", "Selected", "Status", "Keys"] {
+        assert!(screen.contains(title), "missing zone {title}");
+    }
+    for label in [
+        "1 Required",
+        "2 All",
+        "3 Keys",
+        "4 Passwords",
+        "5 Public",
+        "6 Everyone",
+        "7 Human",
+    ] {
+        assert!(screen.contains(label), "missing button {label}");
+    }
+    let zones = regions(terminal.backend().buffer().area);
+    assert!(zones.filters.bottom() <= zones.tree.y && zones.tree.bottom() <= zones.selected.y);
+    assert!(zones.selected.bottom() <= zones.status.y && zones.status.bottom() <= zones.keys.y);
+}
+
+#[test]
+fn help_and_legend_match_actual_filter_shortcuts() {
+    let model = Model::new(vec![]);
+    assert!(help_text().contains("1 Required · 2 All · 3 Keys · 4 Passwords · 5 Public info"));
+    assert!(help_text().contains("6 Everyone · 7 Human-facing"));
+    assert!(legend_text(&model, 100).contains("1–5 type · 6–7 audience"));
 }
 
 #[test]
