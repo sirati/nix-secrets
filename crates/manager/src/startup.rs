@@ -11,6 +11,21 @@ use std::process::{Child, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Bump this when the backend protocol or its persisted document format becomes
+// incompatible with a running backend. The socket name keeps older processes
+// and their active clients untouched while a compatible backend starts.
+const BACKEND_COMPATIBILITY_VERSION: u32 = 2;
+
+pub fn socket_name(repository: &Path) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    repository.hash(&mut hasher);
+    format!(
+        "backend-v{BACKEND_COMPATIBILITY_VERSION}-{:016x}.sock",
+        hasher.finish()
+    )
+}
+
 pub trait Launcher {
     type Guard;
     fn start(&mut self, command: &CommandSpec) -> io::Result<Self::Guard>;
@@ -139,6 +154,11 @@ fn connect_ready(path: &Path) -> io::Result<UnixStream> {
     write_json(&mut stream, &Request::List)?;
     match read_json::<Response>(&mut stream)? {
         Some(Response::Secrets { .. }) => {}
+        Some(Response::Error { message }) => {
+            return Err(io::Error::other(format!(
+                "backend readiness probe failed: {message}"
+            )))
+        }
         Some(_) => {
             return Err(io::Error::other(
                 "backend readiness probe returned an unexpected response",
@@ -230,6 +250,57 @@ mod tests {
         };
         assert_eq!(launcher.starts, 1);
         drop(connection.stream);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn starts_new_backend_without_replacing_older_protocol_socket() {
+        let repository = path();
+        let versioned = repository.with_file_name(socket_name(&repository));
+        let legacy =
+            repository.with_file_name(socket_name(&repository).replace("backend-v2-", "backend-"));
+        let old_listener = UnixListener::bind(&legacy).unwrap();
+        let mut launcher = FakeLauncher {
+            path: versioned.clone(),
+            starts: 0,
+        };
+        let spec = CommandSpec {
+            program: "unused".into(),
+            arguments: vec![],
+        };
+        let connection =
+            connect_or_start(&versioned, &spec, &mut launcher, Duration::from_secs(1)).unwrap();
+        assert_eq!(launcher.starts, 1);
+        assert!(legacy.exists());
+        drop(connection);
+        drop(old_listener);
+        fs::remove_file(versioned).unwrap();
+        fs::remove_file(legacy).unwrap();
+    }
+
+    #[test]
+    fn reports_backend_store_error_instead_of_opaque_readiness_failure() {
+        let path = path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(matches!(
+                read_json::<Request>(&mut stream).unwrap(),
+                Some(Request::List)
+            ));
+            write_json(
+                &mut stream,
+                &Response::Error {
+                    message: "document format is incompatible".into(),
+                },
+            )
+            .unwrap();
+        });
+        let error = connect_ready(&path).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("document format is incompatible"));
+        server.join().unwrap();
         fs::remove_file(path).unwrap();
     }
 

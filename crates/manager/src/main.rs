@@ -39,7 +39,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let socket_directory = runtime_directory(&home).join("nix-secrets");
     fs::create_dir_all(&socket_directory)?;
-    let socket_name = socket_name(&repository);
+    let socket_name = startup::socket_name(&repository);
     // Each remote frontend owns its SSH tunnel. Another terminal can then
     // remain connected when this one exits, while all tunnels still reach the
     // same backend socket on the repository host.
@@ -167,11 +167,4 @@ fn runtime_directory(home: &Path) -> PathBuf {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local/state"))
-}
-
-fn socket_name(repository: &Path) -> String {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    repository.hash(&mut hasher);
-    format!("backend-{:016x}.sock", hasher.finish())
 }
