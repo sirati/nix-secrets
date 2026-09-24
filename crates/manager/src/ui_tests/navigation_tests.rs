@@ -13,7 +13,7 @@ fn idle_ticks_do_not_redraw_the_terminal() {
 #[test]
 fn lost_lease_drops_the_modal_and_reports_expiry() {
     let mut frontend = FakeFrontend {
-        events: VecDeque::from([UiEvent::Tick, UiEvent::Escape]),
+        events: VecDeque::from([UiEvent::Tick, UiEvent::Enter, UiEvent::Escape]),
         draws: 0,
     };
     let mut writer = writer();
@@ -30,7 +30,10 @@ fn lost_lease_drops_the_modal_and_reports_expiry() {
     });
     drive(&mut frontend, &mut writer, &mut model).unwrap();
     assert!(matches!(model.mode, Mode::Browse));
-    assert_eq!(model.message.as_deref(), Some("approval lease was lost"));
+    assert!(
+        model.message.is_none(),
+        "Enter acknowledged the lease-loss notice"
+    );
 }
 
 #[test]
@@ -59,6 +62,7 @@ fn task_provider_failure_keeps_approval_for_retry() {
     );
     assert!(matches!(model.mode, Mode::Approval(_)));
     writer.approval_error = false;
+    reduce(&mut model, UiEvent::Enter, &mut writer);
     assert_eq!(
         reduce(&mut model, UiEvent::Character('y'), &mut writer),
         Action::Approved
@@ -111,13 +115,13 @@ fn filters_use_explicit_value_categories() {
         human_facing: false,
     });
     let mut writer = writer();
-    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    reduce(&mut model, UiEvent::Character('3'), &mut writer);
     assert!(model.visible_rows().is_empty());
-    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    reduce(&mut model, UiEvent::Character('4'), &mut writer);
     assert_eq!(model.visible_rows(), vec![0]);
-    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    reduce(&mut model, UiEvent::Character('5'), &mut writer);
     assert!(model.visible_rows().is_empty());
-    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    reduce(&mut model, UiEvent::Character('2'), &mut writer);
     assert_eq!(model.visible_rows(), vec![0, 1]);
 }
 
@@ -137,11 +141,9 @@ fn public_info_has_its_own_filter_category() {
         human_facing: false,
     });
     let mut writer = writer();
-    for _ in 0..3 {
-        reduce(&mut model, UiEvent::Character('f'), &mut writer);
-    }
+    reduce(&mut model, UiEvent::Character('5'), &mut writer);
     assert_eq!(model.visible_rows(), vec![1]);
-    reduce(&mut model, UiEvent::Character('f'), &mut writer);
+    reduce(&mut model, UiEvent::Character('2'), &mut writer);
     assert_eq!(model.visible_rows(), vec![0, 1]);
 }
 
@@ -153,6 +155,7 @@ fn refreshed_rows_preserve_selection_and_propagate_shared_public_status() {
     shared.path = Some("h.services.backup.known-hosts".into());
     shared.category = RowCategory::PublicInfo;
     model.rows.push(shared);
+    model.set_filter(crate::model::ViewFilter::All);
     model.selected = 1;
     let mut refreshed = model.rows.clone();
     refreshed[1].is_set = true;

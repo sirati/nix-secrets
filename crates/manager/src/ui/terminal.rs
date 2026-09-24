@@ -1,4 +1,9 @@
 use super::*;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::widgets::{Block, Borders, Clear};
+
+mod text;
+use text::{help_text, legend_text, prompt};
 
 pub fn run(rows: Vec<Row>, writer: &mut impl SecretWriter) -> io::Result<()> {
     let mut frontend = CrosstermFrontend::setup()?;
@@ -61,68 +66,47 @@ impl Frontend for CrosstermFrontend {
 
 fn render(frame: &mut ratatui::Frame<'_>, model: &Model) {
     let area = frame.area();
-    let legend_height = if area.height >= 7 { 2 } else { 1 }.min(area.height);
-    let status_height = area.height.saturating_sub(legend_height).min(1);
-    let detail_height = area
-        .height
-        .saturating_sub(legend_height + status_height)
-        .min(2);
-    let main_height = area.height - legend_height - status_height - detail_height;
+    let toggle_height = area.height.min(if area.width < 70 { 5 } else { 4 });
+    let toggle = Rect {
+        height: toggle_height,
+        ..area
+    };
+    let remaining = area.height - toggle_height;
+    let legend_height = if remaining >= 7 { 2 } else { 1 }.min(remaining);
+    let detail_height = if matches!(model.mode, Mode::Browse) {
+        remaining.saturating_sub(legend_height).min(2)
+    } else {
+        0
+    };
+    let main_height = remaining - legend_height - detail_height;
     let main = ratatui::layout::Rect {
+        y: area.y + toggle_height,
         height: main_height,
         ..area
     };
     let detail = ratatui::layout::Rect {
-        y: area.y + main_height,
+        y: main.y + main_height,
         height: detail_height,
         ..area
     };
-    let status = ratatui::layout::Rect {
-        y: detail.y + detail_height,
-        height: status_height,
-        ..area
-    };
     let legend = ratatui::layout::Rect {
-        y: status.y + status_height,
+        y: detail.y + detail_height,
         height: legend_height,
         ..area
     };
 
+    frame.render_widget(
+        Paragraph::new(toggle_text(model, area.width))
+            .block(Block::default().title("View filters").borders(Borders::ALL)),
+        toggle,
+    );
     if main.height > 0 {
-        match &model.mode {
-            Mode::Reveal { value, scroll, .. } => {
-                let text = std::str::from_utf8(value).unwrap_or("<binary value: use c to copy>");
-                frame.render_widget(
-                    Paragraph::new(text)
-                        .scroll((*scroll, 0))
-                        .wrap(Wrap { trim: false }),
-                    main,
-                );
-            }
-            Mode::Help { scroll } => {
-                frame.render_widget(
-                    Paragraph::new(help_text())
-                        .scroll((*scroll, 0))
-                        .wrap(Wrap { trim: false }),
-                    main,
-                );
-            }
-            _ => render_tree(frame, model, main),
-        }
+        render_tree(frame, model, main);
     }
     if detail.height > 0 {
         frame.render_widget(
             Paragraph::new(prompt(model)).wrap(Wrap { trim: false }),
             detail,
-        );
-    }
-    if status.height > 0 {
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Status: {}",
-                model.message.as_deref().unwrap_or("ready")
-            )),
-            status,
         );
     }
     if legend.height > 0 {
@@ -131,13 +115,121 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) {
             legend,
         );
     }
+    render_modal(frame, model, area);
+}
+
+fn toggle_text(model: &Model, width: u16) -> String {
+    fn button(label: &str, selected: bool) -> String {
+        if selected {
+            format!("<{label}>")
+        } else {
+            format!("[{label}]")
+        }
+    }
+    let required = button(
+        "1 Required",
+        model.filter == crate::model::ViewFilter::Required,
+    );
+    let all = button("2 All", model.filter == crate::model::ViewFilter::All);
+    let keys = button("3 Keys", model.filter == crate::model::ViewFilter::Keys);
+    let passwords = button(
+        "4 Passwords",
+        model.filter == crate::model::ViewFilter::Passwords,
+    );
+    let public = button(
+        if width < 70 {
+            "5 Public"
+        } else {
+            "5 Public info"
+        },
+        model.filter == crate::model::ViewFilter::PublicInfo,
+    );
+    let everyone = button("6 Everyone", !model.human_only);
+    let human = button(
+        if width < 70 {
+            "7 Human"
+        } else {
+            "7 Human-facing"
+        },
+        model.human_only,
+    );
+    if width < 70 {
+        format!("{required} {all} {keys}\n{passwords} {public}\n{everyone} {human}")
+    } else {
+        format!("{required} {all} {keys} {passwords} {public}\n{everyone} {human}")
+    }
+}
+
+fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect) {
+    let (title, body, scroll) = if let Some(message) = &model.message {
+        (
+            "Notice",
+            format!("{message}\n\n↑↓: scroll · Enter: continue"),
+            model.modal_scroll,
+        )
+    } else {
+        match &model.mode {
+            Mode::Browse => return,
+            Mode::Help { scroll } => ("Help", help_text().to_owned(), *scroll),
+            Mode::Reveal { value, scroll, .. } => (
+                "Reveal",
+                format!(
+                    "{}\n\nEsc: hide · c: copy",
+                    std::str::from_utf8(value).unwrap_or("<binary value: use c to copy>")
+                ),
+                *scroll,
+            ),
+            mode => (modal_title(mode), prompt(model), model.modal_scroll),
+        }
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let width = area.width.min(80).max(1);
+    let inner_width = width.saturating_sub(2).max(1) as usize;
+    let lines = body
+        .lines()
+        .map(|line| line.chars().count().div_ceil(inner_width).max(1))
+        .sum::<usize>();
+    let height = area.height.min((lines + 2).max(3) as u16);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .alignment(Alignment::Left)
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false }),
+        box_area,
+    );
+}
+
+fn modal_title(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Search { .. } => "Search",
+        Mode::DeleteConfirm { .. } => "Delete",
+        Mode::Edit { .. } => "Edit value",
+        Mode::Replace { .. } => "Replace value",
+        Mode::GenerateChoice { .. } => "Generate value",
+        Mode::BulkGenerateConfirm { .. } => "Generate missing passwords",
+        Mode::BulkProgress { .. } => "Generating passwords",
+        Mode::GeneratedPreview { .. } => "Generated value",
+        Mode::ProviderFailure { .. } => "Provider error",
+        Mode::Approval(_) => "Deployment request",
+        _ => "Dialog",
+    }
 }
 
 fn render_tree(frame: &mut ratatui::Frame<'_>, model: &Model, area: ratatui::layout::Rect) {
     let items = model
-        .visible_rows()
+        .visible_tree_rows()
         .into_iter()
-        .map(|index| item(&model.rows[index]))
+        .map(|visible| item(&model.rows[visible.index], visible.depth, &visible.label))
         .collect::<Vec<_>>();
     let mut state =
         ListState::default().with_selected((!items.is_empty()).then_some(model.selected));
@@ -145,98 +237,10 @@ fn render_tree(frame: &mut ratatui::Frame<'_>, model: &Model, area: ratatui::lay
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn prompt(model: &Model) -> String {
-    match &model.mode {
-        Mode::Browse => {
-            let description = model
-                .selected()
-                .and_then(|row| row.description.as_deref())
-                .unwrap_or("");
-            format!(
-                "Selected: {}\n{} · type: {} · audience: {}",
-                model
-                    .selected()
-                    .map(|row| row.path.as_deref().unwrap_or(&row.name))
-                    .unwrap_or("none"),
-                description,
-                model.filter.name(),
-                if model.human_only { "human" } else { "all" }
-            )
-        }
-        Mode::Help { .. } => "All actions are described above. Use ↑↓ to scroll.".into(),
-        Mode::Search { query } => format!("Search: {query} · Enter: keep filter · Esc: clear"),
-        Mode::DeleteConfirm { path } => format!("Delete {path} from encrypted store? y/n"),
-        Mode::Reveal { .. } => "Esc: hide".into(),
-        Mode::Edit { value, .. } => format!(
-            "value: {}  (Enter saves, Esc cancels)",
-            "•".repeat(value.len())
-        ),
-        Mode::Replace { path, .. } => format!("Replace {path}? y/n"),
-        Mode::GenerateChoice { .. } => "Generate p: password · w: passphrase · Esc: cancel".into(),
-        Mode::GeneratedPreview {
-            value, revealed, ..
-        } => {
-            let preview = if *revealed {
-                std::str::from_utf8(value).unwrap_or("<non-UTF8 generated value>")
-            } else {
-                "••••••••"
-            };
-            format!("generated: {preview} · r: reveal/hide · c: copy · Enter: save · Esc: cancel")
-        }
-        Mode::ProviderFailure { message, .. } => {
-            format!("Provider failed: {message}. r: retry · Esc: cancel")
-        }
-        Mode::Approval(request) => {
-            let failure = model.message.as_deref().unwrap_or_default();
-            if let Some(host_key) = &request.host_key {
-                format!(
-                    "{failure} {host_key} Trust this host and inspect its deployment state? y/n"
-                )
-            } else {
-                format!(
-                    "{failure} Deploy to {}? create [{}], replace [{}], tasks [{}], keys [{}] · y/n",
-                    request.target,
-                    request.create.join(", "),
-                    request.replace.join(", "),
-                    request.tasks.iter().map(task_status).collect::<Vec<_>>().join(", "),
-                    request.recipient_keys.join(", ")
-                )
-            }
-        }
-    }
-}
-
-fn legend_text(model: &Model, width: u16) -> String {
-    if width < 45 {
-        return match model.mode {
-            Mode::Browse => "↑↓ move · Enter edit · ? help".into(),
-            Mode::Help { .. } => "↑↓ scroll · Esc close".into(),
-            Mode::Reveal { .. } => "↑↓ scroll · c copy · Esc hide".into(),
-            _ => "Enter accept · Esc cancel · ? help from browse".into(),
-        };
-    }
-    match model.mode {
-        Mode::Browse => "Navigate: ↑↓ move · / search · f type · h audience · ? help\nValues: Enter edit · paste set · g generate · r reveal · c copy · p public · d delete · Esc quit".into(),
-        Mode::Help { .. } => "Help: ↑↓ scroll · Esc or ? close".into(),
-        Mode::Reveal { .. } => "Reveal: ↑↓ scroll · c copy · Enter or Esc hide".into(),
-        Mode::Search { .. } => "Search: type query · Backspace erase · Enter keep · Esc clear".into(),
-        Mode::Approval(_) => "Deployment: y approve · n reject · Esc reject".into(),
-        Mode::DeleteConfirm { .. } | Mode::Replace { .. } => "Confirm: y proceed · n cancel · Esc cancel".into(),
-        Mode::GenerateChoice { .. } => "Generate: p password · w passphrase · Esc cancel".into(),
-        Mode::GeneratedPreview { .. } => "Preview: r reveal · c copy · Enter save · Esc discard".into(),
-        Mode::ProviderFailure { .. } => "Provider: r retry · Esc cancel".into(),
-        Mode::Edit { .. } => "Edit: type or paste · Backspace erase · Enter save · Esc cancel".into(),
-    }
-}
-
-fn help_text() -> &'static str {
-    "NAVIGATE\n↑ / ↓  Move between visible items\n/  Search names, identifiers, and descriptions\nf  Cycle all, private keys, passwords, and public info\nh  Toggle human-facing items\n?  Show or close this help\n\nEDIT\nEnter  Edit selected value; Enter again saves\nPaste  Set from clipboard; replacement asks first\ng  Generate password or passphrase for a password field\nr  Reveal selected value\nc  Copy the selected value\np  Copy the public half of a stored OpenSSH private key\nd  Delete selected value after confirmation\n\nDEPLOYMENT\nA target deployer requests one server's values.\ny  Approve the verified target and displayed changes\nn / Esc  Reject the request\n\nEsc  Leave a view, or quit from the tree"
-}
-
-fn item(row: &Row) -> ListItem<'static> {
-    let indent = "  ".repeat(row.depth);
+fn item(row: &Row, depth: usize, name: &str) -> ListItem<'static> {
+    let indent = "  ".repeat(depth);
     if !row.is_secret() {
-        return ListItem::new(format!("{indent}{}/", row.name));
+        return ListItem::new(format!("{indent}{name}/"));
     }
     let (status, color) = if row.is_set {
         ("set", Color::Green)
@@ -252,7 +256,7 @@ fn item(row: &Row) -> ListItem<'static> {
         status.into()
     };
     ListItem::new(Line::from(vec![
-        Span::raw(format!("{indent}{}  ", row.name)),
+        Span::raw(format!("{indent}{name}  ")),
         Span::styled(label, Style::default().fg(color)),
     ]))
 }
@@ -283,39 +287,4 @@ fn task_status(task: &crate::model::TaskApproval) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::backend::TestBackend;
-
-    fn line(terminal: &Terminal<TestBackend>, y: u16) -> String {
-        let buffer = terminal.backend().buffer();
-        (0..buffer.area.width)
-            .map(|x| buffer[(x, y)].symbol())
-            .collect::<String>()
-    }
-
-    #[test]
-    fn compact_footer_keeps_status_and_hotkeys_on_separate_rows() {
-        let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
-        let mut model = Model::new(vec![]);
-        model.message = Some("test result".into());
-        terminal.draw(|frame| render(frame, &model)).unwrap();
-        assert!(line(&terminal, 3).contains("Status: test result"));
-        assert!(line(&terminal, 4).contains("? help"));
-        model.mode = Mode::Help { scroll: 0 };
-        terminal.draw(|frame| render(frame, &model)).unwrap();
-        assert!(line(&terminal, 3).contains("Status: test result"));
-        assert!(line(&terminal, 4).contains("Esc close"));
-    }
-
-    #[test]
-    fn wide_footer_keeps_both_legend_lines_below_status() {
-        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
-        let mut model = Model::new(vec![]);
-        model.message = Some("copied".into());
-        terminal.draw(|frame| render(frame, &model)).unwrap();
-        assert!(line(&terminal, 9).contains("Status: copied"));
-        assert!(line(&terminal, 10).contains("Navigate:"));
-        assert!(line(&terminal, 11).contains("Values:"));
-    }
-}
+mod tests;

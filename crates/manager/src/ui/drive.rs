@@ -31,43 +31,30 @@ pub fn drive(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        model.message = Some(error);
-                        model.message_since = Some(Instant::now());
+                        model.notify(error);
                         schedule(&mut redraw_at);
                     }
                 }
             }
-            if matches!(model.mode, Mode::Browse)
-                && model
-                    .message_since
-                    .is_some_and(|since| since.elapsed() >= Duration::from_secs(5))
-            {
-                model.message = None;
-                model.message_since = None;
-                schedule(&mut redraw_at);
-            }
             match writer.poll_approval() {
                 Ok(Some(request)) => {
-                    model.apply_task_status(&request);
-                    model.mode = Mode::Approval(request);
+                    model.offer_approval(request);
                     schedule(&mut redraw_at);
                 }
                 Ok(None) => {}
                 Err(message) => {
-                    model.mode = Mode::Browse;
-                    model.message = Some(message);
-                    model.message_since = Some(Instant::now());
+                    if matches!(model.mode, Mode::Approval(_)) {
+                        model.mode = Mode::Browse;
+                    }
+                    model.notify(message);
                     schedule(&mut redraw_at);
                 }
             }
             continue;
         }
-        let prior = model.message.clone();
         let action = reduce(model, event, writer);
+        model.show_pending_approval();
         schedule(&mut redraw_at);
-        if model.message != prior {
-            model.message_since = model.message.as_ref().map(|_| Instant::now());
-        }
         if action == Action::Quit {
             return Ok(());
         }
@@ -103,31 +90,28 @@ mod tests {
 fn apply_completion(model: &mut Model, completion: Completion) {
     match completion {
         Completion::Saved(path) => {
-            if matches!(model.mode, Mode::Browse) {
-                model.mark_saved(&path);
-            } else {
-                set_row(model, &path, true);
-                model.message = Some(format!("saved {path}"));
-            }
+            set_row(model, &path, true);
+            model.notify(format!("saved {path}"));
         }
         Completion::SaveFailed {
             path,
             value,
             message,
         } => {
-            model.mode = Mode::ProviderFailure {
+            let dialog = Mode::ProviderFailure {
                 message,
                 path,
                 value,
             };
+            if matches!(model.mode, Mode::Browse) {
+                model.mode = dialog;
+            } else {
+                model.pending_dialogs.push_back(dialog);
+            }
         }
         Completion::Deleted(path) => {
-            if matches!(model.mode, Mode::Browse) {
-                model.mark_deleted(&path);
-            } else {
-                set_row(model, &path, false);
-                model.message = Some(format!("deleted {path}"));
-            }
+            set_row(model, &path, false);
+            model.notify(format!("deleted {path}"));
         }
         Completion::Revealed { path, value } => {
             if matches!(model.mode, Mode::Browse)
@@ -140,7 +124,7 @@ fn apply_completion(model: &mut Model, completion: Completion) {
                 };
             }
         }
-        Completion::Copied(message) | Completion::Failed(message) => model.message = Some(message),
+        Completion::Copied(message) | Completion::Failed(message) => model.notify(message),
         Completion::Generated {
             path,
             value,
@@ -157,17 +141,45 @@ fn apply_completion(model: &mut Model, completion: Completion) {
                 };
             }
         }
-        Completion::ApprovalDone(Some(request)) => model.mode = Mode::Approval(request),
+        Completion::BulkGenerated { saved, failed } => {
+            if matches!(model.mode, Mode::BulkProgress { .. }) {
+                model.mode = Mode::Browse;
+            }
+            model.notify(if failed.is_empty() {
+                format!("Generated and saved {saved} missing passwords.")
+            } else {
+                format!(
+                    "Generated and saved {saved} missing passwords. {} failed:\n{}",
+                    failed.len(),
+                    failed.join("\n")
+                )
+            });
+        }
+        Completion::BulkProgress { done, total } => {
+            if matches!(model.mode, Mode::BulkProgress { .. }) {
+                model.mode = Mode::BulkProgress { done, total };
+            }
+        }
+        Completion::ApprovalDone(Some(request)) => {
+            if matches!(model.mode, Mode::Approval(_)) {
+                model.mode = Mode::Browse;
+            }
+            model.offer_approval(request);
+        }
         Completion::ApprovalDone(None) => {
-            model.mode = Mode::Browse;
-            model.message = Some("deployment request finished".into());
+            if matches!(model.mode, Mode::Approval(_)) {
+                model.mode = Mode::Browse;
+            }
+            model.notify("deployment request finished");
         }
         Completion::ApprovalLost(message) => {
-            model.mode = Mode::Browse;
-            model.message = Some(message);
+            if matches!(model.mode, Mode::Approval(_)) {
+                model.mode = Mode::Browse;
+            }
+            model.notify(message);
         }
     }
-    model.message_since = model.message.as_ref().map(|_| Instant::now());
+    model.show_pending_approval();
 }
 
 fn set_row(model: &mut Model, path: &str, set: bool) {

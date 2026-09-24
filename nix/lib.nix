@@ -241,6 +241,7 @@ let
       defaultRecipientNames ? [ ],
       services ? { },
       userServices ? { },
+      serviceDisplayPaths ? { },
     }:
     let
       system =
@@ -252,7 +253,14 @@ let
     in
     {
       ${hostName} = {
-        metadata = { inherit socketPath deployment recipientPublicKeys; };
+        metadata = {
+          inherit
+            socketPath
+            deployment
+            recipientPublicKeys
+            serviceDisplayPaths
+            ;
+        };
         services = system;
       }
       // lib.mapAttrs' (user: value: lib.nameValuePair "user-${user}-services" value) users;

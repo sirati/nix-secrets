@@ -1,5 +1,7 @@
 use super::*;
 
+pub const OPERATION_QUEUED: &str = "nix-secrets:operation-queued";
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum UiEvent {
     Up,
@@ -41,6 +43,14 @@ pub enum Completion {
         path: String,
         value: Zeroizing<Vec<u8>>,
         replacing: bool,
+    },
+    BulkGenerated {
+        saved: usize,
+        failed: Vec<String>,
+    },
+    BulkProgress {
+        done: usize,
+        total: usize,
     },
     ApprovalDone(Option<ApprovalRequest>),
     ApprovalLost(String),
@@ -90,6 +100,9 @@ pub trait SecretWriter {
         _replacing: bool,
     ) -> Result<Zeroizing<Vec<u8>>, String> {
         self.generate(path, kind)
+    }
+    fn generate_missing(&mut self, _paths: Vec<String>, _kind: GenerateKind) -> Result<(), String> {
+        Err("bulk generation unavailable".into())
     }
     fn copy(&mut self, _value: &[u8]) -> Result<(), String> {
         Err("no clipboard provider is available".into())

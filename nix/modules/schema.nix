@@ -11,6 +11,15 @@ let
 
   serviceType = lib.types.submodule {
     options = {
+      displayPath = lib.mkOption {
+        type = lib.types.listOf (lib.types.strMatching "[A-Za-z0-9_-]+");
+        default = [ ];
+        example = [
+          "forgejo"
+          "backup"
+        ];
+        description = "Presentation-only tree path. It does not change secret identifiers or readiness gates.";
+      };
       recipientPublicKeys = lib.mkOption {
         type = lib.types.nullOr (lib.types.listOf lib.types.str);
         default = null;
@@ -59,6 +68,19 @@ let
       ;
     services = normalizeServiceSet cfg.services;
     userServices = lib.mapAttrs (_: normalizeServiceSet) cfg.userServices;
+    serviceDisplayPaths = {
+      services = lib.mapAttrs (_: service: service.displayPath) (
+        lib.filterAttrs (_: service: service.displayPath != [ ]) cfg.services
+      );
+    }
+    // lib.mapAttrs' (
+      user: services:
+      lib.nameValuePair "user-${user}-services" (
+        lib.mapAttrs (_: service: service.displayPath) (
+          lib.filterAttrs (_: service: service.displayPath != [ ]) services
+        )
+      )
+    ) cfg.userServices;
   };
   evaluatedHost = evaluated.${cfg.hostName};
   serviceGroups = builtins.removeAttrs evaluatedHost [ "metadata" ];

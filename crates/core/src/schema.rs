@@ -28,6 +28,8 @@ pub struct HostMetadata {
     pub deployment: DeploymentMetadata,
     #[serde(rename = "recipientPublicKeys", default)]
     pub recipient_public_keys: BTreeMap<String, String>,
+    #[serde(rename = "serviceDisplayPaths", default)]
+    pub service_display_paths: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -218,6 +220,39 @@ impl Schema {
                         &host.metadata.recipient_public_keys,
                     )?;
                     validate_shared_public_specs(host_name, tree, &mut public_specs)?;
+                }
+            }
+            for (namespace, services) in &host.metadata.service_display_paths {
+                validate_namespace(namespace)?;
+                for (service, path) in services {
+                    if !host
+                        .service_groups
+                        .get(namespace)
+                        .is_some_and(|entries| entries.contains_key(service))
+                        || path.is_empty()
+                    {
+                        return Err(SchemaError::InvalidComponent(format!(
+                            "unknown or empty display path for {namespace}.{service}"
+                        )));
+                    }
+                    for component in path {
+                        validate_component(component)?;
+                    }
+                }
+            }
+            for (namespace, services) in &host.service_groups {
+                let paths = host.metadata.service_display_paths.get(namespace);
+                let mut used = std::collections::BTreeSet::new();
+                for service in services.keys() {
+                    let path = paths
+                        .and_then(|paths| paths.get(service))
+                        .cloned()
+                        .unwrap_or_else(|| vec![service.clone()]);
+                    if !used.insert(path) {
+                        return Err(SchemaError::InvalidComponent(format!(
+                            "duplicate display path in {namespace}"
+                        )));
+                    }
                 }
             }
         }

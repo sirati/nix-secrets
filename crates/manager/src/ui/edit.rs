@@ -30,7 +30,7 @@ pub(super) fn submit(
 ) {
     match writer.write(&path, value) {
         Ok(Action::Saved(saved)) => model.mark_saved(&saved),
-        Ok(Action::Queued) => model.message = Some(format!("saving {path}...")),
+        Ok(Action::Queued) => {}
         Ok(_) => model.mode = Mode::Browse,
         Err((message, value)) => {
             model.mode = Mode::ProviderFailure {

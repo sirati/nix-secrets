@@ -49,20 +49,64 @@ pub fn rows_with_public(
         output.push(branch(0, host_name));
         for (namespace, services) in &host.service_groups {
             output.push(branch(1, namespace));
+            let mut display = DisplayNode::default();
             for (service, node) in services {
-                output.push(branch(2, service));
-                visit(
-                    node,
-                    &format!("{host_name}.{namespace}.{service}"),
-                    3,
-                    set_paths,
-                    public_ids,
-                    &mut output,
-                );
+                let labels = host
+                    .metadata
+                    .service_display_paths
+                    .get(namespace)
+                    .and_then(|paths| paths.get(service))
+                    .cloned()
+                    .unwrap_or_else(|| vec![service.clone()]);
+                let mut cursor = &mut display;
+                for label in labels {
+                    cursor = cursor.children.entry(label).or_default();
+                }
+                cursor.service = Some((service.clone(), node.clone()));
             }
+            emit_display(
+                &display,
+                host_name,
+                namespace,
+                2,
+                set_paths,
+                public_ids,
+                &mut output,
+            );
         }
     }
     output
+}
+
+#[derive(Default)]
+struct DisplayNode {
+    children: BTreeMap<String, DisplayNode>,
+    service: Option<(String, SecretNode)>,
+}
+
+fn emit_display(
+    parent: &DisplayNode,
+    host: &str,
+    namespace: &str,
+    depth: usize,
+    set: &BTreeSet<String>,
+    public_ids: &BTreeSet<String>,
+    output: &mut Vec<Row>,
+) {
+    for (label, node) in &parent.children {
+        output.push(branch(depth, label));
+        if let Some((service, tree)) = &node.service {
+            visit(
+                tree,
+                &format!("{host}.{namespace}.{service}"),
+                depth + 1,
+                set,
+                public_ids,
+                output,
+            );
+        }
+        emit_display(node, host, namespace, depth + 1, set, public_ids, output);
+    }
 }
 
 fn visit(
@@ -203,5 +247,32 @@ mod tests {
         assert!(rows(&schema, &BTreeSet::new())
             .iter()
             .all(|row| row.path.is_none()));
+    }
+
+    #[test]
+    fn display_paths_group_independent_services_without_changing_identifiers() {
+        let mut value: serde_json::Value = serde_json::from_str(r#"{"host":{"metadata":{"socketPath":"/run/s","deployment":{"host":"host","destination":"secrets@host","port":22}},"services":{"forgejo":{"token":{"kind":"secret","recipientPublicKeys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin"],"recipientIds":["key"],"destination":{"path":"/persistent/secrets/forgejo/service/token","category":"service","owner":"git","group":"git","mode":"0400"},"consumerUnits":[]}}}}}"#).unwrap();
+        let mut backup = value["host"]["services"]["forgejo"].clone();
+        backup["token"]["destination"]["path"] =
+            "/persistent/secrets/backup-forgejo/service/token".into();
+        value["host"]["services"]["backup-forgejo"] = backup;
+        value["host"]["metadata"]["serviceDisplayPaths"] = serde_json::json!({
+            "services": {
+                "forgejo": ["forgejo", "service"],
+                "backup-forgejo": ["forgejo", "backup"]
+            }
+        });
+        let schema = Schema::from_json(&value.to_string()).unwrap();
+        let model = crate::model::Model::new(rows(&schema, &BTreeSet::new()));
+        let visible = model.visible_tree_rows();
+        assert!(visible.iter().any(|row| row.label.ends_with("forgejo")));
+        assert!(visible.iter().any(|row| row.label == "backup/token"));
+        assert!(visible.iter().any(|row| row.label == "service/token"));
+        let paths = visible
+            .iter()
+            .filter_map(|row| model.rows[row.index].path.as_deref())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"host.services.backup-forgejo.token"));
+        assert!(paths.contains(&"host.services.forgejo.token"));
     }
 }

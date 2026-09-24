@@ -1,7 +1,7 @@
 use crate::controller::Controller;
 use crate::model::ApprovalRequest;
 use crate::tree::Row;
-use crate::ui::{Action, Completion, GenerateKind, SecretWriter};
+use crate::ui::{Action, Completion, GenerateKind, SecretWriter, OPERATION_QUEUED};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
@@ -20,6 +20,10 @@ enum Command {
         path: String,
         kind: GenerateKind,
         replacing: bool,
+    },
+    BulkGenerate {
+        paths: Vec<String>,
+        kind: GenerateKind,
     },
     Approval(bool),
 }
@@ -50,7 +54,12 @@ impl AsyncWriter {
             loop {
                 match incoming.recv_timeout(Duration::from_millis(25)) {
                     Ok(command) => {
-                        let completion = execute(&mut controller, command);
+                        let completion = match command {
+                            Command::BulkGenerate { paths, kind } => {
+                                execute_bulk(&mut controller, paths, kind, &outgoing)
+                            }
+                            other => execute(&mut controller, other),
+                        };
                         if outgoing.send(Event::Completion(completion)).is_err() {
                             return;
                         }
@@ -102,7 +111,9 @@ impl AsyncWriter {
                 Event::Rows(rows) => self.rows = Some(rows),
                 Event::Approval(request) => self.approvals.push(request),
                 Event::Completion(result) => {
-                    self.busy = false;
+                    if !matches!(result, Completion::BulkProgress { .. }) {
+                        self.busy = false;
+                    }
                     self.completions.push(result);
                 }
                 Event::Error(error) => self.completions.push(Completion::Failed(error)),
@@ -164,12 +175,16 @@ fn execute(controller: &mut Controller, command: Command) -> Completion {
             },
             Err(error) => Completion::Failed(error),
         },
+        Command::BulkGenerate { .. } => unreachable!("bulk execution emits progress"),
         Command::Approval(accepted) => match controller.approval(accepted) {
             Ok(next) => Completion::ApprovalDone(next),
             Err(error) => Completion::Failed(error),
         },
     }
 }
+
+mod bulk;
+use bulk::execute_bulk;
 
 impl SecretWriter for AsyncWriter {
     fn poll_completion(&mut self) -> Option<Completion> {
@@ -220,17 +235,17 @@ impl SecretWriter for AsyncWriter {
 
     fn delete(&mut self, path: &str) -> Result<(), String> {
         self.queue(Command::Delete(path.into()))?;
-        Err(format!("deleting {path}..."))
+        Err(OPERATION_QUEUED.into())
     }
 
     fn reveal(&mut self, path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
         self.queue(Command::Reveal(path.into()))?;
-        Err(format!("decrypting {path}..."))
+        Err(OPERATION_QUEUED.into())
     }
 
     fn copy_public(&mut self, path: &str) -> Result<(), String> {
         self.queue(Command::CopyPublic(path.into()))?;
-        Err(format!("copying public key for {path}..."))
+        Err(OPERATION_QUEUED.into())
     }
 
     fn generate(&mut self, path: &str, kind: GenerateKind) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -248,17 +263,21 @@ impl SecretWriter for AsyncWriter {
             kind,
             replacing,
         })?;
-        Err(format!("generating value for {path}..."))
+        Err(OPERATION_QUEUED.into())
     }
 
     fn approval(&mut self, accepted: bool) -> Result<Option<ApprovalRequest>, String> {
         self.queue(Command::Approval(accepted))?;
-        Err("processing deployment request...".into())
+        Err(OPERATION_QUEUED.into())
+    }
+
+    fn generate_missing(&mut self, paths: Vec<String>, kind: GenerateKind) -> Result<(), String> {
+        self.queue(Command::BulkGenerate { paths, kind })
     }
 
     fn copy(&mut self, value: &[u8]) -> Result<(), String> {
         self.queue(Command::CopyValue(Zeroizing::new(value.to_vec())))?;
-        Err("copying value...".into())
+        Err(OPERATION_QUEUED.into())
     }
 }
 

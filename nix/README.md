@@ -15,6 +15,10 @@ receiving program's format limits. Set
 when the consumer requires that format; the frontend and target both reject
 malformed key material. `named-ssh-ed25519-public-keys` remains available for
 the authorized-key inventory.
+Set `services.<name>.displayPath = [ "mail" "backup" ];` to group a service in
+the TUI. This changes presentation only: the service name remains the secret
+identifier and keeps its own readiness gate and consumer units. The same option
+is available on `userServices.<user>.<name>`.
 For a stored OpenSSH private key, the TUI derives its public half when setting
 the value and saves that public key beside the ciphertext in TOML. The `p`
 hotkey copies the public key without decrypting the private key. Target-generated

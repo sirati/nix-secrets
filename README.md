@@ -48,15 +48,18 @@ editor. Pasting while a leaf is selected sets it from the clipboard. Replacing
 an existing value requires confirmation.
 Press `d` to delete a selected value after confirmation, `r` to reveal it,
 `c` to copy it, or `p` to copy the public half of a stored OpenSSH private key
-without decrypting. The revealed view closes on Escape. Press `f` to cycle
-through all items, private keys, passwords, and public information;
-`h` toggles human-facing items; `/` searches names,
+without decrypting. Dialogs appear over the tree. Notices require Enter to
+acknowledge. Press `1` for values needing operator input, `2` for all items,
+`3` for private keys, `4` for passwords, or `5` for public information.
+Press `6` for all audiences or `7` for human-facing values; `/` searches names,
 identifiers, and descriptions. The views compose. Key and password views use
 the declared `valueType`; untyped certificates and other values remain in the
 all-items view. A leaf's optional description appears when selected. Local
 keys generated on a target do not appear as editable leaves.
 
-For a password leaf, press `g` and choose `p` for a random password or `w` for
+For all missing passwords, press `G` and choose `p` for random passwords or
+`w` for passphrases. Existing values are never replaced by this action.
+For one password leaf, press `g` and choose `p` for a random password or `w` for
 a word passphrase. The preview starts masked; `r` reveals it, `c` copies it,
 Enter encrypts and stores it, and Escape discards it. Replacement requires a
 separate confirmation. Copy uses `wl-copy` with the value on standard input;

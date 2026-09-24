@@ -1,7 +1,8 @@
 use crate::tree::{Row, RowCategory};
-use std::fmt;
-use std::time::Instant;
+use std::collections::VecDeque;
 use zeroize::Zeroizing;
+
+mod visibility;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalRequest {
@@ -51,6 +52,13 @@ pub enum Mode {
         path: String,
         replacing: bool,
     },
+    BulkGenerateConfirm {
+        paths: Vec<String>,
+    },
+    BulkProgress {
+        total: usize,
+        done: usize,
+    },
     GeneratedPreview {
         path: String,
         value: Zeroizing<Vec<u8>>,
@@ -65,71 +73,31 @@ pub enum Mode {
     },
 }
 
-impl fmt::Debug for Mode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Browse => formatter.write_str("Browse"),
-            Self::Help { scroll } => formatter.debug_tuple("Help").field(scroll).finish(),
-            Self::Search { query } => formatter.debug_tuple("Search").field(query).finish(),
-            Self::DeleteConfirm { path } => {
-                formatter.debug_tuple("DeleteConfirm").field(path).finish()
-            }
-            Self::Reveal { path, .. } => formatter
-                .debug_struct("Reveal")
-                .field("path", path)
-                .field("value", &"<redacted>")
-                .finish(),
-            Self::Edit { path, .. } => formatter
-                .debug_struct("Edit")
-                .field("path", path)
-                .field("value", &"<redacted>")
-                .finish(),
-            Self::Replace { path, .. } => formatter
-                .debug_struct("Replace")
-                .field("path", path)
-                .field("value", &"<redacted>")
-                .finish(),
-            Self::GenerateChoice { path, replacing } => formatter
-                .debug_struct("GenerateChoice")
-                .field("path", path)
-                .field("replacing", replacing)
-                .finish(),
-            Self::GeneratedPreview {
-                path,
-                revealed,
-                replacing,
-                ..
-            } => formatter
-                .debug_struct("GeneratedPreview")
-                .field("path", path)
-                .field("value", &"<redacted>")
-                .field("revealed", revealed)
-                .field("replacing", replacing)
-                .finish(),
-            Self::Approval(request) => formatter.debug_tuple("Approval").field(request).finish(),
-            Self::ProviderFailure { message, path, .. } => formatter
-                .debug_struct("ProviderFailure")
-                .field("message", message)
-                .field("path", path)
-                .field("value", &"<redacted>")
-                .finish(),
-        }
-    }
-}
+mod debug;
 
 pub struct Model {
     pub rows: Vec<Row>,
     pub selected: usize,
     pub mode: Mode,
     pub message: Option<String>,
-    pub message_since: Option<Instant>,
+    pub modal_scroll: u16,
+    pub notifications: VecDeque<String>,
+    pub pending_approvals: VecDeque<ApprovalRequest>,
+    pub pending_dialogs: VecDeque<Mode>,
     pub filter: ViewFilter,
     pub human_only: bool,
     pub search: String,
 }
 
+pub struct VisibleRow {
+    pub index: usize,
+    pub depth: usize,
+    pub label: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ViewFilter {
+    Required,
     All,
     Keys,
     Passwords,
@@ -139,14 +107,16 @@ pub enum ViewFilter {
 impl ViewFilter {
     pub fn next(self) -> Self {
         match self {
+            Self::Required => Self::All,
             Self::All => Self::Keys,
             Self::Keys => Self::Passwords,
             Self::Passwords => Self::PublicInfo,
-            Self::PublicInfo => Self::All,
+            Self::PublicInfo => Self::Required,
         }
     }
     pub fn name(self) -> &'static str {
         match self {
+            Self::Required => "operator input",
             Self::All => "all",
             Self::Keys => "keys",
             Self::Passwords => "passwords",
@@ -177,8 +147,11 @@ impl Model {
             selected: 0,
             mode: Mode::Browse,
             message: None,
-            message_since: None,
-            filter: ViewFilter::All,
+            modal_scroll: 0,
+            notifications: VecDeque::new(),
+            pending_approvals: VecDeque::new(),
+            pending_dialogs: VecDeque::new(),
+            filter: ViewFilter::Required,
             human_only: false,
             search: String::new(),
         }
@@ -190,48 +163,62 @@ impl Model {
             .and_then(|index| self.rows.get(*index))
     }
 
-    pub fn visible_rows(&self) -> Vec<usize> {
-        self.rows
-            .iter()
-            .enumerate()
-            .filter_map(|(index, row)| {
-                let visible = match self.filter {
-                    ViewFilter::All => true,
-                    ViewFilter::Keys => row.category == RowCategory::Key,
-                    ViewFilter::Passwords => row.category == RowCategory::Password,
-                    ViewFilter::PublicInfo => row.category == RowCategory::PublicInfo,
-                };
-                let human_visible = !self.human_only || row.human_facing;
-                let needle = self.search.to_ascii_lowercase();
-                let searchable = format!(
-                    "{} {} {}",
-                    row.name,
-                    row.path.as_deref().unwrap_or(""),
-                    row.description.as_deref().unwrap_or("")
-                )
-                .to_ascii_lowercase();
-                (visible && human_visible && searchable.contains(&needle)).then_some(index)
-            })
-            .collect()
+    pub fn notify(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if self.message.as_deref() == Some(message.as_str())
+            || self
+                .notifications
+                .back()
+                .is_some_and(|queued| queued == &message)
+        {
+            return;
+        }
+        if self.message.is_none() {
+            self.message = Some(message);
+        } else {
+            self.notifications.push_back(message);
+        }
+    }
+
+    pub fn acknowledge(&mut self) {
+        self.message = self.notifications.pop_front();
+        self.modal_scroll = 0;
+        self.show_pending_approval();
+    }
+
+    pub fn offer_approval(&mut self, request: ApprovalRequest) {
+        self.apply_task_status(&request);
+        self.pending_approvals.push_back(request);
+        self.show_pending_approval();
+    }
+
+    pub fn show_pending_approval(&mut self) {
+        if self.message.is_none() && matches!(self.mode, Mode::Browse) {
+            if let Some(dialog) = self.pending_dialogs.pop_front() {
+                self.mode = dialog;
+            } else if let Some(request) = self.pending_approvals.pop_front() {
+                self.mode = Mode::Approval(request);
+            }
+        }
     }
 
     pub fn cycle_filter(&mut self) {
         self.filter = self.filter.next();
         self.selected = 0;
-        self.message = Some(format!("showing {}", self.filter.name()));
+    }
+    pub fn set_filter(&mut self, filter: ViewFilter) {
+        self.filter = filter;
+        self.selected = 0;
+    }
+
+    pub fn set_human_only(&mut self, enabled: bool) {
+        self.human_only = enabled;
+        self.selected = 0;
     }
 
     pub fn toggle_human(&mut self) {
         self.human_only = !self.human_only;
         self.selected = 0;
-        self.message = Some(
-            if self.human_only {
-                "showing human-facing items"
-            } else {
-                "showing all audiences"
-            }
-            .into(),
-        );
     }
 
     pub fn move_by(&mut self, amount: isize) {
@@ -264,7 +251,7 @@ impl Model {
             row.is_set = true;
         }
         self.mode = Mode::Browse;
-        self.message = Some(format!("saved {path}"));
+        self.notify(format!("saved {path}"));
     }
 
     pub fn mark_deleted(&mut self, path: &str) {
@@ -276,7 +263,7 @@ impl Model {
             row.is_set = false;
         }
         self.mode = Mode::Browse;
-        self.message = Some(format!("deleted {path}"));
+        self.notify(format!("deleted {path}"));
     }
 
     pub fn apply_task_status(&mut self, request: &ApprovalRequest) {
@@ -294,35 +281,4 @@ impl Model {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn leaf(set: bool) -> Row {
-        Row {
-            depth: 0,
-            name: "key".into(),
-            path: Some("h.services.s.key".into()),
-            is_set: set,
-            is_task: false,
-            can_generate: false,
-            output_is_set: None,
-            description: None,
-            category: RowCategory::Other,
-            human_facing: false,
-        }
-    }
-
-    #[test]
-    fn replacing_a_set_leaf_requires_confirmation() {
-        let mut model = Model::new(vec![leaf(true)]);
-        model.begin_value(b"new".to_vec());
-        assert!(matches!(model.mode, Mode::Replace { .. }));
-    }
-
-    #[test]
-    fn unset_leaf_enters_editor_directly() {
-        let mut model = Model::new(vec![leaf(false)]);
-        model.begin_value(Vec::new());
-        assert!(matches!(model.mode, Mode::Edit { .. }));
-    }
-}
+mod tests;

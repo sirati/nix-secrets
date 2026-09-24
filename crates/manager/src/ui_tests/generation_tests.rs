@@ -24,6 +24,7 @@ fn generated_value_is_masked_and_copy_is_explicit() {
             ..
         }
     ));
+    reduce(&mut model, UiEvent::Enter, &mut writer);
     reduce(&mut model, UiEvent::Character('r'), &mut writer);
     assert!(matches!(
         model.mode,

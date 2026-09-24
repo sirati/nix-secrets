@@ -13,8 +13,13 @@ struct Writer {
     poll_error: bool,
     approval_error: bool,
     copies: Vec<Vec<u8>>,
+    bulk: Vec<Vec<String>>,
 }
 impl SecretWriter for Writer {
+    fn generate_missing(&mut self, paths: Vec<String>, _kind: GenerateKind) -> Result<(), String> {
+        self.bulk.push(paths);
+        Ok(())
+    }
     fn generate(&mut self, _path: &str, _kind: GenerateKind) -> Result<Zeroizing<Vec<u8>>, String> {
         Ok(Zeroizing::new(b"generated-value".to_vec()))
     }
@@ -94,6 +99,7 @@ fn browse_copy_secret_and_public_key_use_distinct_actions() {
     let mut model = model(true);
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('c'), &mut writer);
+    reduce(&mut model, UiEvent::Enter, &mut writer);
     reduce(&mut model, UiEvent::Character('p'), &mut writer);
     assert_eq!(
         writer.copies,
@@ -225,7 +231,34 @@ fn writer() -> Writer {
         poll_error: false,
         approval_error: false,
         copies: vec![],
+        bulk: vec![],
     }
+}
+
+#[test]
+fn bulk_generation_only_requests_unset_passwords() {
+    let mut model = model(false);
+    let mut already_set = model.rows[0].clone();
+    already_set.name = "existing".into();
+    already_set.path = Some("h.services.s.existing".into());
+    already_set.is_set = true;
+    model.rows.push(already_set);
+    let mut key = model.rows[0].clone();
+    key.name = "private-key".into();
+    key.path = Some("h.services.s.private-key".into());
+    key.category = RowCategory::Key;
+    key.can_generate = false;
+    model.rows.push(key);
+    let mut writer = writer();
+    reduce(&mut model, UiEvent::Character('G'), &mut writer);
+    assert!(matches!(model.mode, Mode::BulkGenerateConfirm { .. }));
+    assert!(writer.bulk.is_empty());
+    reduce(&mut model, UiEvent::Character('w'), &mut writer);
+    assert_eq!(writer.bulk, [vec!["h.services.s.key".to_string()]]);
+    assert!(matches!(
+        model.mode,
+        Mode::BulkProgress { total: 1, done: 0 }
+    ));
 }
 
 mod generation_tests;
