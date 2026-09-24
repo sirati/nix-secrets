@@ -2,12 +2,20 @@ use super::*;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::widgets::{Block, Borders, Clear};
 
+mod actions;
+mod buttons;
 mod filters;
+mod frontend;
+mod hit;
 mod layout;
 mod text;
+use actions::hotkeys;
+use buttons::{draw_rows, wrap_buttons};
 use filters::render_filters;
+use frontend::CrosstermFrontend;
+use hit::HitMap;
 use layout::regions;
-use text::{help_text, legend_text, prompt, selected_text};
+use text::{help_text, prompt, selected_text};
 
 pub fn run(rows: Vec<Row>, writer: &mut impl SecretWriter) -> io::Result<()> {
     let mut frontend = CrosstermFrontend::setup()?;
@@ -15,69 +23,18 @@ pub fn run(rows: Vec<Row>, writer: &mut impl SecretWriter) -> io::Result<()> {
     result.and(frontend.restore())
 }
 
-struct CrosstermFrontend {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-}
-
-impl CrosstermFrontend {
-    fn setup() -> io::Result<Self> {
-        enable_raw_mode()?;
-        let mut output = io::stdout();
-        execute!(output, EnterAlternateScreen, event::EnableBracketedPaste)?;
-        Ok(Self {
-            terminal: Terminal::new(CrosstermBackend::new(output))?,
-        })
-    }
-
-    fn restore(&mut self) -> io::Result<()> {
-        disable_raw_mode()?;
-        execute!(
-            self.terminal.backend_mut(),
-            event::DisableBracketedPaste,
-            LeaveAlternateScreen
-        )?;
-        self.terminal.show_cursor()
-    }
-}
-
-impl Frontend for CrosstermFrontend {
-    fn draw(&mut self, model: &Model) -> io::Result<()> {
-        self.terminal.draw(|frame| render(frame, model)).map(|_| ())
-    }
-
-    fn read(&mut self, timeout: std::time::Duration) -> io::Result<UiEvent> {
-        loop {
-            if !event::poll(timeout)? {
-                return Ok(UiEvent::Tick);
-            }
-            match event::read()? {
-                Event::Resize(_, _) => return Ok(UiEvent::Refresh),
-                Event::Paste(value) => return Ok(UiEvent::Paste(value.into_bytes())),
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Up => return Ok(UiEvent::Up),
-                    KeyCode::Down => return Ok(UiEvent::Down),
-                    KeyCode::Enter => return Ok(UiEvent::Enter),
-                    KeyCode::Esc => return Ok(UiEvent::Escape),
-                    KeyCode::Backspace => return Ok(UiEvent::Backspace),
-                    KeyCode::Char(character) => return Ok(UiEvent::Character(character)),
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
-    }
-}
-
-fn render(frame: &mut ratatui::Frame<'_>, model: &Model) {
+fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
     let area = frame.area();
-    let zones = regions(area);
-    render_filters(frame, model, zones.filters);
+    let selected = selected_text(model, area.width.saturating_sub(2));
+    let zones = regions(area, selected.lines().count() as u16);
+    let mut hits = HitMap::default();
+    render_filters(frame, model, zones.filters, &mut hits);
     if zones.tree.height > 0 {
-        render_tree(frame, model, zones.tree);
+        render_tree(frame, model, zones.tree, &mut hits);
     }
     if zones.selected.height > 0 {
         frame.render_widget(
-            Paragraph::new(selected_text(model))
+            Paragraph::new(selected)
                 .block(Block::default().title("Selected").borders(Borders::ALL))
                 .wrap(Wrap { trim: false }),
             zones.selected,
@@ -98,20 +55,24 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) {
     }
     if zones.keys.height > 0 {
         frame.render_widget(
-            Paragraph::new(legend_text(model, zones.keys.width))
-                .block(
-                    Block::default()
-                        .title("Keys · ? for help")
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: false }),
+            Block::default()
+                .title("Actions · ? for help")
+                .borders(Borders::ALL),
             zones.keys,
         );
+        let buttons = hotkeys(model, zones.keys.width < 70);
+        let rows = wrap_buttons(
+            buttons,
+            zones.keys.width.saturating_sub(2),
+            zones.keys.height.saturating_sub(2) as usize,
+        );
+        draw_rows(frame, zones.keys, rows, model.hover, &mut hits);
     }
-    render_modal(frame, model, area);
+    render_modal(frame, model, area, &mut hits);
+    hits
 }
 
-fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect) {
+fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits: &mut HitMap) {
     let (title, body, scroll) = if let Some(message) = &model.message {
         (
             "Notice",
@@ -136,13 +97,14 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    hits.regions.clear();
     let width = area.width.min(80).max(1);
     let inner_width = width.saturating_sub(2).max(1) as usize;
     let lines = body
         .lines()
         .map(|line| line.chars().count().div_ceil(inner_width).max(1))
         .sum::<usize>();
-    let height = area.height.min((lines + 2).max(3) as u16);
+    let height = area.height.min((lines + 4).max(5) as u16);
     let box_area = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
@@ -151,13 +113,37 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect) {
     };
     frame.render_widget(Clear, box_area);
     frame.render_widget(
+        Block::default().title(title).borders(Borders::ALL),
+        box_area,
+    );
+    let body_area = Rect {
+        x: box_area.x + 1,
+        y: box_area.y + 1,
+        width: box_area.width.saturating_sub(2),
+        height: box_area.height.saturating_sub(4),
+    };
+    frame.render_widget(
         Paragraph::new(body)
-            .block(Block::default().title(title).borders(Borders::ALL))
             .alignment(Alignment::Left)
             .scroll((scroll, 0))
             .wrap(Wrap { trim: false }),
-        box_area,
+        body_area,
     );
+    if box_area.height >= 5 {
+        let footer = Rect {
+            x: box_area.x,
+            y: box_area.bottom() - 3,
+            width: box_area.width,
+            height: 3,
+        };
+        draw_rows(
+            frame,
+            footer,
+            vec![hotkeys(model, box_area.width < 70)],
+            model.hover,
+            hits,
+        );
+    }
 }
 
 fn modal_title(mode: &Mode) -> &'static str {
@@ -176,11 +162,24 @@ fn modal_title(mode: &Mode) -> &'static str {
     }
 }
 
-fn render_tree(frame: &mut ratatui::Frame<'_>, model: &Model, area: ratatui::layout::Rect) {
-    let items = model
-        .visible_tree_rows()
+fn render_tree(
+    frame: &mut ratatui::Frame<'_>,
+    model: &Model,
+    area: ratatui::layout::Rect,
+    hits: &mut HitMap,
+) {
+    let visible = model.visible_tree_rows();
+    let items = visible
+        .iter()
+        .enumerate()
         .into_iter()
-        .map(|visible| item(&model.rows[visible.index], visible.depth, &visible.label))
+        .map(|(index, visible)| {
+            let mut item = item(&model.rows[visible.index], visible.depth, &visible.label);
+            if model.hover == Some(MouseTarget::Tree(index)) {
+                item = item.style(Style::default().bg(Color::Rgb(70, 75, 85)));
+            }
+            item
+        })
         .collect::<Vec<_>>();
     let mut state =
         ListState::default().with_selected((!items.is_empty()).then_some(model.selected));
@@ -188,6 +187,18 @@ fn render_tree(frame: &mut ratatui::Frame<'_>, model: &Model, area: ratatui::lay
         .block(Block::default().title("Secrets").borders(Borders::ALL))
         .highlight_symbol("> ");
     frame.render_stateful_widget(list, area, &mut state);
+    let inner_height = area.height.saturating_sub(2) as usize;
+    for index in state.offset()..visible.len().min(state.offset() + inner_height) {
+        hits.add(
+            Rect {
+                x: area.x + 1,
+                y: area.y + 1 + (index - state.offset()) as u16,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            },
+            MouseTarget::Tree(index),
+        );
+    }
 }
 
 fn item(row: &Row, depth: usize, name: &str) -> ListItem<'static> {

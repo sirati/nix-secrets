@@ -3,14 +3,17 @@ fn leaf(set: bool) -> Row {
     Row {
         depth: 0,
         name: "key".into(),
+        display_segments: vec![],
         path: Some("h.services.s.key".into()),
         is_set: set,
         is_task: false,
         can_generate: false,
+        can_copy_public: false,
         output_is_set: None,
         description: None,
         category: RowCategory::Other,
         human_facing: false,
+        external_input_required: true,
     }
 }
 

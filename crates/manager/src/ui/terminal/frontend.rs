@@ -1,0 +1,86 @@
+use super::*;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+use std::io::Stdout;
+
+pub(super) struct CrosstermFrontend {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    hits: HitMap,
+}
+
+impl CrosstermFrontend {
+    pub(super) fn setup() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut output = io::stdout();
+        execute!(
+            output,
+            EnterAlternateScreen,
+            event::EnableBracketedPaste,
+            event::EnableMouseCapture
+        )?;
+        Ok(Self {
+            terminal: Terminal::new(CrosstermBackend::new(output))?,
+            hits: HitMap::default(),
+        })
+    }
+
+    pub(super) fn restore(&mut self) -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(
+            self.terminal.backend_mut(),
+            event::DisableBracketedPaste,
+            event::DisableMouseCapture,
+            LeaveAlternateScreen
+        )?;
+        self.terminal.show_cursor()
+    }
+}
+
+impl Frontend for CrosstermFrontend {
+    fn draw(&mut self, model: &Model) -> io::Result<()> {
+        self.terminal
+            .draw(|frame| self.hits = render(frame, model))
+            .map(|_| ())
+    }
+
+    fn read(&mut self, timeout: std::time::Duration) -> io::Result<UiEvent> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if !event::poll(deadline.saturating_duration_since(std::time::Instant::now()))? {
+                return Ok(UiEvent::Tick);
+            }
+            match event::read()? {
+                Event::Resize(_, _) => return Ok(UiEvent::Refresh),
+                Event::Paste(value) => return Ok(UiEvent::Paste(value.into_bytes())),
+                Event::Mouse(mouse) => match mouse.kind {
+                    event::MouseEventKind::Moved => {
+                        return Ok(UiEvent::Hover(self.hits.get(mouse.column, mouse.row)))
+                    }
+                    event::MouseEventKind::Down(event::MouseButton::Left) => {
+                        if let Some(target) = self.hits.get(mouse.column, mouse.row) {
+                            return Ok(UiEvent::Click(target));
+                        }
+                    }
+                    event::MouseEventKind::ScrollUp => return Ok(UiEvent::Up),
+                    event::MouseEventKind::ScrollDown => return Ok(UiEvent::Down),
+                    _ => {}
+                },
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Up => return Ok(UiEvent::Up),
+                    KeyCode::Down => return Ok(UiEvent::Down),
+                    KeyCode::Enter => return Ok(UiEvent::Enter),
+                    KeyCode::Esc => return Ok(UiEvent::Escape),
+                    KeyCode::Backspace => return Ok(UiEvent::Backspace),
+                    KeyCode::Char(character) => return Ok(UiEvent::Character(character)),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+}

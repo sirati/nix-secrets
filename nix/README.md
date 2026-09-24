@@ -11,6 +11,12 @@ Use `valueType = "key"` for private keys shown in the key-only view. An optional
 restrict its view to these leaves. Generated password/passphrase choices are
 available for every password leaf, and consumer constraints describe only the
 receiving program's format limits. Set
+`externalInputRequired = true` only when a value must be supplied from a
+separately administered system, such as a password set in a hosting provider's
+control panel. The TUI's **Required** view shows only leaves with this flag.
+It does not infer this property from password type, generator availability, or
+whether the value is currently set. The default is `false`.
+Set
 `destination.contentType = "openssh-private-key"` or `"openssh-public-key"`
 when the consumer requires that format; the frontend and target both reject
 malformed key material. `named-ssh-ed25519-public-keys` remains available for

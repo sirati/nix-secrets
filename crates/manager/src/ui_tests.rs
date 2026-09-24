@@ -1,6 +1,8 @@
 use crate::model::{ApprovalRequest, Mode, Model, TaskApproval};
 use crate::tree::{Row, RowCategory};
-use crate::ui::{drive, reduce, Action, Frontend, GenerateKind, SecretWriter, UiEvent};
+use crate::ui::{
+    drive, reduce, Action, Frontend, GenerateKind, MouseTarget, SecretWriter, Shortcut, UiEvent,
+};
 use std::collections::VecDeque;
 use std::io;
 use zeroize::Zeroizing;
@@ -83,14 +85,17 @@ fn model(set: bool) -> Model {
     Model::new(vec![Row {
         depth: 0,
         name: "key".into(),
+        display_segments: vec![],
         path: Some("h.services.s.key".into()),
         is_set: set,
         is_task: false,
         can_generate: true,
+        can_copy_public: false,
         output_is_set: None,
         description: None,
         category: RowCategory::Password,
         human_facing: false,
+        external_input_required: true,
     }])
 }
 
@@ -172,14 +177,17 @@ fn task_approval_exposes_input_and_target_output_status() {
     let mut model = Model::new(vec![Row {
         depth: 0,
         name: "bootstrap".into(),
+        display_segments: vec![],
         path: Some("h.services.backup.bootstrap".into()),
         is_set: false,
         is_task: true,
         can_generate: false,
+        can_copy_public: false,
         output_is_set: None,
         description: None,
         category: RowCategory::Password,
         human_facing: false,
+        external_input_required: true,
     }]);
     let mut writer = writer();
     let request = ApprovalRequest {

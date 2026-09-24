@@ -1,6 +1,13 @@
 use super::*;
 
 pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter) -> Action {
+    if let UiEvent::Hover(target) = event {
+        model.hover = target;
+        return Action::Continue;
+    }
+    if let UiEvent::Click(target) = event {
+        return mouse::click(model, target, writer);
+    }
     if let UiEvent::Approval(request) = event {
         model.offer_approval(request);
         return Action::Continue;

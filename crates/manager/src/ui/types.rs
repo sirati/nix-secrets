@@ -2,6 +2,20 @@ use super::*;
 
 pub const OPERATION_QUEUED: &str = "nix-secrets:operation-queued";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shortcut {
+    Enter,
+    Escape,
+    Character(char),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseTarget {
+    Filter(u8),
+    Tree(usize),
+    Shortcut(Shortcut),
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum UiEvent {
     Up,
@@ -14,6 +28,8 @@ pub enum UiEvent {
     Approval(ApprovalRequest),
     Refresh,
     Tick,
+    Hover(Option<MouseTarget>),
+    Click(MouseTarget),
 }
 
 #[derive(Debug, Eq, PartialEq)]

@@ -10,6 +10,8 @@ pub struct GeneratedSecretLeaf {
     pub description: Option<String>,
     #[serde(rename = "humanFacing", default)]
     pub human_facing: bool,
+    #[serde(rename = "externalInputRequired", default)]
+    pub external_input_required: bool,
     #[serde(rename = "recipientPublicKeys")]
     pub recipient_public_keys: Vec<String>,
     #[serde(rename = "recipientIds")]

@@ -53,6 +53,7 @@ let
         "consumerConstraints"
         "description"
         "humanFacing"
+        "externalInputRequired"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in
@@ -131,6 +132,7 @@ let
         "consumerConstraints"
         "description"
         "humanFacing"
+        "externalInputRequired"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in

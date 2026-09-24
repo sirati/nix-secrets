@@ -48,14 +48,17 @@ fn delayed_backend_response_cannot_stall_terminal_navigation() {
     let make_row = |name: &str| Row {
         depth: 0,
         name: name.into(),
+        display_segments: vec![],
         path: Some(format!("host.services.test.{name}")),
         is_set: true,
         is_task: false,
         can_generate: false,
+        can_copy_public: false,
         output_is_set: None,
         description: None,
         category: RowCategory::Other,
         human_facing: false,
+        external_input_required: true,
     };
     let mut model = Model::new(vec![make_row("first"), make_row("second")]);
     let start = Instant::now();
@@ -90,14 +93,17 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
     let make_row = |name: &str| Row {
         depth: 0,
         name: name.into(),
+        display_segments: vec![],
         path: Some(format!("host.services.test.{name}")),
         is_set: true,
         is_task: false,
         can_generate: false,
+        can_copy_public: false,
         output_is_set: None,
         description: None,
         category: RowCategory::Other,
         human_facing: false,
+        external_input_required: true,
     };
     let mut model = Model::new(vec![make_row("first"), make_row("second")]);
     let start = Instant::now();

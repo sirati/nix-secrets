@@ -71,6 +71,8 @@ pub struct SecretLeaf {
     pub description: Option<String>,
     #[serde(rename = "humanFacing", default)]
     pub human_facing: bool,
+    #[serde(rename = "externalInputRequired", default)]
+    pub external_input_required: bool,
     #[serde(rename = "recipientPublicKeys", default)]
     pub recipient_public_keys: Vec<String>,
     #[serde(rename = "recipientIds", default)]
@@ -122,6 +124,7 @@ pub struct SecretSpec {
     pub install_default_if_missing: bool,
     pub description: Option<String>,
     pub human_facing: bool,
+    pub external_input_required: bool,
     pub recipient_public_keys: Vec<String>,
     pub recipient_ids: Vec<String>,
     pub recipient_names: Vec<String>,
@@ -136,6 +139,7 @@ pub struct GeneratedSecretSpec {
     pub path: SecretPath,
     pub description: Option<String>,
     pub human_facing: bool,
+    pub external_input_required: bool,
     pub recipient_public_keys: Vec<String>,
     pub recipient_ids: Vec<String>,
     pub recipient_names: Vec<String>,
@@ -299,6 +303,7 @@ impl Schema {
                 install_default_if_missing: leaf.install_default_if_missing,
                 description: leaf.description.clone(),
                 human_facing: leaf.human_facing,
+                external_input_required: leaf.external_input_required,
                 recipient_public_keys: leaf.recipient_public_keys.clone(),
                 recipient_ids: leaf.recipient_ids.clone(),
                 recipient_names: leaf.recipient_names.clone(),
@@ -311,6 +316,7 @@ impl Schema {
                 path: path.clone(),
                 description: leaf.description.clone(),
                 human_facing: leaf.human_facing,
+                external_input_required: leaf.external_input_required,
                 recipient_public_keys: leaf.recipient_public_keys.clone(),
                 recipient_ids: leaf.recipient_ids.clone(),
                 recipient_names: leaf.recipient_names.clone(),

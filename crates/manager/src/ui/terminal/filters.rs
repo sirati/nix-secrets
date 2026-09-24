@@ -1,80 +1,64 @@
 use super::*;
-use ratatui::style::Modifier;
+use buttons::{draw_rows, Button};
 
-pub(super) fn render_filters(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect) {
+pub(super) fn render_filters(
+    frame: &mut ratatui::Frame<'_>,
+    model: &Model,
+    area: Rect,
+    hits: &mut HitMap,
+) {
     if area.height == 0 {
         return;
     }
-    let choice = |key, name: &'static str, selected| button(key, name, selected);
+    frame.render_widget(
+        Block::default()
+            .title("Filters · 1–7 select")
+            .borders(Borders::ALL),
+        area,
+    );
+    let choice = |key, label, active| Button::new(label, MouseTarget::Filter(key)).active(active);
     let required = choice(
         1,
-        "Required",
+        "1 Required",
         model.filter == crate::model::ViewFilter::Required,
     );
-    let all = choice(2, "All", model.filter == crate::model::ViewFilter::All);
-    let keys = choice(3, "Keys", model.filter == crate::model::ViewFilter::Keys);
+    let all = choice(2, "2 All", model.filter == crate::model::ViewFilter::All);
+    let keys = choice(3, "3 Keys", model.filter == crate::model::ViewFilter::Keys);
     let passwords = choice(
         4,
-        "Passwords",
+        "4 Passwords",
         model.filter == crate::model::ViewFilter::Passwords,
     );
     let public = choice(
         5,
         if area.width < 70 {
-            "Public"
+            "5 Public"
         } else {
-            "Public info"
+            "5 Public info"
         },
         model.filter == crate::model::ViewFilter::PublicInfo,
     );
-    let everyone = choice(6, "Everyone", !model.human_only);
+    let everyone = choice(6, "6 Everyone", !model.human_only);
     let human = choice(
         7,
         if area.width < 70 {
-            "Human"
+            "7 Human"
         } else {
-            "Human-facing"
+            "7 Human-facing"
         },
         model.human_only,
     );
-    let lines = if area.width < 70 {
+    let rows = if area.width < 70 {
         vec![
-            row(vec![required, all, keys]),
-            row(vec![passwords, public]),
-            row(vec![everyone, human]),
+            vec![required, all, keys],
+            vec![passwords, public],
+            vec![everyone, human],
         ]
     } else {
         vec![
-            row(vec![required, all, keys, passwords, public]),
-            row(vec![everyone, human]),
+            vec![required, all, keys, passwords, public],
+            vec![everyone, human],
         ]
     };
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .title("Filters · 1–7 select")
-                .borders(Borders::ALL),
-        ),
-        area,
-    );
-}
-
-fn button(key: u8, label: &str, selected: bool) -> Span<'static> {
-    let style = if selected {
-        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Cyan).bg(Color::DarkGray)
-    };
-    Span::styled(format!(" {key} {label} "), style)
-}
-
-fn row(buttons: Vec<Span<'static>>) -> Line<'static> {
-    let mut spans = Vec::with_capacity(buttons.len() * 2);
-    for (index, button) in buttons.into_iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw(" "));
-        }
-        spans.push(button);
-    }
-    Line::from(spans)
+    draw_rows(frame, area, rows, model.hover, hits);
 }

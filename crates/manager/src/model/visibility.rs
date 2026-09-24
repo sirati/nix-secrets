@@ -24,7 +24,7 @@ impl Model {
                 continue;
             }
             let category = match self.filter {
-                ViewFilter::Required => row.category != RowCategory::PublicInfo,
+                ViewFilter::Required => row.external_input_required,
                 ViewFilter::All => true,
                 ViewFilter::Keys => row.category == RowCategory::Key,
                 ViewFilter::Passwords => row.category == RowCategory::Password,
@@ -56,7 +56,7 @@ impl Model {
                 .take_while(|candidate| self.rows[*candidate].depth > row.depth)
                 .filter(|candidate| self.rows[*candidate].depth == row.depth + 1)
                 .count();
-            if row.path.is_none() && direct_children == 1 {
+            if row.path.is_none() && row.depth >= 2 && direct_children == 1 {
                 continue;
             }
             let mut labels = vec![row.name.clone()];
@@ -77,7 +77,7 @@ impl Model {
                     .take_while(|candidate| self.rows[*candidate].depth > parent_row.depth)
                     .filter(|candidate| self.rows[*candidate].depth == parent_row.depth + 1)
                     .count();
-                if siblings != 1 {
+                if siblings != 1 || parent_row.depth < 2 {
                     break;
                 }
                 labels.insert(0, parent_row.name.clone());
@@ -90,5 +90,28 @@ impl Model {
             });
         }
         result
+    }
+
+    pub fn selected_display_path(&self) -> Option<String> {
+        let visible = self.visible_tree_rows();
+        let current = visible.get(self.selected)?;
+        let selected_row = &self.rows[current.index];
+        if selected_row.display_segments.is_empty() {
+            return Some(current.label.clone());
+        }
+        let mut parts = visible[..self.selected]
+            .iter()
+            .filter(|candidate| {
+                let row = &self.rows[candidate.index];
+                row.path.is_none()
+                    && row.display_segments.len() < selected_row.display_segments.len()
+                    && selected_row
+                        .display_segments
+                        .starts_with(&row.display_segments)
+            })
+            .map(|candidate| candidate.label.as_str())
+            .collect::<Vec<_>>();
+        parts.push(&current.label);
+        Some(parts.join(" > "))
     }
 }

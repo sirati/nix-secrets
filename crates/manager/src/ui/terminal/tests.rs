@@ -1,6 +1,7 @@
 use super::*;
 use ratatui::backend::TestBackend;
 use ratatui::style::Modifier;
+use ratatui::Terminal;
 
 fn line(terminal: &Terminal<TestBackend>, y: u16) -> String {
     let buffer = terminal.backend().buffer();
@@ -14,7 +15,11 @@ fn compact_terminal_renders_notice_modal_and_filter_bar() {
     let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
     let mut model = Model::new(vec![]);
     model.message = Some("test result".into());
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| {
+            render(frame, &model);
+        })
+        .unwrap();
     let screen = (0..8)
         .map(|y| line(&terminal, y))
         .collect::<Vec<_>>()
@@ -24,7 +29,11 @@ fn compact_terminal_renders_notice_modal_and_filter_bar() {
     assert!(screen.contains("Enter: continue"));
     model.message = None;
     model.mode = Mode::Help { scroll: 0 };
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| {
+            render(frame, &model);
+        })
+        .unwrap();
     let screen = (0..8)
         .map(|y| line(&terminal, y))
         .collect::<Vec<_>>()
@@ -36,15 +45,19 @@ fn compact_terminal_renders_notice_modal_and_filter_bar() {
 fn wide_terminal_keeps_five_distinct_zones_and_inverse_selected_buttons() {
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     let mut model = Model::new(vec![]);
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| {
+            render(frame, &model);
+        })
+        .unwrap();
     let screen = (0..24)
         .map(|y| line(&terminal, y))
         .collect::<Vec<_>>()
         .join("\n");
-    for title in ["Filters", "Secrets", "Selected", "Status", "Keys"] {
+    for title in ["Filters", "Secrets", "Selected", "Status", "Actions"] {
         assert!(screen.contains(title), "missing zone {title}");
     }
-    let zones = regions(terminal.backend().buffer().area);
+    let zones = regions(terminal.backend().buffer().area, 1);
     assert!(zones.filters.bottom() <= zones.tree.y);
     assert!(zones.tree.bottom() <= zones.selected.y);
     assert!(zones.selected.bottom() <= zones.status.y);
@@ -54,7 +67,11 @@ fn wide_terminal_keeps_five_distinct_zones_and_inverse_selected_buttons() {
     assert!(button_reversed(&terminal, "1 Required"));
     assert!(!button_reversed(&terminal, "2 All"));
     model.set_filter(crate::model::ViewFilter::All);
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| {
+            render(frame, &model);
+        })
+        .unwrap();
     assert!(!button_reversed(&terminal, "1 Required"));
     assert!(button_reversed(&terminal, "2 All"));
 }
@@ -81,12 +98,16 @@ fn button_reversed(terminal: &Terminal<TestBackend>, label: &str) -> bool {
 fn narrow_terminal_retains_distinct_sections_and_all_filters() {
     let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
     let model = Model::new(vec![]);
-    terminal.draw(|frame| render(frame, &model)).unwrap();
+    terminal
+        .draw(|frame| {
+            render(frame, &model);
+        })
+        .unwrap();
     let screen = (0..20)
         .map(|y| line(&terminal, y))
         .collect::<Vec<_>>()
         .join("\n");
-    for title in ["Filters", "Secrets", "Selected", "Status", "Keys"] {
+    for title in ["Filters", "Secrets", "Selected", "Status", "Actions"] {
         assert!(screen.contains(title), "missing zone {title}");
     }
     for label in [
@@ -100,7 +121,7 @@ fn narrow_terminal_retains_distinct_sections_and_all_filters() {
     ] {
         assert!(screen.contains(label), "missing button {label}");
     }
-    let zones = regions(terminal.backend().buffer().area);
+    let zones = regions(terminal.backend().buffer().area, 1);
     assert!(zones.filters.bottom() <= zones.tree.y && zones.tree.bottom() <= zones.selected.y);
     assert!(zones.selected.bottom() <= zones.status.y && zones.status.bottom() <= zones.keys.y);
 }
@@ -108,9 +129,13 @@ fn narrow_terminal_retains_distinct_sections_and_all_filters() {
 #[test]
 fn help_and_legend_match_actual_filter_shortcuts() {
     let model = Model::new(vec![]);
-    assert!(help_text().contains("1 Required · 2 All · 3 Keys · 4 Passwords · 5 Public info"));
+    assert!(help_text().contains(
+        "1 Required (external values only) · 2 All · 3 Keys · 4 Passwords · 5 Public info"
+    ));
     assert!(help_text().contains("6 Everyone · 7 Human-facing"));
-    assert!(legend_text(&model, 100).contains("1–5 type · 6–7 audience"));
+    assert!(hotkeys(&model, false)
+        .iter()
+        .any(|button| button.label == "? Help"));
 }
 
 #[test]
@@ -123,7 +148,11 @@ fn provider_error_modal_redacts_pending_secret_and_tiny_terminals_do_not_panic()
     };
     for (width, height) in [(1, 1), (12, 4), (40, 8)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(frame, &model)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(frame, &model);
+            })
+            .unwrap();
         let screen = (0..height)
             .map(|y| line(&terminal, y))
             .collect::<Vec<_>>()
@@ -134,3 +163,5 @@ fn provider_error_modal_redacts_pending_secret_and_tiny_terminals_do_not_panic()
         }
     }
 }
+
+mod mouse;

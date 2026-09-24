@@ -52,6 +52,9 @@ pub fn drive(
             }
             continue;
         }
+        if matches!(&event, UiEvent::Hover(target) if model.hover == *target) {
+            continue;
+        }
         let action = reduce(model, event, writer);
         model.show_pending_approval();
         schedule(&mut redraw_at);

@@ -16,6 +16,7 @@ rustix = { version = "1", features = ["net", "process"] }
 serde_json = "1"
 ssh-key = "0.6.7"
 zeroize = "1"
+unicode-width = "0.2"
 
 [[bin]]
 name = "nix-secrets"

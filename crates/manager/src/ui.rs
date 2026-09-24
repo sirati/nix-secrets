@@ -1,16 +1,9 @@
 use crate::model::{ApprovalRequest, Mode, Model};
 use crate::tree::Row;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use ratatui::backend::CrosstermBackend;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Terminal;
-use std::io::{self, Stdout};
+use std::io;
 use zeroize::Zeroizing;
 
 fn notify_operation_result(model: &mut Model, error: String) {
@@ -35,6 +28,7 @@ mod edit;
 use edit::{submit, submit_if_edit, submit_if_nonempty, truncate_character};
 
 mod generated;
+mod mouse;
 mod terminal;
 
 pub use terminal::run;

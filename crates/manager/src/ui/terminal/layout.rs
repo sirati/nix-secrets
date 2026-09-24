@@ -8,11 +8,11 @@ pub(super) struct Regions {
     pub keys: Rect,
 }
 
-pub(super) fn regions(area: Rect) -> Regions {
+pub(super) fn regions(area: Rect, selected_lines: u16) -> Regions {
     let (filters, selected, status, keys) = if area.height >= 17 {
         (
             if area.width < 70 { 5 } else { 4 },
-            3,
+            (selected_lines + 2).max(3),
             3,
             if area.width < 70 { 3 } else { 4 },
         )
@@ -32,7 +32,7 @@ pub(super) fn regions(area: Rect) -> Regions {
     let available = available - keys;
     let status = status.min(available);
     let available = available - status;
-    let selected = selected.min(available);
+    let selected = selected.min(available.saturating_sub(3));
     let tree = available - selected;
     let at = |offset, height| Rect {
         x: area.x,

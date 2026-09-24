@@ -105,14 +105,17 @@ fn filters_use_explicit_value_categories() {
     model.rows.push(Row {
         depth: 0,
         name: "certificate".into(),
+        display_segments: vec![],
         path: Some("h.services.s.certificate".into()),
         is_set: true,
         is_task: false,
         can_generate: false,
+        can_copy_public: false,
         output_is_set: None,
         description: Some("TLS certificate chain".into()),
         category: RowCategory::Other,
         human_facing: false,
+        external_input_required: true,
     });
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('3'), &mut writer);
@@ -131,14 +134,17 @@ fn public_info_has_its_own_filter_category() {
     model.rows.push(Row {
         depth: 0,
         name: "known-hosts".into(),
+        display_segments: vec![],
         path: Some("h.services.backup.known-hosts".into()),
         is_set: true,
         is_task: false,
         can_generate: false,
+        can_copy_public: false,
         output_is_set: None,
         description: Some("Pinned SSH host identity".into()),
         category: RowCategory::PublicInfo,
         human_facing: false,
+        external_input_required: true,
     });
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('5'), &mut writer);
@@ -172,14 +178,17 @@ fn human_filter_and_search_compose() {
     model.rows.push(Row {
         depth: 0,
         name: "service-token".into(),
+        display_segments: vec![],
         path: Some("h.services.s.service-token".into()),
         is_set: true,
         is_task: false,
         can_generate: false,
+        can_copy_public: false,
         output_is_set: None,
         description: None,
         category: RowCategory::Other,
         human_facing: false,
+        external_input_required: true,
     });
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('h'), &mut writer);
@@ -193,4 +202,40 @@ fn human_filter_and_search_compose() {
     assert!(model.visible_rows().is_empty());
     reduce(&mut model, UiEvent::Escape, &mut writer);
     assert_eq!(model.visible_rows(), vec![0]);
+}
+
+#[test]
+fn mouse_clicks_select_without_editing_and_shortcuts_use_keyboard_behavior() {
+    let mut model = model(false);
+    let mut second = model.rows[0].clone();
+    second.name = "other".into();
+    second.path = Some("h.services.s.other".into());
+    model.rows.push(second);
+    let mut writer = writer();
+    reduce(
+        &mut model,
+        UiEvent::Click(MouseTarget::Tree(1)),
+        &mut writer,
+    );
+    assert_eq!(model.selected, 1);
+    assert!(matches!(model.mode, Mode::Browse));
+    assert!(writer.writes.is_empty());
+    reduce(
+        &mut model,
+        UiEvent::Click(MouseTarget::Filter(3)),
+        &mut writer,
+    );
+    assert_eq!(model.filter, crate::model::ViewFilter::Keys);
+    reduce(
+        &mut model,
+        UiEvent::Click(MouseTarget::Shortcut(Shortcut::Character('?'))),
+        &mut writer,
+    );
+    assert!(matches!(model.mode, Mode::Help { .. }));
+    reduce(
+        &mut model,
+        UiEvent::Click(MouseTarget::Tree(0)),
+        &mut writer,
+    );
+    assert!(matches!(model.mode, Mode::Help { .. }));
 }
