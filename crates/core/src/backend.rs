@@ -1,11 +1,7 @@
 use crate::framing::{read_json, write_json};
-use crate::{
-    ApprovalBroker, ApprovalRequest, ApprovalStatus, BrokerError, Decision, EncryptedSecret,
-    Schema, SecretPath, SecretStore,
-};
+use crate::{ApprovalBroker, BrokerError, Schema, SecretStore};
 use rustix::net::sockopt::socket_peercred;
 use rustix::process::geteuid;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -16,124 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum Request {
-    Get {
-        path: SecretPath,
-    },
-    List,
-    Set {
-        path: SecretPath,
-        envelope: EncryptedSecret,
-    },
-    SetIfVersion {
-        path: SecretPath,
-        envelope: EncryptedSecret,
-        expected_version: Option<Vec<u8>>,
-    },
-    Remove {
-        path: SecretPath,
-    },
-    RemoveIfVersion {
-        path: SecretPath,
-        expected_version: Vec<u8>,
-    },
-    GetGeneratedPublicKey {
-        path: SecretPath,
-    },
-    SetGeneratedPublicKeyIfVersion {
-        path: SecretPath,
-        value: crate::GeneratedPublicKey,
-        expected_version: Option<String>,
-    },
-    SetPublicKeyIfVersion {
-        path: SecretPath,
-        public_key: String,
-        expected_version: Vec<u8>,
-    },
-    ListPublicInfo,
-    GetPublicInfo {
-        shared_id: String,
-    },
-    SetPublicInfoIfVersion {
-        path: SecretPath,
-        value: crate::PublicInfoRecord,
-        expected_version: Option<String>,
-    },
-    RemovePublicInfoIfVersion {
-        path: SecretPath,
-        expected_version: String,
-    },
-    RegisterFrontend,
-    PollApprovals,
-    SubmitApproval {
-        request: ApprovalRequest,
-    },
-    ClaimApproval {
-        request_id: String,
-        lease_ms: u64,
-    },
-    RenewApproval {
-        request_id: String,
-        lease_id: u64,
-        lease_ms: u64,
-    },
-    ResolveApproval {
-        request_id: String,
-        lease_id: u64,
-        decision: Decision,
-    },
-    CancelApproval {
-        request_id: String,
-    },
-    ApprovalStatus {
-        request_id: String,
-    },
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum Response {
-    Secret {
-        envelope: Option<EncryptedSecret>,
-    },
-    Secrets {
-        entries: std::collections::BTreeMap<String, EncryptedSecret>,
-    },
-    Updated,
-    Removed {
-        existed: bool,
-    },
-    GeneratedPublicKey {
-        value: Option<crate::GeneratedPublicKey>,
-    },
-    PublicInfo {
-        value: Option<crate::PublicInfoRecord>,
-    },
-    PublicInfoEntries {
-        entries: std::collections::BTreeMap<String, crate::PublicInfoRecord>,
-    },
-    Error {
-        message: String,
-    },
-    FrontendRegistered,
-    Approvals {
-        requests: Vec<ApprovalRequest>,
-    },
-    ApprovalState {
-        state: ApprovalStatus,
-    },
-    ApprovalClaimed {
-        lease_id: u64,
-        expires_in_ms: u64,
-    },
-    ApprovalRenewed {
-        expires_in_ms: u64,
-    },
-    ApprovalResolved,
-    ApprovalCancelled,
-}
+mod event_after;
+use event_after::event_after_success;
+mod feed;
+pub use feed::BackendEvent;
+use feed::Feed;
+mod protocol;
+pub use protocol::{Request, Response};
 
 pub struct Backend {
     socket_path: PathBuf,
@@ -142,6 +27,7 @@ pub struct Backend {
     store: Arc<SecretStore>,
     broker: Arc<Mutex<ApprovalBroker>>,
     next_session: Arc<AtomicU64>,
+    feed: Arc<Feed>,
 }
 
 impl Backend {
@@ -161,6 +47,7 @@ impl Backend {
             store: Arc::new(store),
             broker: Arc::new(Mutex::new(ApprovalBroker::default())),
             next_session: Arc::new(AtomicU64::new(1)),
+            feed: Arc::new(Feed::default()),
         })
     }
 
@@ -175,9 +62,10 @@ impl Backend {
             let schema = Arc::clone(&self.schema);
             let store = Arc::clone(&self.store);
             let broker = Arc::clone(&self.broker);
+            let feed = Arc::clone(&self.feed);
             let session = self.next_session.fetch_add(1, Ordering::Relaxed);
             thread::spawn(move || {
-                let _ = handle_client(stream, &schema, &store, &broker, session);
+                let _ = handle_client(stream, &schema, &store, &broker, &feed, session);
                 if let Ok(mut state) = broker.lock() {
                     state.disconnect(session);
                 }
@@ -196,9 +84,24 @@ fn handle_client(
     schema: &Schema,
     store: &SecretStore,
     broker: &Mutex<ApprovalBroker>,
+    feed: &Feed,
     session: u64,
 ) -> io::Result<()> {
     while let Some(request) = read_json::<Request>(&mut stream)? {
+        if matches!(request, Request::SubscribeChanges) {
+            let receiver = feed.subscribe();
+            write_json(&mut stream, &Response::Subscribed)?;
+            loop {
+                match receiver.recv_timeout(Duration::from_secs(60)) {
+                    Ok(update) => write_json(&mut stream, &Response::Change { update })?,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        write_json(&mut stream, &Response::Heartbeat)?;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                }
+            }
+        }
+        let update = event_after_success(&request, schema);
         let response = match request {
             Request::Get { path } => store
                 .get(&path)
@@ -338,10 +241,16 @@ fn handle_client(
                     .status(&request_id)
                     .map(|state| Response::ApprovalState { state })
             }),
+            Request::SubscribeChanges => unreachable!("handled above"),
         }
         .unwrap_or_else(|error| Response::Error {
             message: error.to_string(),
         });
+        if !matches!(response, Response::Error { .. }) {
+            if let Some(update) = update {
+                feed.publish(update);
+            }
+        }
         write_json(&mut stream, &response)?;
     }
     Ok(())

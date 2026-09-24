@@ -82,6 +82,9 @@ as the frontend. If no valid backend is listening, the program starts one with
 a fixed `nix run` invocation and the freshly evaluated secret declaration.
 Several TUI frontends can share one backend. The backend serializes changes to
 `nix-secrets.toml` and replaces that file atomically.
+While the TUI is open, the backend pushes change and deployment-request notices
+over a subscription. A local worker handles SSH, encryption, decryption, and
+deployment work; terminal input and drawing stay on the frontend thread.
 
 The backend stores ciphertext, recipient references, and public metadata in
 `nix-secrets.toml`. A shared public-information entry has one plaintext TOML

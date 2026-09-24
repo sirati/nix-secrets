@@ -13,6 +13,7 @@ use nix_secrets_transport::{
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -33,6 +34,16 @@ pub struct Controller {
     provider: AgeCommandProvider,
     known_hosts: Vec<PathBuf>,
     active: Option<ActiveApproval>,
+    background: Option<Receiver<BackgroundUpdate>>,
+    pending_rows: Option<Vec<Row>>,
+    approvals_ready: bool,
+    background_error: Option<String>,
+}
+
+enum BackgroundUpdate {
+    Rows(Vec<Row>),
+    ApprovalPending,
+    Error(String),
 }
 
 impl Controller {
@@ -49,7 +60,37 @@ impl Controller {
             provider,
             known_hosts,
             active: None,
+            background: None,
+            pending_rows: None,
+            approvals_ready: false,
+            background_error: None,
         })
+    }
+
+    /// Keep idle backend traffic off the terminal's input thread. The worker
+    /// has its own verified socket; only the UI session may claim approvals.
+    pub fn start_background_refresh(&mut self, socket: PathBuf) {
+        let schema = self.schema.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.background = Some(receiver);
+        std::thread::spawn(move || {
+            if let Err(error) = background::listen(socket, schema, &sender) {
+                let _ = sender.send(BackgroundUpdate::Error(error.to_string()));
+            }
+        });
+    }
+
+    fn drain_background(&mut self) {
+        let Some(receiver) = &self.background else {
+            return;
+        };
+        while let Ok(update) = receiver.try_recv() {
+            match update {
+                BackgroundUpdate::Rows(rows) => self.pending_rows = Some(rows),
+                BackgroundUpdate::ApprovalPending => self.approvals_ready = true,
+                BackgroundUpdate::Error(error) => self.background_error = Some(error),
+            }
+        }
     }
 
     pub fn rows(&mut self) -> Result<Vec<Row>, Box<dyn std::error::Error>> {
@@ -242,6 +283,7 @@ impl Controller {
     }
 }
 
+mod background;
 mod generate;
 mod metadata;
 mod public_info;

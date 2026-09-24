@@ -13,70 +13,8 @@ use ratatui::Terminal;
 use std::io::{self, Stdout};
 use zeroize::Zeroizing;
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum UiEvent {
-    Up,
-    Down,
-    Enter,
-    Escape,
-    Character(char),
-    Backspace,
-    Paste(Vec<u8>),
-    Approval(ApprovalRequest),
-    Tick,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub enum Action {
-    Continue,
-    Quit,
-    Saved(String),
-    Approved,
-    Rejected,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GenerateKind {
-    Password,
-    Passphrase,
-}
-
-pub trait SecretWriter {
-    fn refresh_rows(&mut self) -> Result<Option<Vec<Row>>, String> {
-        Ok(None)
-    }
-    fn write(
-        &mut self,
-        path: &str,
-        value: Zeroizing<Vec<u8>>,
-    ) -> Result<Action, (String, Zeroizing<Vec<u8>>)>;
-    fn poll_approval(&mut self) -> Result<Option<ApprovalRequest>, String> {
-        Ok(None)
-    }
-    fn approval(&mut self, _accepted: bool) -> Result<Option<ApprovalRequest>, String> {
-        Ok(None)
-    }
-    fn delete(&mut self, _path: &str) -> Result<(), String> {
-        Err("deletion unavailable".into())
-    }
-    fn reveal(&mut self, _path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
-        Err("reveal unavailable".into())
-    }
-    fn copy_public(&mut self, _path: &str) -> Result<(), String> {
-        Err("public key unavailable".into())
-    }
-    fn generate(&mut self, _path: &str, _kind: GenerateKind) -> Result<Zeroizing<Vec<u8>>, String> {
-        Err("select a password leaf".into())
-    }
-    fn copy(&mut self, _value: &[u8]) -> Result<(), String> {
-        Err("no clipboard provider is available".into())
-    }
-}
-
-pub trait Frontend {
-    fn draw(&mut self, model: &Model) -> io::Result<()>;
-    fn read(&mut self) -> io::Result<UiEvent>;
-}
+mod types;
+pub use types::*;
 
 mod drive;
 pub use drive::drive;
@@ -299,11 +237,14 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
                 model.mode = Mode::Approval(request);
             }
         },
-        (Mode::Approval(_), UiEvent::Character('n') | UiEvent::Escape) => {
-            if let Err(message) = writer.approval(false) {
-                model.message = Some(message);
+        (Mode::Approval(request), UiEvent::Character('n') | UiEvent::Escape) => {
+            match writer.approval(false) {
+                Ok(_) => return Action::Rejected,
+                Err(message) => {
+                    model.message = Some(message);
+                    model.mode = Mode::Approval(request);
+                }
             }
-            return Action::Rejected;
         }
         (Mode::Approval(request), _) => model.mode = Mode::Approval(request),
         (Mode::Browse, _) => {}

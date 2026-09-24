@@ -3,6 +3,13 @@ use super::*;
 
 impl SecretWriter for Controller {
     fn refresh_rows(&mut self) -> Result<Option<Vec<Row>>, String> {
+        if self.background.is_some() {
+            self.drain_background();
+            if let Some(error) = self.background_error.take() {
+                return Err(format!("background refresh stopped: {error}"));
+            }
+            return Ok(self.pending_rows.take());
+        }
         self.rows().map(Some).map_err(|error| error.to_string())
     }
     fn copy_public(&mut self, path: &str) -> Result<(), String> {
@@ -162,6 +169,7 @@ impl SecretWriter for Controller {
     }
 
     fn poll_approval(&mut self) -> Result<Option<UiApproval>, String> {
+        self.drain_background();
         if let Some(active) = &self.active {
             if active.renewed_at.elapsed() < Duration::from_secs(60) {
                 return Ok(None);
@@ -176,6 +184,9 @@ impl SecretWriter for Controller {
                 .as_mut()
                 .expect("approval remains active")
                 .renewed_at = Instant::now();
+            return Ok(None);
+        }
+        if self.background.is_some() && !std::mem::take(&mut self.approvals_ready) {
             return Ok(None);
         }
         let Some((request, lease_id)) = self

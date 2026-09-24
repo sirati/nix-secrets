@@ -69,7 +69,7 @@ impl Frontend for FakeFrontend {
         self.draws += 1;
         Ok(())
     }
-    fn read(&mut self) -> io::Result<UiEvent> {
+    fn read(&mut self, _timeout: std::time::Duration) -> io::Result<UiEvent> {
         Ok(self.events.pop_front().unwrap())
     }
 }

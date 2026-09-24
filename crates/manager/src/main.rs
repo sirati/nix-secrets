@@ -1,7 +1,7 @@
 use nix_secrets_core::Schema;
 use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_manager::{
-    cli, client::BackendClient, command, controller::Controller, startup, ui,
+    async_ui::AsyncWriter, cli, client::BackendClient, command, controller::Controller, startup, ui,
 };
 use std::env;
 use std::ffi::OsString;
@@ -92,7 +92,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         known_hosts,
     )?;
     let rows = controller.rows()?;
-    ui::run(rows, &mut controller)?;
+    let mut writer = AsyncWriter::spawn(controller, local_socket);
+    ui::run(rows, &mut writer)?;
     Ok(())
 }
 

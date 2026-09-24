@@ -1,6 +1,16 @@
 use super::*;
 
 #[test]
+fn idle_ticks_do_not_redraw_the_terminal() {
+    let mut frontend = FakeFrontend {
+        events: VecDeque::from([UiEvent::Tick, UiEvent::Tick, UiEvent::Escape]),
+        draws: 0,
+    };
+    drive(&mut frontend, &mut writer(), &mut model(false)).unwrap();
+    assert_eq!(frontend.draws, 1);
+}
+
+#[test]
 fn lost_lease_drops_the_modal_and_reports_expiry() {
     let mut frontend = FakeFrontend {
         events: VecDeque::from([UiEvent::Tick, UiEvent::Escape]),

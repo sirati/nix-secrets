@@ -9,7 +9,7 @@ pub mod store;
 
 pub use approval::{ApprovalBroker, BrokerError};
 pub use approval_types::{ApprovalRequest, ApprovalStatus, Claim, Decision};
-pub use backend::{Backend, Request, Response};
+pub use backend::{Backend, BackendEvent, Request, Response};
 pub use schema::{
     ConsumerConstraints, Destination, GeneratedSecret, GeneratedSecretSpec, GeneratedSecretType,
     LeafSpec, Schema, SchemaError, SchemaLoadError, SecretKind, SecretPath, SecretSpec,

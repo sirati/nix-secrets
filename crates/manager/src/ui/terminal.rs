@@ -36,12 +36,13 @@ impl Frontend for CrosstermFrontend {
         self.terminal.draw(|frame| render(frame, model)).map(|_| ())
     }
 
-    fn read(&mut self) -> io::Result<UiEvent> {
+    fn read(&mut self, timeout: std::time::Duration) -> io::Result<UiEvent> {
         loop {
-            if !event::poll(std::time::Duration::from_millis(250))? {
+            if !event::poll(timeout)? {
                 return Ok(UiEvent::Tick);
             }
             match event::read()? {
+                Event::Resize(_, _) => return Ok(UiEvent::Refresh),
                 Event::Paste(value) => return Ok(UiEvent::Paste(value.into_bytes())),
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Up => return Ok(UiEvent::Up),

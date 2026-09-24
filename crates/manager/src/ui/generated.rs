@@ -35,7 +35,7 @@ pub(super) fn choose(
             return Action::Continue;
         }
     };
-    match writer.generate(&path, kind) {
+    match writer.generate_for(&path, kind, replacing) {
         Ok(value) => {
             model.mode = Mode::GeneratedPreview {
                 path,

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 // Bump this when the backend protocol or its persisted document format becomes
 // incompatible with a running backend. The socket name keeps older processes
 // and their active clients untouched while a compatible backend starts.
-const BACKEND_COMPATIBILITY_VERSION: u32 = 2;
+const BACKEND_COMPATIBILITY_VERSION: u32 = 3;
 
 pub fn socket_name(repository: &Path) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
@@ -258,7 +258,7 @@ mod tests {
         let repository = path();
         let versioned = repository.with_file_name(socket_name(&repository));
         let legacy =
-            repository.with_file_name(socket_name(&repository).replace("backend-v2-", "backend-"));
+            repository.with_file_name(socket_name(&repository).replace("backend-v3-", "backend-"));
         let old_listener = UnixListener::bind(&legacy).unwrap();
         let mut launcher = FakeLauncher {
             path: versioned.clone(),

@@ -1,7 +1,7 @@
 use nix_secrets_core::framing::{read_json, write_json};
 use nix_secrets_core::{
-    ApprovalRequest, ApprovalStatus, Decision, EncryptedSecret as StoredSecret, GeneratedPublicKey,
-    PublicInfoRecord, Request, Response, SecretPath,
+    ApprovalRequest, ApprovalStatus, BackendEvent, Decision, EncryptedSecret as StoredSecret,
+    GeneratedPublicKey, PublicInfoRecord, Request, Response, SecretPath,
 };
 use nix_secrets_crypto::{encrypt_secret, CryptoProvider, Recipient};
 use std::collections::BTreeMap;
@@ -13,6 +13,30 @@ pub struct BackendClient {
 }
 
 impl BackendClient {
+    pub fn subscribe_changes(&mut self) -> io::Result<()> {
+        match self.exchange(&Request::SubscribeChanges)? {
+            Response::Subscribed => Ok(()),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn next_change(&mut self) -> io::Result<BackendEvent> {
+        loop {
+            match read_json(&mut self.stream)? {
+                Some(Response::Change { update }) => return Ok(update),
+                Some(Response::Heartbeat) => {}
+                Some(Response::Error { message }) => return Err(io::Error::other(message)),
+                Some(response) => return Err(unexpected(response)),
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "change stream closed",
+                    ))
+                }
+            }
+        }
+    }
     pub fn list_public_info(&mut self) -> io::Result<BTreeMap<String, PublicInfoRecord>> {
         match self.exchange(&Request::ListPublicInfo)? {
             Response::PublicInfoEntries { entries } => Ok(entries),
@@ -192,6 +216,14 @@ impl BackendClient {
         })? {
             Response::ApprovalClaimed { lease_id, .. } => Ok(Some((request, lease_id))),
             Response::Error { .. } => Ok(None),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn has_pending_approvals(&mut self) -> io::Result<bool> {
+        match self.exchange(&Request::PollApprovals)? {
+            Response::Approvals { requests } => Ok(!requests.is_empty()),
+            Response::Error { message } => Err(io::Error::other(message)),
             response => Err(unexpected(response)),
         }
     }

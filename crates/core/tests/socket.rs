@@ -1,7 +1,7 @@
 mod common;
 
 use nix_secrets_core::framing::{read_json, write_json};
-use nix_secrets_core::{ApprovalRequest, Backend, Request, Response, SecretStore};
+use nix_secrets_core::{ApprovalRequest, Backend, BackendEvent, Request, Response, SecretStore};
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -132,6 +132,65 @@ fn socket_frontends_receive_and_atomically_claim_an_approval() {
 fn call(stream: &mut UnixStream, request: Request) -> Response {
     write_json(stream, &request).unwrap();
     read_json(stream).unwrap().unwrap()
+}
+
+#[test]
+fn subscriber_receives_changes_without_polling() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("changes.sock");
+    let backend = match Backend::bind(
+        &socket,
+        common::schema(),
+        SecretStore::new(directory.path().join("nix-secrets.toml")),
+    ) {
+        Ok(backend) => backend,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("cannot bind test backend: {error}"),
+    };
+    thread::spawn(move || backend.serve().unwrap());
+    let mut watcher = UnixStream::connect(&socket).unwrap();
+    watcher
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    assert!(matches!(
+        call(&mut watcher, Request::SubscribeChanges),
+        Response::Subscribed
+    ));
+    assert!(
+        read_json::<Response>(&mut watcher).is_err(),
+        "idle subscription received a poll frame"
+    );
+
+    let mut writer = UnixStream::connect(&socket).unwrap();
+    assert!(matches!(
+        call(
+            &mut writer,
+            Request::Set {
+                path: common::path(),
+                envelope: common::envelope("one")
+            }
+        ),
+        Response::Updated
+    ));
+    assert!(matches!(
+        read_json::<Response>(&mut watcher).unwrap(),
+        Some(Response::Change { update: BackendEvent::SecretChanged { path, set: true } })
+            if path == common::path().to_string()
+    ));
+    let approval = ApprovalRequest {
+        id: "push-request".into(),
+        target: "host".into(),
+        secrets: vec![common::path().to_string()],
+    };
+    assert!(matches!(
+        call(&mut writer, Request::SubmitApproval { request: approval }),
+        Response::ApprovalState { .. }
+    ));
+    assert!(matches!(
+        read_json::<Response>(&mut watcher).unwrap(),
+        Some(Response::Change { update: BackendEvent::ApprovalRequested { request } })
+            if request.id == "push-request"
+    ));
 }
 
 #[test]
