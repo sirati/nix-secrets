@@ -325,12 +325,22 @@ fn rejects_empty_age_ciphertext() {
 #[test]
 fn stores_and_removes_generated_task_input() {
     let directory = tempfile::tempdir().unwrap();
-    let store = SecretStore::new(directory.path().join("nix-secrets.toml"));
+    let store_path = directory.path().join("nix-secrets.toml");
+    let store = SecretStore::new(&store_path);
     let schema = generated_schema();
     let path = SecretPath::parse("host.services.backup.storage-key").unwrap();
     let envelope = common::envelope("password");
     store.set(&schema, &path, envelope.clone()).unwrap();
-    assert_eq!(store.get(&path).unwrap(), Some(envelope));
+    assert_eq!(store.get(&path).unwrap(), Some(envelope.clone()));
+    store
+        .set_public_key_if_version(&schema, &path, ED25519_PUBLIC.into(), &envelope.version_id)
+        .unwrap();
+    let document = std::fs::read_to_string(&store_path).unwrap();
+    assert!(document.contains("[secrets.\"host.services.backup.storage-key\"]"));
+    assert!(document.contains("age_ciphertext = "));
+    assert!(document.contains(&format!("public_key = \"{ED25519_PUBLIC}\"")));
+    assert!(!document.contains("private_key = "));
+    assert!(!document.contains("OPENSSH PRIVATE KEY"));
     assert!(store.remove(&schema, &path).unwrap());
 }
 
@@ -345,7 +355,7 @@ fn generated_schema() -> nix_secrets_core::Schema {
                 "recipientIds": ["recipient-id"], "consumerUnits": [],
                 "generatedSecret": {
                     "type": "storage-box-ssh-key",
-                    "output": { "path": "/persistent/secrets/backup/backup/key", "category": "backup", "owner": "backup", "group": "backup", "mode": "0400" },
+                    "output": { "path": "/persistent/secrets/backup/backup/key", "category": "backup", "owner": "backup", "group": "backup", "mode": "0400", "contentType": "openssh-private-key" },
                     "bootstrap": { "host": "box.example", "port": 23, "user": "u1", "hostPublicKeys": [KEY] }
                 }
             }}}

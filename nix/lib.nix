@@ -255,7 +255,8 @@ let
                 field: !(builtins.elem field [ "explanation" "facing" "type" ])
               ) (attrNames presentation);
               inferredType =
-                if (value.valueType or null) == "password" then "passphrase"
+                if (value.generatedSecret.type or null) == "storage-box-ssh-key" then "passphrase"
+                else if (value.valueType or null) == "password" then "passphrase"
                 else if (value.kind or null) == "public-info" then
                   if (value.destination.contentType or null) == "openssh-public-key" then "public-key" else "public-info"
                 else if ((value.destination or (value.generatedSecret.output or { })).contentType or null) == "openssh-private-key" then "private-key"

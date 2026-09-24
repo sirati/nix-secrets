@@ -12,20 +12,25 @@ impl Controller {
             .schema
             .leaf(&parsed)
             .map_err(|error| error.to_string())?;
-        let (value_type, constraints, ids, keys) = match leaf {
+        let (value_type, constraints, ids, keys, external_input_required) = match leaf {
             LeafSpec::Stored(spec) => (
                 spec.value_type,
                 spec.consumer_constraints,
                 spec.recipient_ids,
                 spec.recipient_public_keys,
+                spec.external_input_required,
             ),
             LeafSpec::Generated(spec) => (
                 spec.value_type,
                 spec.consumer_constraints,
                 spec.recipient_ids,
                 spec.recipient_public_keys,
+                spec.external_input_required,
             ),
         };
+        if external_input_required {
+            return Err("this value must be supplied from the external system".into());
+        }
         if value_type != Some(ValueType::Password) {
             return Err("not a password leaf".into());
         }
@@ -124,10 +129,21 @@ impl SecretWriter for Controller {
     fn generate(&mut self, path: &str, kind: GenerateKind) -> Result<Zeroizing<Vec<u8>>, String> {
         let path = SecretPath::parse(path).map_err(|error| error.to_string())?;
         let leaf = self.schema.leaf(&path).map_err(|error| error.to_string())?;
-        let (value_type, constraints) = match leaf {
-            LeafSpec::Stored(spec) => (spec.value_type, spec.consumer_constraints),
-            LeafSpec::Generated(spec) => (spec.value_type, spec.consumer_constraints),
+        let (value_type, constraints, external_input_required) = match leaf {
+            LeafSpec::Stored(spec) => (
+                spec.value_type,
+                spec.consumer_constraints,
+                spec.external_input_required,
+            ),
+            LeafSpec::Generated(spec) => (
+                spec.value_type,
+                spec.consumer_constraints,
+                spec.external_input_required,
+            ),
         };
+        if external_input_required {
+            return Err("this value must be supplied from the external system".into());
+        }
         if value_type != Some(ValueType::Password) {
             return Err(format!("{path} is not a password leaf"));
         }

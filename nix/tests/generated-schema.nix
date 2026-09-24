@@ -13,6 +13,7 @@ let
           owner = "backup";
           group = "backup";
           mode = "0400";
+          contentType = "openssh-private-key";
         };
         bootstrap = {
           host = "u123.storagebox.example";
@@ -39,6 +40,7 @@ let
     deployment = { host = "host"; destination = "secrets@host"; port = 22; };
     defaultRecipientPublicKeys = [ key ];
     services.backup.secrets.storage-key = (service 23 [ key ]).secrets.storage-key // {
+      externalInputRequired = true;
       identity = {
         service = "mail";
         responsibility = "backup";
@@ -60,4 +62,5 @@ assert semantic.identity.user == null;
 assert semantic.identity.service == "mail";
 assert semantic.identity.namespace == "shared";
 assert semantic.presentation.type == "passphrase";
+assert semantic.presentation.facing == "external";
 true

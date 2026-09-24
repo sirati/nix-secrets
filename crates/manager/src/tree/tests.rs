@@ -107,8 +107,16 @@ fn required_view_uses_external_anchor_flag_not_password_or_generator_kind() {
         && row.can_generate
         && !row.external_input_required));
     assert!(rows.iter().any(|row| row.name == "storagebox-access"
-        && row.can_generate
+        && !row.can_generate
         && row.external_input_required));
+    let mut model = crate::model::Model::new(rows.clone());
+    model.set_filter(crate::model::ViewFilter::All);
+    let storage_box = model
+        .rows
+        .iter()
+        .find(|row| row.name == "storagebox-access")
+        .unwrap();
+    assert_eq!(storage_box.category, RowCategory::Password);
     let model = crate::model::Model::new(rows);
     let required = model
         .visible_rows()

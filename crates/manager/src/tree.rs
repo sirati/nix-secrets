@@ -163,7 +163,8 @@ fn visit(
                 set.contains(path)
             },
             is_task: false,
-            can_generate: leaf.value_type == Some(ValueType::Password),
+            can_generate: leaf.value_type == Some(ValueType::Password)
+                && !leaf.external_input_required,
             can_copy_public: leaf.destination.content_type.as_deref()
                 == Some("openssh-private-key"),
             output_is_set: None,
@@ -205,7 +206,8 @@ fn visit(
                 path: Some(path.to_owned()),
                 is_set: set.contains(path),
                 is_task: true,
-                can_generate: leaf.value_type == Some(ValueType::Password),
+                can_generate: leaf.value_type == Some(ValueType::Password)
+                    && !leaf.external_input_required,
                 can_copy_public: false,
                 output_is_set: None,
                 description: leaf.description.clone(),

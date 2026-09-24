@@ -261,6 +261,12 @@ fn bulk_generation_only_requests_unset_passwords() {
     key.category = RowCategory::Key;
     key.can_generate = false;
     model.rows.push(key);
+    let mut external = model.rows[0].clone();
+    external.name = "external-password".into();
+    external.path = Some("h.services.s.external-password".into());
+    external.external_input_required = true;
+    external.can_generate = false;
+    model.rows.push(external);
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('G'), &mut writer);
     assert!(matches!(model.mode, Mode::BulkGenerateConfirm { .. }));
