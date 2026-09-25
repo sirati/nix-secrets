@@ -124,6 +124,15 @@ pub enum Mode {
 
 mod debug;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Activity {
+    /// For example `Decrypting host.services.x.y`.
+    pub label: String,
+    /// Whether the step may wait for a 1Password authorization prompt.
+    pub waits_for_one_password: bool,
+    pub started: std::time::Instant,
+}
+
 pub struct Model {
     pub rows: Vec<Row>,
     pub selected: usize,
@@ -141,6 +150,8 @@ pub struct Model {
     pub facets: BTreeMap<Attribute, Facet>,
     pub profiles: nix_secrets_core::ProfileSnapshot,
     pub active_profile: Option<String>,
+    /// The slow background operation in progress, shown as an overlay.
+    pub activity: Option<Activity>,
 }
 
 pub struct VisibleRow {
@@ -215,6 +226,7 @@ impl Model {
             facets: BTreeMap::new(),
             profiles: nix_secrets_core::ProfileSnapshot::default(),
             active_profile: None,
+            activity: None,
         };
         if structured {
             model.rebuild_tree();

@@ -88,7 +88,54 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
         draw_rows(frame, zones.keys, rows, model.hover, &mut hits);
     }
     render_modal(frame, model, area, &mut hits);
+    render_activity(frame, model, area, &mut hits);
     hits
+}
+
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+pub(super) fn activity_text(activity: &crate::model::Activity) -> String {
+    let elapsed = activity.started.elapsed();
+    let frame = SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()];
+    let waiting = if activity.waits_for_one_password {
+        " — waiting for 1Password approval if prompted"
+    } else {
+        ""
+    };
+    format!(
+        "{frame} {}{waiting}… {}s",
+        activity.label,
+        elapsed.as_secs()
+    )
+}
+
+/// A progress strip at the top that leaves the rest of the screen usable.
+fn render_activity(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits: &mut HitMap) {
+    let Some(activity) = &model.activity else {
+        return;
+    };
+    if area.height < 3 || area.width < 4 {
+        return;
+    }
+    let text = activity_text(activity);
+    let width = area.width.min(90);
+    let inner = width.saturating_sub(2).max(1) as usize;
+    let lines = text.chars().count().div_ceil(inner).clamp(1, 3) as u16;
+    let strip = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y,
+        width,
+        height: (lines + 2).min(area.height),
+    };
+    frame.render_widget(Clear, strip);
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(Wrap { trim: false })
+            .block(Block::default().title("Working").borders(Borders::ALL)),
+        strip,
+    );
+    hits.add(strip, MouseTarget::Busy);
 }
 
 fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits: &mut HitMap) {

@@ -77,10 +77,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     progress("Evaluating Nix...")?;
     let schema = evaluate(&invocation.ssh_args, &repository)?;
-    let provider = invocation
-        .identity
-        .map(AgeCommandProvider::identity_file)
-        .unwrap_or_default();
+    let provider = one_password_scope(
+        invocation
+            .identity
+            .map(AgeCommandProvider::identity_file)
+            .unwrap_or_default(),
+        invocation.shared_session,
+    );
     let known_hosts = vec![
         home.join(".ssh/known_hosts"),
         PathBuf::from("/etc/ssh/ssh_known_hosts"),
@@ -168,4 +171,21 @@ fn runtime_directory(home: &Path) -> PathBuf {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local/state"))
+}
+
+/// Starts each 1Password decryption in its own session through the
+/// `nix-secrets-1password` launcher installed next to this binary, so an
+/// authorization covers one decryption and the prompt names nix-secrets.
+fn one_password_scope(provider: AgeCommandProvider, shared: bool) -> AgeCommandProvider {
+    if shared || !provider.uses_one_password() {
+        return provider;
+    }
+    let launcher = env::current_exe()
+        .ok()
+        .and_then(|path| Some(path.parent()?.join("nix-secrets-1password")))
+        .filter(|path| path.is_file());
+    match launcher {
+        Some(launcher) => provider.through(launcher, vec![]),
+        None => provider,
+    }
 }

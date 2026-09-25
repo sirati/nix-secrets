@@ -55,10 +55,14 @@ pub struct AsyncWriter {
     approvals: Vec<ApprovalRequest>,
     completions: Vec<Completion>,
     busy: bool,
+    activity: Option<crate::model::Activity>,
+    /// Whether decryption goes through 1Password and may wait for approval.
+    one_password: bool,
 }
 
 impl AsyncWriter {
     pub fn spawn(mut controller: Controller, socket: PathBuf) -> Self {
+        let one_password = controller.uses_one_password();
         let (commands, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
         std::thread::spawn(move || {
@@ -128,6 +132,8 @@ impl AsyncWriter {
             approvals: vec![],
             completions: vec![],
             busy: false,
+            activity: None,
+            one_password,
         }
     }
 
@@ -140,6 +146,7 @@ impl AsyncWriter {
                 Event::Completion(result) => {
                     if !matches!(result, Completion::BulkProgress { .. }) {
                         self.busy = false;
+                        self.activity = None;
                     }
                     self.completions.push(result);
                 }
@@ -155,10 +162,12 @@ impl AsyncWriter {
         if self.busy {
             return Err("another operation is still running".into());
         }
+        let activity = describe(&command, self.one_password);
         self.commands
             .send(command)
             .map_err(|_| "backend worker stopped".to_string())?;
         self.busy = true;
+        self.activity = activity;
         Ok(())
     }
 }
@@ -228,6 +237,10 @@ impl SecretWriter for AsyncWriter {
         }) {
             Ok(()) => {
                 self.busy = true;
+                self.activity = Some(activity(
+                    format!("Encrypting and saving {path}"),
+                    self.one_password,
+                ));
                 Ok(Action::Queued)
             }
             Err(mpsc::SendError(Command::Write { value, .. })) => {
@@ -283,6 +296,41 @@ impl SecretWriter for AsyncWriter {
         self.queue(Command::CopyValue(Zeroizing::new(value.to_vec())))?;
         Err(OPERATION_QUEUED.into())
     }
+
+    fn activity(&mut self) -> Option<crate::model::Activity> {
+        self.pump();
+        self.activity.clone()
+    }
+}
+
+fn activity(label: String, waits_for_one_password: bool) -> crate::model::Activity {
+    crate::model::Activity {
+        label,
+        waits_for_one_password,
+        started: std::time::Instant::now(),
+    }
+}
+
+/// Names the slow commands; quick clipboard and profile edits show nothing.
+fn describe(command: &Command, one_password: bool) -> Option<crate::model::Activity> {
+    let (label, decrypts) = match command {
+        Command::Reveal(path) => (format!("Decrypting {path}"), true),
+        Command::Approval(true) => ("Decrypting values for deployment".into(), true),
+        Command::Approval(false) => ("Rejecting deployment request".into(), false),
+        // Saving verifies private keys and task values by decrypting them.
+        Command::Write { path, .. } => (format!("Encrypting and saving {path}"), true),
+        Command::Delete(path) => (format!("Deleting {path}"), false),
+        Command::Generate { path, .. } => (format!("Generating {path}"), false),
+        Command::BulkGenerate { paths, .. } => (
+            format!("Generating {} missing passwords", paths.len()),
+            false,
+        ),
+        Command::CopyPublic(_)
+        | Command::CopyValue(_)
+        | Command::SaveProfile { .. }
+        | Command::DeleteProfile { .. } => return None,
+    };
+    Some(activity(label, decrypts && one_password))
 }
 
 #[cfg(test)]

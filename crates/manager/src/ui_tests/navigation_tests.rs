@@ -245,3 +245,39 @@ fn mouse_clicks_select_without_editing_and_shortcuts_use_keyboard_behavior() {
     );
     assert!(matches!(model.mode, Mode::Help { .. }));
 }
+
+#[test]
+fn ticks_copy_the_writer_activity_into_the_model() {
+    struct Busy(Writer, u8);
+    impl SecretWriter for Busy {
+        fn write(
+            &mut self,
+            path: &str,
+            value: Zeroizing<Vec<u8>>,
+        ) -> Result<Action, (String, Zeroizing<Vec<u8>>)> {
+            self.0.write(path, value)
+        }
+        fn activity(&mut self) -> Option<crate::model::Activity> {
+            self.1 += 1;
+            (self.1 == 1).then(|| crate::model::Activity {
+                label: "Decrypting h.services.s.key".into(),
+                waits_for_one_password: true,
+                started: std::time::Instant::now(),
+            })
+        }
+    }
+    let mut frontend = FakeFrontend {
+        events: VecDeque::from([UiEvent::Tick, UiEvent::Escape]),
+        draws: 0,
+    };
+    let mut model = model(true);
+    let mut writer = Busy(writer(), 0);
+    drive(&mut frontend, &mut writer, &mut model).unwrap();
+    assert_eq!(
+        model
+            .activity
+            .as_ref()
+            .map(|activity| activity.label.as_str()),
+        Some("Decrypting h.services.s.key")
+    );
+}

@@ -113,7 +113,15 @@ The default key provider uses `age-plugin-1p`. Encryption needs only the SSH
 public key. During decryption the plugin retrieves the matching private key
 from 1Password through `op`; neither the TUI nor the repository needs a private
 key file. This uses 1Password CLI authorization rather than the SSH-agent
-signing API. Per-request prompts depend on 1Password policy and session state.
+signing API. On Linux, 1Password binds a CLI authorization to the terminal it
+came from, or to the session leader when there is no terminal, for 10 minutes
+of use. The TUI therefore runs each 1Password decryption through
+`nix-secrets-1password`, which starts age as the leader of a new session
+without a terminal. Each approval then covers exactly one decryption. It never
+reaches your shell, and the prompt names `nix-secrets-1password` as the
+requester. Pass `--1password-shared-session` to reuse the terminal's
+10-minute authorization instead. While a slow operation runs, a Working strip
+shows its name and elapsed time.
 See [AGE-PLUGIN-1P-REVIEW.md](AGE-PLUGIN-1P-REVIEW.md).
 
 The flake keeps runtime tools opt in. Use `.#nix-secrets-1password` for the

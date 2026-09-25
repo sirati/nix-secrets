@@ -38,6 +38,11 @@ A target deployer requests one server's values.
 y  Approve the verified target and displayed changes
 n / Esc  Reject the request
 
+WORKING
+A strip at the top names a running decryption or save and counts seconds.
+It may be waiting for a 1Password approval prompt. The rest of the screen
+stays usable.
+
 NOTICES
 A success notice closes on the next key or click, which then acts as usual:
 ↓ moves the selection and S opens profiles. Esc and paste only close it.
