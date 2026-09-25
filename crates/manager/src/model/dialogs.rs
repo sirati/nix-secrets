@@ -49,3 +49,18 @@ impl Model {
         }
     }
 }
+
+impl Model {
+    /// Moves a dialog scroll offset by one line, never past the last line the
+    /// dialog can show. An offset from a previous, longer dialog is clamped
+    /// first.
+    pub fn scrolled(&self, scroll: u16, down: bool) -> u16 {
+        let limit = self.scroll_limit.get();
+        let scroll = scroll.min(limit);
+        if down {
+            scroll.saturating_add(1).min(limit)
+        } else {
+            scroll.saturating_sub(1)
+        }
+    }
+}

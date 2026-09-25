@@ -20,7 +20,9 @@ pub(super) fn prompt(model: &Model) -> String {
             if let Some(row) = model.selected() {
                 let mut text = format!("{}\n\n", model.selected_display_path().unwrap_or_else(|| row.name.clone()));
                 for attribute in crate::model::Attribute::ALL {
-                    text.push_str(&format!("{}: {}\n", attribute.label(), attribute.value(row)));
+                    if let Some(value) = attribute.value(row) {
+                        text.push_str(&format!("{}: {value}\n", attribute.label()));
+                    }
                 }
                 text.push_str(&format!("\nStorage identifier: {}", row.path.as_deref().unwrap_or("(none)")));
                 text
@@ -79,7 +81,7 @@ pub(super) fn selector_items(model: &Model) -> Option<Vec<String>> {
     use crate::model::{Attribute, FacetMode};
     match &model.mode {
         Mode::FacetCategories { selected } => Some(
-            Attribute::ALL
+            Attribute::GROUPING
                 .iter()
                 .enumerate()
                 .map(|(index, attribute)| {

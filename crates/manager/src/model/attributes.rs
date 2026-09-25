@@ -52,6 +52,25 @@ impl Attribute {
         Self::Status,
     ];
 
+    /// Attributes that can form tree levels and filter facets. Explanation is
+    /// free text: it stays searchable and in the properties view only.
+    pub const GROUPING: [Self; 10] = [
+        Self::Host,
+        Self::Scope,
+        Self::User,
+        Self::Service,
+        Self::Responsibility,
+        Self::Namespace,
+        Self::Name,
+        Self::Facing,
+        Self::Type,
+        Self::Status,
+    ];
+
+    pub fn groups(self) -> bool {
+        Self::GROUPING.contains(&self)
+    }
+
     pub const DEFAULT_TREE: [Self; 6] = [
         Self::Host,
         Self::Scope,
@@ -77,10 +96,18 @@ impl Attribute {
         }
     }
 
-    pub fn value(self, row: &Row) -> String {
+    /// The attribute's value for a row, or `None` when it does not apply, such
+    /// as the user of a system service. Inapplicable attributes add no tree
+    /// level, crumb, facet value, or properties line.
+    pub fn value(self, row: &Row) -> Option<String> {
+        self.raw_value(row)
+            .filter(|value| !value.is_empty() && value != "(none)")
+    }
+
+    fn raw_value(self, row: &Row) -> Option<String> {
         let identity = row.identity.as_ref();
         let presentation = row.presentation.as_ref();
-        match self {
+        Some(match self {
             Self::Host => identity.map(|value| value.host.clone()).unwrap_or_else(|| {
                 row.path
                     .as_deref()
@@ -100,9 +127,7 @@ impl Attribute {
                     }
                     .into()
                 }),
-            Self::User => identity
-                .and_then(|value| value.user.clone())
-                .unwrap_or_else(|| "(none)".into()),
+            Self::User => return identity.and_then(|value| value.user.clone()),
             Self::Service => identity
                 .map(|value| value.service.clone())
                 .unwrap_or_else(|| {
@@ -117,16 +142,15 @@ impl Attribute {
             Self::Responsibility => identity
                 .map(|value| value.responsibility.clone())
                 .unwrap_or_else(|| "main".into()),
-            Self::Namespace => identity
-                .and_then(|value| value.namespace.clone())
-                .unwrap_or_else(|| "(none)".into()),
+            Self::Namespace => return identity.and_then(|value| value.namespace.clone()),
             Self::Name => identity
                 .map(|value| value.name.clone())
                 .unwrap_or_else(|| row.name.clone()),
-            Self::Explanation => presentation
-                .map(|value| value.explanation.clone())
-                .or_else(|| row.description.clone())
-                .unwrap_or_else(|| "(none)".into()),
+            Self::Explanation => {
+                return presentation
+                    .map(|value| value.explanation.clone())
+                    .or_else(|| row.description.clone())
+            }
             Self::Facing => presentation
                 .map(|value| value.facing.clone())
                 .unwrap_or_else(|| {
@@ -151,7 +175,7 @@ impl Attribute {
                     .into()
                 }),
             Self::Status => if row.is_set { "set" } else { "unset" }.into(),
-        }
+        })
     }
 }
 

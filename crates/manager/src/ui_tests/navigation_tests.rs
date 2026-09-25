@@ -281,3 +281,42 @@ fn ticks_copy_the_writer_activity_into_the_model() {
         Some("Decrypting h.services.s.key")
     );
 }
+
+#[test]
+fn clicking_a_selected_unset_input_value_opens_entry() {
+    let mut model = model(false);
+    let mut second = model.rows[0].clone();
+    second.name = "other".into();
+    second.path = Some("h.services.s.other".into());
+    model.rows.push(second);
+    let mut writer = writer();
+    let click = |model: &mut Model, writer: &mut Writer, index| {
+        reduce(model, UiEvent::Click(MouseTarget::Tree(index)), writer);
+    };
+    click(&mut model, &mut writer, 1);
+    assert!(
+        matches!(model.mode, Mode::Browse),
+        "first click only selects"
+    );
+    click(&mut model, &mut writer, 1);
+    assert!(
+        matches!(model.mode, Mode::Edit { .. }),
+        "second click opens entry"
+    );
+
+    model.mode = Mode::Browse;
+    model.rows[1].external_input_required = false;
+    click(&mut model, &mut writer, 1);
+    assert!(
+        matches!(model.mode, Mode::Browse),
+        "generated values are never entered by clicking"
+    );
+    model.rows[1].external_input_required = true;
+    model.rows[1].is_set = true;
+    click(&mut model, &mut writer, 1);
+    assert!(
+        matches!(model.mode, Mode::Browse),
+        "set values are not replaced"
+    );
+    assert!(writer.writes.is_empty());
+}

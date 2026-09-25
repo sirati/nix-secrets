@@ -42,11 +42,11 @@ pub(super) fn handle(
     ) {
         match event {
             UiEvent::Up => {
-                model.modal_scroll = model.modal_scroll.saturating_sub(1);
+                model.modal_scroll = model.scrolled(model.modal_scroll, false);
                 return Ok(Action::Continue);
             }
             UiEvent::Down => {
-                model.modal_scroll = model.modal_scroll.saturating_add(1);
+                model.modal_scroll = model.scrolled(model.modal_scroll, true);
                 return Ok(Action::Continue);
             }
             _ => {}
@@ -69,15 +69,27 @@ fn notice_input(
             UiEvent::Enter | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Enter)),
         ) => model.acknowledge(),
         (NoticeSeverity::Failure, UiEvent::Up) => {
-            model.modal_scroll = model.modal_scroll.saturating_sub(1)
+            model.modal_scroll = model.scrolled(model.modal_scroll, false)
         }
         (NoticeSeverity::Failure, UiEvent::Down) => {
-            model.modal_scroll = model.modal_scroll.saturating_add(1)
+            model.modal_scroll = model.scrolled(model.modal_scroll, true)
         }
         (NoticeSeverity::Failure, _) => {}
-        // Pasting in the tree starts a write and Esc in the tree quits, so both
-        // only close the notice.
-        (NoticeSeverity::Info, UiEvent::Paste(_) | UiEvent::Escape) => model.acknowledge(),
+        // Esc in the tree quits, so it only closes the notice.
+        (NoticeSeverity::Info, UiEvent::Escape) => model.acknowledge(),
+        // A paste into the tree writes at once, so there it only closes the
+        // notice; an open entry field still receives it.
+        (NoticeSeverity::Info, event @ (UiEvent::Paste(_) | UiEvent::PasteRequest)) => {
+            model.acknowledge();
+            if model.message.is_none()
+                && matches!(
+                    model.mode,
+                    Mode::Edit { .. } | Mode::Search { .. } | Mode::ProfileSave { .. }
+                )
+            {
+                return reduce(model, event, writer);
+            }
+        }
         (NoticeSeverity::Info, event) => {
             model.acknowledge();
             // With another notice queued, the key only advances to it.

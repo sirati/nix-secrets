@@ -15,7 +15,10 @@ pub fn reordered_rows(leaves: Vec<Row>, order: &[Attribute]) -> Vec<Row> {
             if *attribute == Attribute::Name && position + 1 == order.len() {
                 continue;
             }
-            cursor = cursor.children.entry(attribute.value(&leaf)).or_default();
+            // An inapplicable attribute adds no level: the row joins the parent group.
+            if let Some(value) = attribute.value(&leaf) {
+                cursor = cursor.children.entry(value).or_default();
+            }
         }
         cursor.leaves.push(leaf);
     }

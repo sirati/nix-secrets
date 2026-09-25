@@ -44,7 +44,15 @@ The program evaluates the repository and consumes this shape:
 
 Leaves are secrets. The TUI presents the structure as a file tree and marks
 each leaf `set` in green or `unset` in red. Pressing Enter opens a masked input
-editor. Pasting while a leaf is selected sets it from the clipboard. Replacing
+editor. Pasting while a leaf is selected sets it from the clipboard, and a
+paste in the entry field inserts the pasted text. Ctrl+V reads the local
+clipboard directly with `wl-paste`, `xclip`, `xsel` or `pbpaste`. It works even
+when the terminal refuses to paste, and one trailing newline is dropped.
+Clicking a selected unset input value again opens its entry field. While a
+search is active, the status line counts matches and those hidden by filters.
+Attributes that do not apply to a value, such as the user of a system
+service, add no tree level or filter value; a filter on them leaves such
+values visible. Replacing
 an existing value requires confirmation.
 Press `d` to delete a selected value after confirmation, `r` to reveal it,
 `c` to copy it, or `p` to copy the public half of a stored OpenSSH private key

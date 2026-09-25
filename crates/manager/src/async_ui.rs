@@ -297,6 +297,11 @@ impl SecretWriter for AsyncWriter {
         Err(OPERATION_QUEUED.into())
     }
 
+    // The clipboard is local and quick to read, so this runs on the UI thread.
+    fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
+        crate::clipboard::paste(false)
+    }
+
     fn activity(&mut self) -> Option<crate::model::Activity> {
         self.pump();
         self.activity.clone()

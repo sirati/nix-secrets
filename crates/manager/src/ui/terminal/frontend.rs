@@ -76,6 +76,12 @@ impl Frontend for CrosstermFrontend {
                     KeyCode::Enter => return Ok(UiEvent::Enter),
                     KeyCode::Esc => return Ok(UiEvent::Escape),
                     KeyCode::Backspace => return Ok(UiEvent::Backspace),
+                    KeyCode::Char('v' | 'V')
+                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                    {
+                        return Ok(UiEvent::PasteRequest)
+                    }
+                    KeyCode::Char(_) if key.modifiers.contains(event::KeyModifiers::CONTROL) => {}
                     KeyCode::Char(character) => return Ok(UiEvent::Character(character)),
                     _ => {}
                 },

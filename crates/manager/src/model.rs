@@ -9,6 +9,7 @@ mod profiles;
 mod visibility;
 pub use attributes::{Attribute, Facet, FacetMode};
 use std::collections::BTreeMap;
+pub use visibility::SearchSummary;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NoticeSeverity {
@@ -139,6 +140,8 @@ pub struct Model {
     pub mode: Mode,
     pub message: Option<Notice>,
     pub modal_scroll: u16,
+    /// The furthest the open dialog can scroll, recorded by the last render.
+    pub scroll_limit: std::cell::Cell<u16>,
     pub hover: Option<crate::ui::MouseTarget>,
     pub notifications: VecDeque<Notice>,
     pub pending_approvals: VecDeque<ApprovalRequest>,
@@ -215,6 +218,7 @@ impl Model {
             mode: Mode::Browse,
             message: None,
             modal_scroll: 0,
+            scroll_limit: std::cell::Cell::new(u16::MAX),
             hover: None,
             notifications: VecDeque::new(),
             pending_approvals: VecDeque::new(),

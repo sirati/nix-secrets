@@ -18,8 +18,19 @@ pub(super) fn click(
         MouseTarget::Tree(index)
             if model.message.is_none() && matches!(model.mode, Mode::Browse) =>
         {
-            if index < model.visible_rows().len() {
-                model.selected = index;
+            if index >= model.visible_rows().len() {
+                return Action::Continue;
+            }
+            // The first click selects; clicking the selected row again opens
+            // entry when it is an unset value that needs operator input.
+            let again = model.selected == index;
+            model.selected = index;
+            if again
+                && model.selected().is_some_and(|row| {
+                    row.is_secret() && !row.is_set && row.external_input_required
+                })
+            {
+                model.begin_value(Vec::new());
             }
             Action::Continue
         }

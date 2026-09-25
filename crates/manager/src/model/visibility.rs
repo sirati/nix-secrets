@@ -8,9 +8,10 @@ impl Model {
             .collect()
     }
 
-    pub fn visible_tree_rows(&self) -> Vec<VisibleRow> {
+    /// Which filters each value row passes, with the branch rows above it.
+    fn row_checks(&self) -> Vec<(usize, Vec<usize>, RowChecks)> {
         let needle = self.search.to_ascii_lowercase();
-        let mut kept = std::collections::BTreeSet::new();
+        let mut result = Vec::new();
         let mut ancestors: Vec<usize> = Vec::new();
         for (index, row) in self.rows.iter().enumerate() {
             while ancestors
@@ -34,7 +35,13 @@ impl Model {
             let facets = self
                 .facets
                 .iter()
-                .all(|(attribute, facet)| facet.accepts(&attribute.value(row)));
+                // A facet filters only rows it applies to; e.g. a whitelist of
+                // users leaves system services visible.
+                .all(|(attribute, facet)| {
+                    attribute
+                        .value(row)
+                        .is_none_or(|value| facet.accepts(&value))
+                });
             let searchable = std::iter::once(row.name.as_str())
                 .chain(row.path.as_deref())
                 .chain(row.description.as_deref())
@@ -46,10 +53,50 @@ impl Model {
                 .any(|value| value.to_ascii_lowercase().contains(&needle))
                 || Attribute::ALL
                     .iter()
-                    .any(|attribute| attribute.value(row).to_ascii_lowercase().contains(&needle));
-            if category && audience && facets && searchable {
+                    .filter_map(|attribute| attribute.value(row))
+                    .any(|value| value.to_ascii_lowercase().contains(&needle));
+            result.push((
+                index,
+                ancestors.clone(),
+                RowChecks {
+                    category,
+                    audience,
+                    facets,
+                    searchable,
+                },
+            ));
+        }
+        result
+    }
+
+    /// While searching: how many values match the search, and how many of
+    /// those the type, audience, and attribute filters hide.
+    pub fn search_summary(&self) -> Option<SearchSummary> {
+        if self.search.is_empty() {
+            return None;
+        }
+        let mut summary = SearchSummary::default();
+        for (_, _, checks) in self.row_checks() {
+            if !checks.searchable {
+                continue;
+            }
+            summary.matches += 1;
+            if !(checks.category && checks.audience && checks.facets) {
+                summary.hidden += 1;
+                summary.hidden_by_type += usize::from(!checks.category);
+                summary.hidden_by_audience += usize::from(!checks.audience);
+                summary.hidden_by_facets += usize::from(!checks.facets);
+            }
+        }
+        Some(summary)
+    }
+
+    pub fn visible_tree_rows(&self) -> Vec<VisibleRow> {
+        let mut kept = std::collections::BTreeSet::new();
+        for (index, ancestors, checks) in self.row_checks() {
+            if checks.category && checks.audience && checks.facets && checks.searchable {
                 kept.insert(index);
-                kept.extend(ancestors.iter().copied());
+                kept.extend(ancestors);
             }
         }
         let raw = kept.into_iter().collect::<Vec<_>>();
@@ -132,5 +179,51 @@ impl Model {
             .collect::<Vec<_>>();
         parts.push(&current.label);
         Some(parts.join(" > "))
+    }
+}
+
+struct RowChecks {
+    category: bool,
+    audience: bool,
+    facets: bool,
+    searchable: bool,
+}
+
+/// Search matches that other filters hide. One value can be hidden by more
+/// than one filter, so the per-filter counts may add up to more than `hidden`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SearchSummary {
+    pub matches: usize,
+    pub hidden: usize,
+    pub hidden_by_type: usize,
+    pub hidden_by_audience: usize,
+    pub hidden_by_facets: usize,
+}
+
+impl SearchSummary {
+    pub fn text(&self) -> String {
+        let mut text = format!(
+            "{} {}",
+            self.matches,
+            if self.matches == 1 {
+                "match"
+            } else {
+                "matches"
+            }
+        );
+        if self.hidden > 0 {
+            let reasons = [
+                (self.hidden_by_type, "type"),
+                (self.hidden_by_audience, "audience"),
+                (self.hidden_by_facets, "attribute filters"),
+            ]
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, reason)| format!("{count} {reason}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+            text.push_str(&format!(" · {} hidden by filters ({reasons})", self.hidden));
+        }
+        text
     }
 }

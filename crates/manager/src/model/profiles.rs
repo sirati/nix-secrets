@@ -52,24 +52,29 @@ impl Model {
             .map(|value| {
                 Attribute::from_key(value).ok_or_else(|| format!("unknown tree attribute: {value}"))
             })
+            // Older profiles may group by explanation, which is no longer offered.
+            .filter(|attribute| attribute.as_ref().map_or(true, |item| item.groups()))
             .collect::<Result<_, _>>()?;
         self.facets = profile
             .facets
             .iter()
             .map(|(attribute, facet)| {
                 let attribute = Attribute::from_key(attribute).ok_or("unknown facet attribute")?;
-                Ok((
-                    attribute,
-                    Facet {
-                        mode: match facet.mode {
-                            ProfileFacetMode::All => FacetMode::All,
-                            ProfileFacetMode::Whitelist => FacetMode::Whitelist,
-                            ProfileFacetMode::Blacklist => FacetMode::Blacklist,
+                Ok(attribute.groups().then(|| {
+                    (
+                        attribute,
+                        Facet {
+                            mode: match facet.mode {
+                                ProfileFacetMode::All => FacetMode::All,
+                                ProfileFacetMode::Whitelist => FacetMode::Whitelist,
+                                ProfileFacetMode::Blacklist => FacetMode::Blacklist,
+                            },
+                            selected: facet.selected.clone(),
                         },
-                        selected: facet.selected.clone(),
-                    },
-                ))
+                    )
+                }))
             })
+            .filter_map(Result::transpose)
             .collect::<Result<_, &str>>()
             .map_err(str::to_owned)?;
         self.filter = match profile.view_filter {
@@ -87,8 +92,20 @@ impl Model {
     }
 
     pub fn profile_dirty(&self) -> bool {
-        self.active_profile
-            .as_ref()
-            .is_some_and(|name| self.profiles.profiles.get(name) != Some(&self.capture_profile()))
+        self.active_profile.as_ref().is_some_and(|name| {
+            self.profiles.profiles.get(name).map(normalized) != Some(self.capture_profile())
+        })
     }
+}
+
+/// A stored profile without attributes that no longer group, so a profile
+/// saved with `explanation` does not read as modified right after loading.
+fn normalized(profile: &ViewProfile) -> ViewProfile {
+    let groups = |key: &String| Attribute::from_key(key).is_some_and(Attribute::groups);
+    let mut profile = profile.clone();
+    profile.tree_order.retain(groups);
+    profile
+        .facets
+        .retain(|key, facet| groups(key) && facet.mode != ProfileFacetMode::All);
+    profile
 }
