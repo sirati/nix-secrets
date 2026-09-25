@@ -24,111 +24,38 @@ pub fn copy(value: &[u8]) -> Result<(), String> {
     }
 }
 
-const PASTE_LIMIT: u64 = 1024 * 1024;
-const PASTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const PASTE_LIMIT: usize = 1024 * 1024;
 
-/// Reads the local clipboard, or the primary selection for a middle click,
-/// with the first available tool. One trailing newline is removed. The
-/// content is never logged or put into an error message.
-pub fn paste(primary: bool) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let x11 = std::env::var_os("DISPLAY").is_some();
-    let mut candidates: Vec<(&str, Vec<&str>)> = Vec::new();
-    if wayland {
-        let mut arguments = vec!["--no-newline", "--type", "text"];
-        if primary {
-            arguments.push("--primary");
-        }
-        candidates.push(("wl-paste", arguments));
+/// Reads the clipboard for an explicit Ctrl+V. This is the only call site:
+/// nothing polls, prefetches or retries.
+///
+/// It reads the X11 CLIPBOARD selection in-process through arboard, over
+/// Xwayland under a Wayland session. arboard creates one 1x1 helper window
+/// and never maps it, so no window appears and the window manager is not
+/// involved. `wl-paste` is deliberately not used: on compositors without a
+/// data-control protocol, such as GNOME's Mutter, it maps a focus surface
+/// for every read, which makes the window manager retile. One trailing
+/// newline is removed. The content is never logged or put in an error.
+pub fn paste() -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    if std::env::var_os("DISPLAY").is_none() {
+        return Err(
+            "direct clipboard reading needs X11 or Xwayland (DISPLAY is unset); \
+             use the terminal's paste instead"
+                .into(),
+        );
     }
-    if x11 {
-        let selection = if primary { "primary" } else { "clipboard" };
-        candidates.push(("xclip", vec!["-selection", selection, "-o"]));
-        candidates.push((
-            "xsel",
-            vec![
-                if primary { "--primary" } else { "--clipboard" },
-                "--output",
-            ],
-        ));
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|error| format!("cannot open the X11 clipboard: {error}"))?;
+    let text = clipboard.get_text().map_err(|error| match error {
+        arboard::Error::ContentNotAvailable => "the clipboard is empty or holds no text".into(),
+        other => format!("cannot read the clipboard: {other}"),
+    })?;
+    let mut value = zeroize::Zeroizing::new(text.into_bytes());
+    if value.len() > PASTE_LIMIT {
+        return Err("the clipboard content exceeds 1 MiB".into());
     }
-    if !primary {
-        candidates.push(("pbpaste", vec![]));
-    }
-    let mut failures = Vec::new();
-    for (program, arguments) in candidates {
-        match read_tool(program, &arguments) {
-            Ok(mut value) => {
-                if value.last() == Some(&b'\n') {
-                    value.pop();
-                }
-                return Ok(value);
-            }
-            Err(None) => {}
-            Err(Some(failure)) => failures.push(format!("{program}: {failure}")),
-        }
-    }
-    if failures.is_empty() {
-        Err("cannot read the clipboard: install wl-clipboard (Wayland), xclip or xsel (X11)".into())
-    } else {
-        Err(format!(
-            "cannot read the clipboard ({})",
-            failures.join("; ")
-        ))
-    }
-}
-
-/// `Err(None)` when the tool is not installed.
-fn read_tool(
-    program: &str,
-    arguments: &[&str],
-) -> Result<zeroize::Zeroizing<Vec<u8>>, Option<String>> {
-    use std::io::Read;
-    let mut child = match Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(None),
-        Err(error) => return Err(Some(error.to_string())),
-    };
-    let mut stdout = child.stdout.take().ok_or(Some("no output pipe".into()))?;
-    let reader = std::thread::spawn(move || {
-        let mut value = zeroize::Zeroizing::new(Vec::new());
-        let result = stdout
-            .by_ref()
-            .take(PASTE_LIMIT + 1)
-            .read_to_end(&mut value);
-        let _ = std::io::copy(&mut stdout, &mut std::io::sink());
-        result.map(|_| value)
-    });
-    let deadline = std::time::Instant::now() + PASTE_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Some("timed out".into()));
-            }
-        }
-    };
-    let value = reader
-        .join()
-        .map_err(|_| Some("reader failed".to_owned()))?
-        .map_err(|error| Some(error.to_string()))?;
-    if !status.success() {
-        // wl-paste exits 1 with "No selection" when the clipboard is empty.
-        return Err(Some("the clipboard is empty or holds no text".into()));
-    }
-    if value.len() as u64 > PASTE_LIMIT {
-        return Err(Some("the clipboard content exceeds 1 MiB".into()));
+    if value.last() == Some(&b'\n') {
+        value.pop();
     }
     Ok(value)
 }

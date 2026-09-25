@@ -18,11 +18,10 @@ symlinkJoin {
   # programs._1password wrapper in /run/wrappers/bin. The bundled CLI is
   # therefore a PATH suffix: it never shadows that wrapper and only serves
   # hosts without one, for example with OP_SERVICE_ACCOUNT_TOKEN.
-  # wl-clipboard is a fallback the same way, for copy and Ctrl+V paste.
   postBuild = ''
     wrapProgram "$out/bin/nix-secrets" \
       --prefix PATH : ${lib.makeBinPath [ ageWithOnePassword pkgs.openssh ]} \
-      --suffix PATH : ${lib.makeBinPath [ pkgs._1password-cli pkgs.wl-clipboard ]}
+      --suffix PATH : ${lib.makeBinPath [ pkgs._1password-cli ]}
   '';
   meta = nix-secrets.meta // {
     description = "nix-secrets with opt-in age and 1Password recipient support";
