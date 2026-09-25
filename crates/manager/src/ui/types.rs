@@ -20,6 +20,8 @@ pub enum MouseTarget {
     AutosaveToggle,
     /// The Yes button of the uncommitted-overwrite warning.
     ConfirmLoss,
+    /// Reveals the stored value from an entry or replace dialog.
+    RevealCurrent,
     /// The body of an informational notice; clicking it only closes it.
     Notice,
     /// The progress overlay of a running operation; clicks on it do nothing.
@@ -40,6 +42,8 @@ pub enum UiEvent {
     Tab,
     /// Ctrl+Shift+Y: confirms overwriting a value that was never committed.
     ConfirmLoss,
+    /// Ctrl+R in an entry or replace dialog: reveal the stored value.
+    RevealCurrent,
     Approval(ApprovalRequest),
     Refresh,
     Tick,

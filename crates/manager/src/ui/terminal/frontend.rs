@@ -94,6 +94,11 @@ impl Frontend for CrosstermFrontend {
                     {
                         return Ok(UiEvent::ConfirmLoss)
                     }
+                    KeyCode::Char('r' | 'R')
+                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                    {
+                        return Ok(UiEvent::RevealCurrent)
+                    }
                     KeyCode::Char('v' | 'V')
                         if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
                     {

@@ -21,8 +21,12 @@ impl Scripts {
 
     fn script(&self, name: &str, body: &str) -> PathBuf {
         let path = self.0.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        // Written under another name and renamed: executing a file that a
+        // parallel test thread still holds open for writing fails with ETXTBSY.
+        let staging = self.0.join(format!(".{name}.tmp"));
+        fs::write(&staging, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&staging, &path).unwrap();
         path
     }
 }

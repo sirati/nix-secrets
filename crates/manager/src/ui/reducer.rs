@@ -152,12 +152,15 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             model.mode = Mode::Search { query };
         }
         (Mode::Search { query }, _) => model.mode = Mode::Search { query },
-        (Mode::Browse, UiEvent::Enter) => {
-            model.begin_value_with(Vec::new(), |path| writer.commit_state(path))
-        }
+        (Mode::Browse, UiEvent::Enter) => model.begin_value(Vec::new()),
+        // A paste into an unset value saves it; over a set value it opens the
+        // entry field with the text, and Enter then asks before replacing.
         (Mode::Browse, UiEvent::Paste(value)) => {
-            model.begin_value_with(value, |path| writer.commit_state(path));
-            submit_if_edit(model, writer);
+            let set = model.selected().is_some_and(|row| row.is_set);
+            model.begin_value(value);
+            if !set {
+                submit_if_edit(model, writer);
+            }
         }
         (Mode::Browse, UiEvent::Character('g')) => generated::begin(model, writer),
         (choice @ Mode::GenerateChoice { .. }, event) => {
@@ -180,6 +183,7 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
                             path,
                             value,
                             scroll: 0,
+                            underneath: None,
                         }
                     }
                     Err(error) => fail_unless_queued(model, error),
@@ -213,62 +217,63 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         },
         (Mode::DeleteConfirm { .. }, UiEvent::Character('n') | UiEvent::Escape) => {}
         (Mode::DeleteConfirm { path }, _) => model.mode = Mode::DeleteConfirm { path },
-        (Mode::Reveal { .. }, UiEvent::Escape | UiEvent::Enter) => {}
         (
             Mode::Reveal {
                 path,
                 value,
                 scroll,
+                underneath,
             },
-            UiEvent::Up,
+            event,
         ) => {
-            model.mode = Mode::Reveal {
-                path,
-                value,
-                scroll: model.scrolled(scroll, false),
-            }
-        }
-        (
-            Mode::Reveal {
-                path,
-                value,
-                scroll,
-            },
-            UiEvent::Down,
-        ) => {
-            model.mode = Mode::Reveal {
-                path,
-                value,
-                scroll: model.scrolled(scroll, true),
-            }
-        }
-        (
-            Mode::Reveal {
-                path,
-                value,
-                scroll,
-            },
-            UiEvent::Character('c'),
-        ) => {
-            report(model, writer.copy(&value).map(|()| "value copied".into()));
+            let scroll = match event {
+                UiEvent::Up => model.scrolled(scroll, false),
+                UiEvent::Down => model.scrolled(scroll, true),
+                UiEvent::Character('c') => {
+                    report(model, writer.copy(&value).map(|()| "value copied".into()));
+                    scroll
+                }
+                // Closing returns to the dialog it was opened from, if any.
+                UiEvent::Escape | UiEvent::Enter => {
+                    if let Some(dialog) = underneath {
+                        model.mode = *dialog;
+                    }
+                    return Action::Continue;
+                }
+                _ => scroll,
+            };
             model.mode = Mode::Reveal {
                 path,
                 value,
                 scroll,
+                underneath,
             };
         }
-        (
-            Mode::Reveal {
-                path,
-                value,
-                scroll,
-            },
-            _,
-        ) => {
-            model.mode = Mode::Reveal {
-                path,
-                value,
-                scroll,
+        // Ctrl+R shows the stored value over the entry or replace dialog. It
+        // never runs on its own, and closing the reveal returns to the dialog.
+        (dialog @ (Mode::Edit { .. } | Mode::Replace { .. }), UiEvent::RevealCurrent) => {
+            let path = match &dialog {
+                Mode::Edit { path, .. } | Mode::Replace { path, .. } => path.clone(),
+                _ => unreachable!(),
+            };
+            if !model.is_set(&path) {
+                model.mode = dialog;
+                model.inform("this value is not set yet; there is nothing to reveal");
+                return Action::Continue;
+            }
+            match writer.reveal(&path) {
+                Ok(value) => {
+                    model.mode = Mode::Reveal {
+                        path,
+                        value,
+                        scroll: 0,
+                        underneath: Some(Box::new(dialog)),
+                    }
+                }
+                Err(error) => {
+                    model.mode = dialog;
+                    fail_unless_queued(model, error);
+                }
             }
         }
         (Mode::Browse, UiEvent::Escape) => return Action::Quit,
@@ -279,8 +284,10 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         }
         (Mode::Edit { path, mut value }, UiEvent::Paste(pasted)) => {
             let pasted = Zeroizing::new(pasted);
-            // Edit only opens for unset values, so autosave never replaces one.
+            // Autosave never replaces a stored value; that always goes through
+            // Enter and the overwrite confirmation.
             let autosave = model.settings.autosave_unset_on_paste
+                && !model.is_set(&path)
                 && value.is_empty()
                 && !pasted.is_empty()
                 && !pasted.contains(&b'\n');
@@ -299,7 +306,9 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             truncate_character(&mut value);
             model.mode = Mode::Edit { path, value };
         }
-        (Mode::Edit { path, value }, UiEvent::Enter) => submit(model, writer, path, value),
+        (Mode::Edit { path, value }, UiEvent::Enter) if !value.is_empty() => {
+            submit_entry(model, writer, path, value)
+        }
         (Mode::Edit { .. }, UiEvent::Escape) => {}
         (Mode::Edit { path, value }, _) => model.mode = Mode::Edit { path, value },
         (
@@ -311,14 +320,14 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             UiEvent::Character('y'),
         )
         | (Mode::Replace { path, value, .. }, UiEvent::ConfirmLoss) => {
-            model.mode = Mode::Edit { path, value };
-            submit_if_nonempty(model, writer);
+            submit(model, writer, path, value)
         }
-        // Uncommitted values default to No: Enter, Space, n and Esc cancel.
+        // No is the default: Enter, Space, n and Esc return to the entry field
+        // with the new value kept, where Esc discards it.
         (
-            Mode::Replace { .. },
+            Mode::Replace { path, value, .. },
             UiEvent::Character('n' | ' ') | UiEvent::Escape | UiEvent::Enter,
-        ) => {}
+        ) => model.mode = Mode::Edit { path, value },
         (mode @ Mode::Replace { .. }, _) => model.mode = mode,
         (Mode::Browse, UiEvent::Character('O')) => model.mode = Mode::Settings { selected: 0 },
         (Mode::Settings { selected }, UiEvent::Up) => {

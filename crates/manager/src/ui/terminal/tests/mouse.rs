@@ -489,3 +489,68 @@ fn click_on_another_unset_row_after_a_save_selects_it_and_opens_entry() {
         "a click on an unset input value opens its entry: {mode}"
     );
 }
+
+#[test]
+fn clicking_the_autosave_label_toggles_it_and_reveal_is_offered_only_when_set() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut model = Model::new(vec![leaf("item", false)]);
+    model.filter = crate::model::ViewFilter::All;
+    model.mode = Mode::Edit {
+        path: "h.services.s.item".into(),
+        value: Zeroizing::new(vec![]),
+    };
+    let mut hits = HitMap::default();
+    terminal.draw(|frame| hits = render(frame, &model)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let (x, y) = (0..30)
+        .find_map(|y| {
+            let line = (0..100)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            // Click on the word "disable", well past the checkbox itself.
+            line.find("disable")
+                .map(|byte| (line[..byte].chars().count() as u16, y))
+        })
+        .expect("autosave label on screen");
+    assert_eq!(hits.get(x, y), Some(MouseTarget::AutosaveToggle));
+    click_at(&mut terminal, &mut model, x, y);
+    assert!(model.settings.autosave_unset_on_paste);
+    assert!(!hits
+        .regions
+        .iter()
+        .any(|(_, target)| *target == MouseTarget::RevealCurrent));
+
+    model
+        .rows
+        .iter_mut()
+        .for_each(|row| row.is_set = row.is_secret());
+    terminal.draw(|frame| hits = render(frame, &model)).unwrap();
+    assert!(hits
+        .regions
+        .iter()
+        .any(|(_, target)| *target == MouseTarget::RevealCurrent));
+}
+
+#[test]
+fn clicking_a_settings_label_toggles_it() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::Settings { selected: 0 };
+    terminal
+        .draw(|frame| {
+            render(frame, &model);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let (x, y) = (0..30)
+        .find_map(|y| {
+            let line = (0..100)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            line.find("values on paste")
+                .map(|byte| (line[..byte].chars().count() as u16, y))
+        })
+        .unwrap();
+    click_at(&mut terminal, &mut model, x, y);
+    assert!(model.settings.autosave_unset_on_paste);
+}

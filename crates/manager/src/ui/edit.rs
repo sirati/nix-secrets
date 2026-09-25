@@ -9,19 +9,6 @@ pub(super) fn submit_if_edit(model: &mut Model, writer: &mut impl SecretWriter) 
     }
 }
 
-pub(super) fn submit_if_nonempty(model: &mut Model, writer: &mut impl SecretWriter) {
-    let mode = std::mem::replace(&mut model.mode, Mode::Browse);
-    if let Mode::Edit { path, value } = mode {
-        if value.is_empty() {
-            model.mode = Mode::Edit { path, value };
-        } else {
-            submit(model, writer, path, value);
-        }
-    } else {
-        model.mode = mode;
-    }
-}
-
 pub(super) fn submit(
     model: &mut Model,
     writer: &mut impl SecretWriter,
@@ -49,5 +36,26 @@ pub(super) fn truncate_character(value: &mut Vec<u8>) {
         }
     } else {
         value.pop();
+    }
+}
+
+/// Saves the entered value. Replacing a stored value first asks whether it
+/// is committed and confirms: a plain y/n when it is, a loss warning when it
+/// is not or git cannot tell.
+pub(super) fn submit_entry(
+    model: &mut Model,
+    writer: &mut impl SecretWriter,
+    path: String,
+    value: Zeroizing<Vec<u8>>,
+) {
+    if model.is_set(&path) {
+        let commit = writer.commit_state(&path);
+        model.mode = Mode::Replace {
+            path,
+            value,
+            commit,
+        };
+    } else {
+        submit(model, writer, path, value);
     }
 }

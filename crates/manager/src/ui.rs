@@ -24,6 +24,8 @@ mod types;
 pub use types::*;
 
 mod drive;
+#[cfg(test)]
+pub(crate) use drive::apply_completion_for_tests;
 pub use drive::drive;
 
 mod reducer;
@@ -32,7 +34,7 @@ mod approval;
 mod provider_failure;
 
 mod edit;
-use edit::{submit, submit_if_edit, submit_if_nonempty, truncate_character};
+use edit::{submit, submit_entry, submit_if_edit, truncate_character};
 
 mod facets;
 mod generated;

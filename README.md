@@ -57,8 +57,11 @@ search is active, the status line counts matches and those hidden by filters.
 Attributes that do not apply to a value, such as the user of a system
 service, add no tree level or filter value; a filter on them leaves such
 values visible. Replacing
-an existing value requires confirmation. Before that, the backend compares the
-stored record with `HEAD:nix-secrets.toml`; only HEAD is checked, not older
+an existing value requires confirmation after the new value is entered and
+saved with Enter; declining returns to the entry field with the typed value.
+Ctrl+R or the "Reveal current" button in that field or the confirmation
+shows the stored value, and closing it returns to the dialog. Before
+confirming, the backend compares the stored record with `HEAD:nix-secrets.toml`; only HEAD is checked, not older
 commits. If the value is not in HEAD, or git cannot answer, a warning explains
 that overwriting loses the old value for good. Only Ctrl+Shift+Y or its Yes
 button confirms; n, Enter, Space and Esc keep the value. `O` opens session

@@ -1,5 +1,6 @@
 use super::{
-    fail_unless_queued, report, submit, Action, GenerateKind, Mode, Model, SecretWriter, UiEvent,
+    fail_unless_queued, report, submit_entry, Action, GenerateKind, Mode, Model, SecretWriter,
+    UiEvent,
 };
 
 pub(super) fn begin(model: &mut Model, _writer: &mut impl SecretWriter) {
@@ -89,15 +90,7 @@ pub(super) fn reduce(
                 replacing,
             };
         }
-        UiEvent::Enter if replacing => {
-            let commit = writer.commit_state(&path);
-            model.mode = Mode::Replace {
-                path,
-                value,
-                commit,
-            }
-        }
-        UiEvent::Enter => submit(model, writer, path, value),
+        UiEvent::Enter => submit_entry(model, writer, path, value),
         UiEvent::Escape => {}
         _ => {
             model.mode = Mode::GeneratedPreview {
