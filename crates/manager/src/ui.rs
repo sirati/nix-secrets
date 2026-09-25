@@ -6,10 +6,17 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use std::io;
 use zeroize::Zeroizing;
 
-fn notify_operation_result(model: &mut Model, error: String) {
+fn fail_unless_queued(model: &mut Model, error: String) {
     // Completion will deliver the actual result without interrupting input.
     if error != OPERATION_QUEUED {
-        model.notify(error);
+        model.fail(error);
+    }
+}
+
+fn report(model: &mut Model, result: Result<String, String>) {
+    match result {
+        Ok(message) => model.inform(message),
+        Err(error) => fail_unless_queued(model, error),
     }
 }
 

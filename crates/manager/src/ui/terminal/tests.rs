@@ -14,7 +14,7 @@ fn line(terminal: &Terminal<TestBackend>, y: u16) -> String {
 fn compact_terminal_renders_notice_modal_and_filter_bar() {
     let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
     let mut model = Model::new(vec![]);
-    model.message = Some("test result".into());
+    model.inform("test result");
     terminal
         .draw(|frame| {
             render(frame, &model);
@@ -26,7 +26,24 @@ fn compact_terminal_renders_notice_modal_and_filter_bar() {
         .join("\n");
     assert!(screen.contains("Notice"));
     assert!(screen.contains("test result"));
-    assert!(screen.contains("Enter: continue"));
+    assert!(
+        screen.contains("(pressing any key will perform its"),
+        "{screen}"
+    );
+    model.acknowledge();
+    model.fail("age exited with exit code 1");
+    terminal
+        .draw(|frame| {
+            render(frame, &model);
+        })
+        .unwrap();
+    let screen = (0..8)
+        .map(|y| line(&terminal, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("Error"), "{screen}");
+    assert!(screen.contains("OK"), "{screen}");
+    assert!(!screen.contains("pressing any key"));
     model.message = None;
     model.mode = Mode::Help { scroll: 0 };
     terminal

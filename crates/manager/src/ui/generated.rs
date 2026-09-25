@@ -1,15 +1,15 @@
 use super::{
-    notify_operation_result, submit, Action, GenerateKind, Mode, Model, SecretWriter, UiEvent,
+    fail_unless_queued, report, submit, Action, GenerateKind, Mode, Model, SecretWriter, UiEvent,
 };
 
 pub(super) fn begin(model: &mut Model, _writer: &mut impl SecretWriter) {
     let selected = model.selected().cloned();
     let Some(row) = selected.filter(|row| row.is_secret()) else {
-        model.notify("select a password leaf");
+        model.inform("select a password leaf");
         return;
     };
     if !row.can_generate {
-        model.notify("select a password leaf");
+        model.inform("select a password leaf");
         return;
     }
     let path = row.path.expect("secret row has path");
@@ -46,7 +46,7 @@ pub(super) fn choose(
                 replacing,
             }
         }
-        Err(message) => notify_operation_result(model, message),
+        Err(message) => fail_unless_queued(model, message),
     }
     Action::Continue
 }
@@ -76,12 +76,11 @@ pub(super) fn reduce(
             };
         }
         UiEvent::Character('c') => {
-            notify_operation_result(
+            report(
                 model,
-                match writer.copy(&value) {
-                    Ok(()) => "generated value copied".into(),
-                    Err(error) => error,
-                },
+                writer
+                    .copy(&value)
+                    .map(|()| "generated value copied".into()),
             );
             model.mode = Mode::GeneratedPreview {
                 path,

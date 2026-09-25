@@ -106,7 +106,7 @@ fn browse_copy_secret_and_public_key_use_distinct_actions() {
     let mut model = model(true);
     let mut writer = writer();
     reduce(&mut model, UiEvent::Character('c'), &mut writer);
-    reduce(&mut model, UiEvent::Enter, &mut writer);
+    // The success notice closes and p still copies the public key.
     reduce(&mut model, UiEvent::Character('p'), &mut writer);
     assert_eq!(
         writer.copies,

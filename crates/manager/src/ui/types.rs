@@ -16,6 +16,8 @@ pub enum MouseTarget {
     Tree(usize),
     ModalItem(usize),
     Shortcut(Shortcut),
+    /// The body of an informational notice; clicking it only closes it.
+    Notice,
 }
 
 #[derive(Debug, Eq, PartialEq)]

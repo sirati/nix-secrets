@@ -30,7 +30,7 @@ pub fn drive(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    model.notify(error);
+                    model.fail(error);
                     schedule(&mut redraw_at);
                 }
             }
@@ -42,7 +42,7 @@ pub fn drive(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        model.notify(error);
+                        model.fail(error);
                         schedule(&mut redraw_at);
                     }
                 }
@@ -57,7 +57,7 @@ pub fn drive(
                     if matches!(model.mode, Mode::Approval(_)) {
                         model.mode = Mode::Browse;
                     }
-                    model.notify(message);
+                    model.fail(message);
                     schedule(&mut redraw_at);
                 }
             }
@@ -105,7 +105,7 @@ fn apply_completion(model: &mut Model, completion: Completion) {
     match completion {
         Completion::Saved(path) => {
             set_row(model, &path, true);
-            model.notify(format!("saved {path}"));
+            model.inform(format!("saved {path}"));
         }
         Completion::SaveFailed {
             path,
@@ -125,7 +125,7 @@ fn apply_completion(model: &mut Model, completion: Completion) {
         }
         Completion::Deleted(path) => {
             set_row(model, &path, false);
-            model.notify(format!("deleted {path}"));
+            model.inform(format!("deleted {path}"));
         }
         Completion::Revealed { path, value } => {
             if matches!(model.mode, Mode::Browse)
@@ -138,7 +138,8 @@ fn apply_completion(model: &mut Model, completion: Completion) {
                 };
             }
         }
-        Completion::Copied(message) | Completion::Failed(message) => model.notify(message),
+        Completion::Copied(message) => model.inform(message),
+        Completion::Failed(message) => model.fail(message),
         Completion::Generated {
             path,
             value,
@@ -159,15 +160,15 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             if matches!(model.mode, Mode::BulkProgress { .. }) {
                 model.mode = Mode::Browse;
             }
-            model.notify(if failed.is_empty() {
-                format!("Generated and saved {saved} missing passwords.")
+            if failed.is_empty() {
+                model.inform(format!("Generated and saved {saved} missing passwords."));
             } else {
-                format!(
+                model.fail(format!(
                     "Generated and saved {saved} missing passwords. {} failed:\n{}",
                     failed.len(),
                     failed.join("\n")
-                )
-            });
+                ));
+            }
         }
         Completion::BulkProgress { done, total } => {
             if matches!(model.mode, Mode::BulkProgress { .. }) {
@@ -184,25 +185,25 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             if matches!(model.mode, Mode::Approval(_)) {
                 model.mode = Mode::Browse;
             }
-            model.notify("deployment request finished");
+            model.inform("deployment request finished");
         }
         Completion::ApprovalLost(message) => {
             if matches!(model.mode, Mode::Approval(_)) {
                 model.mode = Mode::Browse;
             }
-            model.notify(message);
+            model.fail(message);
         }
         Completion::ProfileSaved { name, snapshot } => {
             model.profiles = snapshot;
             model.active_profile = Some(name.clone());
-            model.notify(format!("saved view profile {name}"));
+            model.inform(format!("saved view profile {name}"));
         }
         Completion::ProfileDeleted { name, snapshot } => {
             model.profiles = snapshot;
             if model.active_profile.as_deref() == Some(name.as_str()) {
                 model.active_profile = None;
             }
-            model.notify(format!("deleted view profile {name}"));
+            model.inform(format!("deleted view profile {name}"));
         }
     }
     model.show_pending_approval();

@@ -10,6 +10,20 @@ mod visibility;
 pub use attributes::{Attribute, Facet, FacetMode};
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NoticeSeverity {
+    /// Success or guidance: the next key or click closes it and still acts.
+    Info,
+    /// An operation failed: only an explicit OK closes it.
+    Failure,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Notice {
+    pub text: String,
+    pub severity: NoticeSeverity,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalRequest {
     pub id: String,
@@ -114,10 +128,10 @@ pub struct Model {
     pub rows: Vec<Row>,
     pub selected: usize,
     pub mode: Mode,
-    pub message: Option<String>,
+    pub message: Option<Notice>,
     pub modal_scroll: u16,
     pub hover: Option<crate::ui::MouseTarget>,
-    pub notifications: VecDeque<String>,
+    pub notifications: VecDeque<Notice>,
     pub pending_approvals: VecDeque<ApprovalRequest>,
     pub pending_dialogs: VecDeque<Mode>,
     pub filter: ViewFilter,
@@ -263,7 +277,7 @@ impl Model {
             row.is_set = true;
         }
         self.mode = Mode::Browse;
-        self.notify(format!("saved {path}"));
+        self.inform(format!("saved {path}"));
     }
 
     pub fn mark_deleted(&mut self, path: &str) {
@@ -275,7 +289,7 @@ impl Model {
             row.is_set = false;
         }
         self.mode = Mode::Browse;
-        self.notify(format!("deleted {path}"));
+        self.inform(format!("deleted {path}"));
     }
 
     pub fn apply_task_status(&mut self, request: &ApprovalRequest) {

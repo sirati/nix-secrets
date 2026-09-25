@@ -25,8 +25,8 @@ pub(super) fn reduce(
                 UiEvent::Enter => {
                     if let Some(name) = names.get(selected - 1) {
                         match model.load_profile(name) {
-                            Ok(()) => model.notify(format!("loaded view profile {name}")),
-                            Err(error) => model.notify(error),
+                            Ok(()) => model.inform(format!("loaded view profile {name}")),
+                            Err(error) => model.fail(error),
                         }
                     }
                     Mode::Browse
@@ -57,7 +57,7 @@ pub(super) fn reduce(
                 model.mode = Mode::ProfileSave { name };
             }
             UiEvent::Enter if name.is_empty() => {
-                model.notify("enter a profile name");
+                model.inform("enter a profile name");
                 model.mode = Mode::ProfileSave { name };
             }
             UiEvent::Enter if model.profiles.profiles.contains_key(&name) => {
@@ -78,10 +78,10 @@ pub(super) fn reduce(
                 match writer.delete_profile(name.clone(), model.profiles.revision) {
                     Ok(snapshot) => {
                         model.profiles = snapshot;
-                        model.notify(format!("deleted view profile {name}"));
+                        model.inform(format!("deleted view profile {name}"));
                     }
                     Err(error) if error == OPERATION_QUEUED => {}
-                    Err(error) => model.notify(error),
+                    Err(error) => model.fail(error),
                 }
                 model.mode = Mode::Browse;
             }
@@ -103,10 +103,10 @@ fn save(model: &mut Model, writer: &mut impl SecretWriter, name: String) {
         Ok(snapshot) => {
             model.profiles = snapshot;
             model.active_profile = Some(name.clone());
-            model.notify(format!("saved view profile {name}"));
+            model.inform(format!("saved view profile {name}"));
         }
         Err(error) if error == OPERATION_QUEUED => {}
-        Err(error) => model.notify(error),
+        Err(error) => model.fail(error),
     }
     model.mode = Mode::Browse;
 }

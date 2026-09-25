@@ -170,12 +170,48 @@ fn mouse_hits_match_rendered_controls_and_modal_takes_priority() {
             Color::Rgb(70, 75, 85)
         );
     }
-    model.message = Some("Saved".into());
+    model.fail("Save failed");
     terminal.draw(|frame| hits = render(frame, &model)).unwrap();
     assert!(hits
         .regions
         .iter()
         .all(|(_, target)| matches!(target, MouseTarget::Shortcut(Shortcut::Enter))));
+    model.acknowledge();
+    model.inform("Saved");
+    terminal.draw(|frame| hits = render(frame, &model)).unwrap();
+    let tree = hits
+        .regions
+        .iter()
+        .find(|(_, target)| *target == MouseTarget::Tree(model.selected))
+        .unwrap()
+        .0;
+    assert_eq!(
+        hits.get(tree.x, tree.y),
+        Some(MouseTarget::Tree(model.selected)),
+        "the tree stays clickable beside a success notice"
+    );
+    let notice = hits
+        .regions
+        .iter()
+        .find(|(_, target)| *target == MouseTarget::Notice)
+        .unwrap()
+        .0;
+    assert_eq!(
+        hits.get(notice.x + 1, notice.y + 1),
+        Some(MouseTarget::Notice)
+    );
+    model.mode = Mode::DeleteConfirm {
+        path: "h.services.s.key".into(),
+    };
+    terminal.draw(|frame| hits = render(frame, &model)).unwrap();
+    assert!(
+        hits.regions
+            .iter()
+            .all(|(_, target)| *target == MouseTarget::Notice),
+        "a notice above a confirmation hides its buttons"
+    );
+    model.mode = Mode::Browse;
+    model.acknowledge();
     let mut narrow = Terminal::new(TestBackend::new(40, 20)).unwrap();
     model.message = None;
     narrow.draw(|frame| hits = render(frame, &model)).unwrap();

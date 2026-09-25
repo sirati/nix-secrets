@@ -63,7 +63,7 @@ fn non_password_leaf_does_not_open_a_preview() {
     model.rows[0].can_generate = false;
     reduce(&mut model, UiEvent::Character('g'), &mut writer);
     assert!(matches!(model.mode, Mode::Browse));
-    assert_eq!(model.message.as_deref(), Some("select a password leaf"));
+    assert_eq!(model.message_text(), Some("select a password leaf"));
 }
 
 #[test]

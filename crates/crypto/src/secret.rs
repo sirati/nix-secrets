@@ -41,7 +41,12 @@ pub fn encrypt_secret(
         .iter()
         .map(|entry| entry.ssh_public_key)
         .collect();
-    let age_ciphertext = provider.encrypt(&keys, &inner)?;
+    let age_ciphertext = provider.encrypt(&keys, &inner).map_err(|error| {
+        error.during(|| {
+            let ids: Vec<_> = recipients.iter().map(|entry| entry.id).collect();
+            format!("encrypting {identifier} for recipients {}", ids.join(", "))
+        })
+    })?;
     if age_ciphertext.is_empty() || age_ciphertext.len() > MAX_CIPHERTEXT_SIZE {
         return Err(CryptoError::InvalidRecord);
     }
@@ -60,7 +65,9 @@ pub fn decrypt_secret(
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     validate_identifier(identifier)?;
     validate_record(record)?;
-    let inner = provider.decrypt(&record.age_ciphertext)?;
+    let inner = provider
+        .decrypt(&record.age_ciphertext)
+        .map_err(|error| error.during(|| format!("decrypting {identifier}")))?;
     decode_inner(identifier, &record.version_id, &inner)
 }
 
