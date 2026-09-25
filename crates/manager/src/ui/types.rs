@@ -16,6 +16,10 @@ pub enum MouseTarget {
     Tree(usize),
     ModalItem(usize),
     Shortcut(Shortcut),
+    /// The autosave checkbox in the value entry field.
+    AutosaveToggle,
+    /// The Yes button of the uncommitted-overwrite warning.
+    ConfirmLoss,
     /// The body of an informational notice; clicking it only closes it.
     Notice,
     /// The progress overlay of a running operation; clicks on it do nothing.
@@ -33,6 +37,9 @@ pub enum UiEvent {
     Paste(Vec<u8>),
     /// Ctrl+V: read the clipboard directly instead of waiting for the terminal.
     PasteRequest,
+    Tab,
+    /// Ctrl+Shift+Y: confirms overwriting a value that was never committed.
+    ConfirmLoss,
     Approval(ApprovalRequest),
     Refresh,
     Tick,
@@ -156,6 +163,13 @@ pub trait SecretWriter {
     /// Reads the local clipboard for Ctrl+V in an entry dialog.
     fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
         Err("no clipboard provider is available".into())
+    }
+    /// Whether the stored value of `path` is committed in git, asked before
+    /// replacing it.
+    fn commit_state(&mut self, _path: &str) -> nix_secrets_core::CommitState {
+        nix_secrets_core::CommitState::Unknown {
+            reason: "commit state unavailable".into(),
+        }
     }
     /// The slow operation currently running in the background, if any.
     fn activity(&mut self) -> Option<crate::model::Activity> {

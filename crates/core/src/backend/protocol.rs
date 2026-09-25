@@ -8,6 +8,10 @@ pub enum Request {
     Get {
         path: SecretPath,
     },
+    /// Whether the stored record of `path` is committed in `HEAD`.
+    CommitState {
+        path: SecretPath,
+    },
     List,
     Set {
         path: SecretPath,
@@ -137,5 +141,8 @@ pub enum Response {
     Heartbeat,
     Profiles {
         snapshot: crate::ProfileSnapshot,
+    },
+    CommitState {
+        state: crate::CommitState,
     },
 }

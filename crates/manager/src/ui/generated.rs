@@ -89,7 +89,14 @@ pub(super) fn reduce(
                 replacing,
             };
         }
-        UiEvent::Enter if replacing => model.mode = Mode::Replace { path, value },
+        UiEvent::Enter if replacing => {
+            let commit = writer.commit_state(&path);
+            model.mode = Mode::Replace {
+                path,
+                value,
+                commit,
+            }
+        }
         UiEvent::Enter => submit(model, writer, path, value),
         UiEvent::Escape => {}
         _ => {

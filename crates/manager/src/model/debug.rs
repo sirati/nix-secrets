@@ -40,6 +40,9 @@ impl fmt::Debug for Mode {
                 formatter.debug_tuple("ProfileDelete").field(name).finish()
             }
             Self::Help { scroll } => formatter.debug_tuple("Help").field(scroll).finish(),
+            Self::Settings { selected } => {
+                formatter.debug_tuple("Settings").field(selected).finish()
+            }
             Self::Search { query } => formatter.debug_tuple("Search").field(query).finish(),
             Self::DeleteConfirm { path } => {
                 formatter.debug_tuple("DeleteConfirm").field(path).finish()
@@ -54,10 +57,11 @@ impl fmt::Debug for Mode {
                 .field("path", path)
                 .field("value", &"<redacted>")
                 .finish(),
-            Self::Replace { path, .. } => formatter
+            Self::Replace { path, commit, .. } => formatter
                 .debug_struct("Replace")
                 .field("path", path)
                 .field("value", &"<redacted>")
+                .field("commit", commit)
                 .finish(),
             Self::GenerateChoice { path, replacing } => formatter
                 .debug_struct("GenerateChoice")

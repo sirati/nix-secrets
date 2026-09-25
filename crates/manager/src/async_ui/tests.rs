@@ -85,6 +85,7 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
         busy: false,
         activity: None,
         one_password: true,
+        socket: None,
     };
     let worker = std::thread::spawn(move || {
         assert!(matches!(incoming.recv().unwrap(), Command::Reveal(_)));
@@ -139,6 +140,7 @@ fn slow_commands_describe_their_activity_until_completion() {
         busy: false,
         activity: None,
         one_password: true,
+        socket: None,
     };
     assert!(writer.activity().is_none());
     let _ = writer.reveal("host.services.test.first");

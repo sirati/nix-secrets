@@ -36,6 +36,7 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                     letter("F Filter", 'F'),
                     letter("T Tree", 'T'),
                     letter("S Profiles", 'S'),
+                    letter("O Settings", 'O'),
                     letter("/ Search", '/'),
                     key("Enter Edit", Shortcut::Enter).enabled(editable),
                     letter("G Missing", 'G').enabled(missing),
@@ -47,6 +48,7 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                     letter("F Filter", 'F'),
                     letter("T Tree", 'T'),
                     letter("S Profiles", 'S'),
+                    letter("O Settings", 'O'),
                     letter("/ Search", '/'),
                     key("Enter Edit", Shortcut::Enter).enabled(editable),
                     letter("g Generate", 'g').enabled(generatable),
@@ -94,17 +96,36 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
         Mode::ProfileOverwrite { .. } => vec![letter("y Replace", 'y'), letter("n Cancel", 'n')],
         Mode::ProfileDelete { .. } => vec![letter("y Delete", 'y'), letter("n Cancel", 'n')],
         Mode::Help { .. } => vec![key("Esc Close", Shortcut::Escape)],
+        Mode::Settings { .. } => vec![
+            key("Enter Toggle", Shortcut::Enter),
+            key("Esc Close", Shortcut::Escape),
+        ],
         Mode::Properties { .. } => vec![key("Esc Close", Shortcut::Escape)],
         Mode::Search { .. } => vec![
             key("Enter Keep", Shortcut::Enter),
             key("Esc Clear", Shortcut::Escape),
         ],
         Mode::DeleteConfirm { .. } => vec![letter("y Delete", 'y'), letter("n Cancel", 'n')],
-        Mode::Replace { .. } => vec![letter("y Replace", 'y'), letter("n Cancel", 'n')],
+        Mode::Replace {
+            commit: nix_secrets_core::CommitState::Committed,
+            ..
+        } => vec![letter("y Replace", 'y'), letter("n Cancel", 'n')],
+        Mode::Replace { .. } => vec![
+            Button::new("Ctrl+Shift+Y Yes, overwrite", MouseTarget::ConfirmLoss),
+            key("Enter No", Shortcut::Enter),
+        ],
         Mode::Reveal { .. } => vec![key("Esc Hide", Shortcut::Escape), letter("c Copy", 'c')],
         Mode::Edit { .. } => vec![
             key("Enter Save", Shortcut::Enter),
             key("Esc Cancel", Shortcut::Escape),
+            Button::new(
+                if model.settings.autosave_unset_on_paste {
+                    "Tab ☑ Autosave on paste"
+                } else {
+                    "Tab □ Autosave on paste"
+                },
+                MouseTarget::AutosaveToggle,
+            ),
         ],
         Mode::GenerateChoice { .. } | Mode::BulkGenerateConfirm { .. } => vec![
             letter("p Password", 'p'),

@@ -17,6 +17,7 @@ struct Writer {
     copies: Vec<Vec<u8>>,
     bulk: Vec<Vec<String>>,
     clipboard: Option<Vec<u8>>,
+    commit: Option<nix_secrets_core::CommitState>,
 }
 impl SecretWriter for Writer {
     fn generate_missing(&mut self, paths: Vec<String>, _kind: GenerateKind) -> Result<(), String> {
@@ -25,6 +26,11 @@ impl SecretWriter for Writer {
     }
     fn generate(&mut self, _path: &str, _kind: GenerateKind) -> Result<Zeroizing<Vec<u8>>, String> {
         Ok(Zeroizing::new(b"generated-value".to_vec()))
+    }
+    fn commit_state(&mut self, _path: &str) -> nix_secrets_core::CommitState {
+        self.commit
+            .clone()
+            .unwrap_or(nix_secrets_core::CommitState::Committed)
     }
     fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
         self.clipboard
@@ -252,6 +258,7 @@ fn writer() -> Writer {
         copies: vec![],
         bulk: vec![],
         clipboard: None,
+        commit: None,
     }
 }
 
@@ -335,4 +342,115 @@ fn ctrl_v_in_the_tree_sets_an_unset_leaf_like_a_terminal_paste() {
     writer.clipboard = Some(b"direct".to_vec());
     reduce(&mut model, UiEvent::PasteRequest, &mut writer);
     assert_eq!(writer.writes, [b"direct"]);
+}
+
+#[test]
+fn autosave_saves_a_one_line_paste_into_an_unset_value() {
+    let mut model = model(false);
+    let mut writer = writer();
+    reduce(&mut model, UiEvent::Character('O'), &mut writer);
+    assert!(matches!(model.mode, Mode::Settings { .. }));
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    assert!(
+        model.settings.autosave_unset_on_paste,
+        "toggled in settings"
+    );
+    reduce(&mut model, UiEvent::Escape, &mut writer);
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    reduce(
+        &mut model,
+        UiEvent::Paste(b"one-line".to_vec()),
+        &mut writer,
+    );
+    assert_eq!(writer.writes, [b"one-line"], "saved without Enter");
+    assert!(matches!(model.mode, Mode::Browse));
+    assert_eq!(model.message_text(), Some("saved h.services.s.key"));
+}
+
+#[test]
+fn autosave_keeps_multi_line_and_empty_pastes_in_the_field() {
+    let mut model = model(false);
+    let mut writer = writer();
+    model.settings.autosave_unset_on_paste = true;
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    reduce(
+        &mut model,
+        UiEvent::Paste(b"two\nlines".to_vec()),
+        &mut writer,
+    );
+    reduce(&mut model, UiEvent::Paste(vec![]), &mut writer);
+    assert!(writer.writes.is_empty());
+    assert!(matches!(model.mode, Mode::Edit { .. }));
+}
+
+#[test]
+fn tab_toggles_autosave_from_the_entry_field_for_the_session() {
+    let mut model = model(false);
+    let mut writer = writer();
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    reduce(&mut model, UiEvent::Tab, &mut writer);
+    assert!(model.settings.autosave_unset_on_paste);
+    reduce(
+        &mut model,
+        UiEvent::Click(MouseTarget::AutosaveToggle),
+        &mut writer,
+    );
+    assert!(
+        !model.settings.autosave_unset_on_paste,
+        "the checkbox toggles it"
+    );
+    assert!(matches!(model.mode, Mode::Edit { .. }));
+}
+
+#[test]
+fn autosave_never_replaces_a_set_value() {
+    let mut model = model(true);
+    let mut writer = writer();
+    model.settings.autosave_unset_on_paste = true;
+    reduce(&mut model, UiEvent::Paste(b"new".to_vec()), &mut writer);
+    assert!(writer.writes.is_empty());
+    assert!(matches!(model.mode, Mode::Replace { .. }));
+}
+
+#[test]
+fn uncommitted_overwrite_warns_and_only_ctrl_shift_y_confirms() {
+    let mut model = model(true);
+    let mut writer = writer();
+    writer.commit = Some(nix_secrets_core::CommitState::Uncommitted);
+    for cancel in [
+        UiEvent::Enter,
+        UiEvent::Character(' '),
+        UiEvent::Character('n'),
+        UiEvent::Escape,
+    ] {
+        reduce(&mut model, UiEvent::Paste(b"new".to_vec()), &mut writer);
+        assert!(matches!(
+            model.mode,
+            Mode::Replace {
+                commit: nix_secrets_core::CommitState::Uncommitted,
+                ..
+            }
+        ));
+        reduce(&mut model, UiEvent::Character('y'), &mut writer);
+        assert!(
+            matches!(model.mode, Mode::Replace { .. }),
+            "plain y does not confirm"
+        );
+        reduce(&mut model, cancel, &mut writer);
+        assert!(matches!(model.mode, Mode::Browse));
+        assert!(writer.writes.is_empty());
+    }
+    reduce(&mut model, UiEvent::Paste(b"new".to_vec()), &mut writer);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut writer);
+    assert_eq!(writer.writes, [b"new"]);
+}
+
+#[test]
+fn committed_overwrite_keeps_the_plain_confirmation() {
+    let mut model = model(true);
+    let mut writer = writer();
+    writer.commit = Some(nix_secrets_core::CommitState::Committed);
+    reduce(&mut model, UiEvent::Paste(b"new".to_vec()), &mut writer);
+    reduce(&mut model, UiEvent::Character('y'), &mut writer);
+    assert_eq!(writer.writes, [b"new"]);
 }

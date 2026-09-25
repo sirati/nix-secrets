@@ -1,4 +1,4 @@
-{ lib, rustPlatform }:
+{ lib, rustPlatform, git }:
 
 rustPlatform.buildRustPackage {
   pname = "nix-secrets";
@@ -6,6 +6,8 @@ rustPlatform.buildRustPackage {
   src = ../..;
   cargoLock.lockFile = ../../Cargo.lock;
   strictDeps = true;
+  # The store tests compare records with a real git HEAD.
+  nativeCheckInputs = [ git ];
 
   cargoBuildFlags = [
     "-p" "nix-secrets-backend"
