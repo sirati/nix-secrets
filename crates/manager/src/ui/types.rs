@@ -18,6 +18,8 @@ pub enum MouseTarget {
     Shortcut(Shortcut),
     /// The body of an informational notice; clicking it only closes it.
     Notice,
+    /// The progress overlay of a running operation; clicks on it do nothing.
+    Busy,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -148,6 +150,10 @@ pub trait SecretWriter {
     }
     fn copy(&mut self, _value: &[u8]) -> Result<(), String> {
         Err("no clipboard provider is available".into())
+    }
+    /// The slow operation currently running in the background, if any.
+    fn activity(&mut self) -> Option<crate::model::Activity> {
+        None
     }
 }
 

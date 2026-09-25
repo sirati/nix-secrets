@@ -97,3 +97,34 @@ fn encryption_failure_names_recipients_and_never_echoes_plaintext() {
     );
     assert!(!error.contains("hunter2"));
 }
+
+#[test]
+fn decryption_runs_through_the_launcher_but_encryption_does_not() {
+    let scripts = Scripts::new();
+    let log = scripts.0.join("calls");
+    let age = scripts.script(
+        "age",
+        &format!(
+            "echo \"age $1\" >> {log}\ncat >/dev/null\nexit 1",
+            log = log.display()
+        ),
+    );
+    let launcher = scripts.script(
+        "launcher",
+        &format!(
+            "echo \"launcher $2\" >> {log}\nshift\nexec \"$@\"",
+            log = log.display()
+        ),
+    );
+    let provider = AgeCommandProvider::new(&age).through(&launcher, vec!["--flag".into()]);
+    let _ = decrypt_secret(IDENTIFIER, &record(), &provider);
+    let recipients = [Recipient {
+        id: "operator",
+        ssh_public_key: "ssh-ed25519 AAAAoperator",
+    }];
+    let _ = encrypt_secret(IDENTIFIER, b"x", &recipients, &provider);
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!("launcher {}\nage --decrypt\nage --encrypt\n", age.display())
+    );
+}

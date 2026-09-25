@@ -184,3 +184,35 @@ fn provider_error_modal_redacts_pending_secret_and_tiny_terminals_do_not_panic()
 }
 
 mod mouse;
+
+#[test]
+fn activity_overlay_shows_spinner_elapsed_time_and_keeps_screen_clickable() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.activity = Some(crate::model::Activity {
+        label: "Decrypting host.services.mail.password".into(),
+        waits_for_one_password: true,
+        started: std::time::Instant::now() - std::time::Duration::from_secs(7),
+    });
+    let mut hits = HitMap::default();
+    terminal.draw(|frame| hits = render(frame, &model)).unwrap();
+    let screen = (0..24)
+        .map(|y| line(&terminal, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        screen.contains("Decrypting host.services.mail.password — waiting for 1Password"),
+        "{screen}"
+    );
+    assert!(screen.contains("7s"), "{screen}");
+    assert!(hits
+        .regions
+        .iter()
+        .any(|(_, target)| *target == MouseTarget::Busy));
+    assert!(
+        hits.regions
+            .iter()
+            .any(|(_, target)| matches!(target, MouseTarget::Shortcut(_))),
+        "buttons stay usable while the operation runs"
+    );
+}

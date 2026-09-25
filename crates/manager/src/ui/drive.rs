@@ -23,6 +23,12 @@ pub fn drive(
                 apply_completion(model, completion);
                 schedule(&mut redraw_at);
             }
+            let activity = writer.activity();
+            if activity.is_some() || model.activity.is_some() {
+                // Keeps the spinner and elapsed time moving.
+                schedule(&mut redraw_at);
+            }
+            model.activity = activity;
             match writer.refresh_profiles() {
                 Ok(Some(snapshot)) => {
                     model.profiles = snapshot;

@@ -50,6 +50,12 @@ enum BackgroundUpdate {
 }
 
 impl Controller {
+    pub fn uses_one_password(&self) -> bool {
+        self.provider.uses_one_password()
+    }
+}
+
+impl Controller {
     pub fn new(
         mut client: BackendClient,
         schema: Schema,

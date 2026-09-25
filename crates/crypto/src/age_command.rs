@@ -16,6 +16,8 @@ use crate::{
 /// Encrypts and decrypts whole secrets with age through anonymous pipes.
 pub struct AgeCommandProvider {
     program: OsString,
+    /// Launcher and leading arguments that run `program`, e.g. a session leader.
+    launcher: Option<(PathBuf, Vec<OsString>)>,
     decryption: DecryptionMode,
     op_program: OsString,
 }
@@ -31,6 +33,7 @@ impl Default for AgeCommandProvider {
             program: OsString::from("age"),
             decryption: DecryptionMode::OnePassword,
             op_program: OsString::from("op"),
+            launcher: None,
         }
     }
 }
@@ -41,6 +44,7 @@ impl AgeCommandProvider {
             program: program.into(),
             decryption: DecryptionMode::OnePassword,
             op_program: OsString::from("op"),
+            launcher: None,
         }
     }
 
@@ -49,9 +53,22 @@ impl AgeCommandProvider {
         Self::with_identity_file("age", identity)
     }
 
+    /// Whether decryption asks 1Password for the private key.
+    pub fn uses_one_password(&self) -> bool {
+        matches!(self.decryption, DecryptionMode::OnePassword)
+    }
+
     /// Names the 1Password CLI that is probed to explain a failed plugin run.
     pub fn with_one_password_cli(mut self, program: impl Into<OsString>) -> Self {
         self.op_program = program.into();
+        self
+    }
+
+    /// Runs decryption through `launcher prefix... <age> <arguments...>`. The
+    /// manager uses this to start age in its own session without a controlling
+    /// terminal, so 1Password scopes an authorization to that one run.
+    pub fn through(mut self, launcher: impl Into<PathBuf>, prefix: Vec<OsString>) -> Self {
+        self.launcher = Some((launcher.into(), prefix));
         self
     }
 
@@ -61,6 +78,7 @@ impl AgeCommandProvider {
             program: program.into(),
             decryption: DecryptionMode::IdentityFile(identity.into()),
             op_program: OsString::from("op"),
+            launcher: None,
         }
     }
 
@@ -70,9 +88,28 @@ impl AgeCommandProvider {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        // Encryption uses only public SSH recipients and never contacts 1Password.
+        self.run_with(None, arguments, input, output_limit)
+    }
+
+    fn run_with(
+        &self,
+        launcher: Option<&(PathBuf, Vec<OsString>)>,
+        arguments: &[OsString],
+        input: &[u8],
+        output_limit: usize,
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         // AGEDEBUG=plugin would copy plugin traffic, including unwrapped file
         // keys, to stderr, which is captured for error reports.
-        let mut child = Command::new(&self.program)
+        let mut command = match launcher {
+            Some((launcher, prefix)) => {
+                let mut command = Command::new(launcher);
+                command.args(prefix).arg(&self.program);
+                command
+            }
+            None => Command::new(&self.program),
+        };
+        let mut child = command
             .args(arguments)
             .env_remove("AGEDEBUG")
             .stdin(Stdio::piped())
@@ -149,7 +186,12 @@ impl CryptoProvider for AgeCommandProvider {
         if ciphertext.len() > MAX_CIPHERTEXT_SIZE {
             return Err(CryptoError::SecretTooLarge);
         }
-        self.run(&self.decrypt_arguments(), ciphertext, MAX_PLAINTEXT_SIZE)
+        self.run_with(
+            self.launcher.as_ref(),
+            &self.decrypt_arguments(),
+            ciphertext,
+            MAX_PLAINTEXT_SIZE,
+        )
     }
 }
 

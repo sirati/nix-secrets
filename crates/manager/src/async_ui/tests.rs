@@ -83,6 +83,8 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
         approvals: vec![],
         completions: vec![],
         busy: false,
+        activity: None,
+        one_password: true,
     };
     let worker = std::thread::spawn(move || {
         assert!(matches!(incoming.recv().unwrap(), Command::Reveal(_)));
@@ -121,4 +123,34 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
         writer.poll_completion(),
         Some(Completion::Failed(_))
     ));
+}
+
+#[test]
+fn slow_commands_describe_their_activity_until_completion() {
+    let (commands, incoming) = mpsc::channel();
+    let (outgoing, events) = mpsc::channel();
+    let mut writer = AsyncWriter {
+        commands,
+        events,
+        rows: None,
+        profiles: None,
+        approvals: vec![],
+        completions: vec![],
+        busy: false,
+        activity: None,
+        one_password: true,
+    };
+    assert!(writer.activity().is_none());
+    let _ = writer.reveal("host.services.test.first");
+    let activity = writer.activity().unwrap();
+    assert_eq!(activity.label, "Decrypting host.services.test.first");
+    assert!(activity.waits_for_one_password);
+    assert!(matches!(incoming.recv().unwrap(), Command::Reveal(_)));
+    outgoing
+        .send(Event::Completion(Completion::Failed("done".into())))
+        .unwrap();
+    assert!(writer.activity().is_none());
+    assert!(describe(&Command::CopyValue(Zeroizing::new(vec![])), true).is_none());
+    let identity_file = describe(&Command::Reveal("x".into()), false).unwrap();
+    assert!(!identity_file.waits_for_one_password);
 }

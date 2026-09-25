@@ -7,6 +7,9 @@ pub struct Invocation {
     pub ssh_args: Vec<OsString>,
     pub repository: PathBuf,
     pub identity: Option<PathBuf>,
+    /// Reuse the 1Password CLI session of the calling terminal (10 minutes)
+    /// instead of authorizing each decryption separately.
+    pub shared_session: bool,
 }
 
 impl Invocation {
@@ -57,6 +60,7 @@ where
 
     let mut ssh_args = Vec::new();
     let mut identity = None;
+    let mut shared_session = false;
     let mut before = arguments[..delimiter].iter();
     while let Some(argument) = before.next() {
         if argument == "--secret-identity" {
@@ -66,6 +70,8 @@ where
             identity = Some(PathBuf::from(
                 before.next().ok_or(ParseError::MissingIdentity)?,
             ));
+        } else if argument == "--1password-shared-session" {
+            shared_session = true;
         } else {
             ssh_args.push(argument.clone());
         }
@@ -79,6 +85,7 @@ where
         ssh_args,
         repository,
         identity,
+        shared_session,
     })
 }
 
@@ -122,6 +129,19 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.identity, Some(PathBuf::from("/run/key")));
         assert_eq!(parsed.ssh_args, os(&["host"]));
+    }
+
+    #[test]
+    fn one_password_session_scope_is_per_decryption_unless_shared() {
+        let default = parse(os(&["--", "/repo"]), Path::new("/h")).unwrap();
+        assert!(!default.shared_session);
+        let shared = parse(
+            os(&["--1password-shared-session", "host", "--", "/repo"]),
+            Path::new("/h"),
+        )
+        .unwrap();
+        assert!(shared.shared_session);
+        assert_eq!(shared.ssh_args, os(&["host"]));
     }
 
     #[test]
