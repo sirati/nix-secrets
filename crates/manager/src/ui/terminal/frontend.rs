@@ -11,7 +11,13 @@ use std::io::Stdout;
 pub(super) struct CrosstermFrontend {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     hits: HitMap,
+    /// When the last Ctrl+V was accepted. Terminals send held keys as fresh
+    /// presses, so repeats within [`PASTE_REPEAT_GAP`] are dropped and holding
+    /// Ctrl+V reads the clipboard once.
+    last_paste: Option<std::time::Instant>,
 }
+
+const PASTE_REPEAT_GAP: std::time::Duration = std::time::Duration::from_millis(400);
 
 impl CrosstermFrontend {
     pub(super) fn setup() -> io::Result<Self> {
@@ -26,6 +32,7 @@ impl CrosstermFrontend {
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(output))?,
             hits: HitMap::default(),
+            last_paste: None,
         })
     }
 
@@ -79,7 +86,14 @@ impl Frontend for CrosstermFrontend {
                     KeyCode::Char('v' | 'V')
                         if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
                     {
-                        return Ok(UiEvent::PasteRequest)
+                        let now = std::time::Instant::now();
+                        let repeat = self
+                            .last_paste
+                            .is_some_and(|last| now.duration_since(last) < PASTE_REPEAT_GAP);
+                        self.last_paste = Some(now);
+                        if !repeat {
+                            return Ok(UiEvent::PasteRequest);
+                        }
                     }
                     KeyCode::Char(_) if key.modifiers.contains(event::KeyModifiers::CONTROL) => {}
                     KeyCode::Char(character) => return Ok(UiEvent::Character(character)),

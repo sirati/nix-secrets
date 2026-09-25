@@ -46,8 +46,12 @@ Leaves are secrets. The TUI presents the structure as a file tree and marks
 each leaf `set` in green or `unset` in red. Pressing Enter opens a masked input
 editor. Pasting while a leaf is selected sets it from the clipboard, and a
 paste in the entry field inserts the pasted text. Ctrl+V reads the local
-clipboard directly with `wl-paste`, `xclip`, `xsel` or `pbpaste`. It works even
-when the terminal refuses to paste, and one trailing newline is dropped.
+clipboard directly, only when pressed: it reads the X11 CLIPBOARD selection
+in-process, over Xwayland under Wayland, with an unmapped helper window, so no
+window appears. `wl-paste` is not used because on compositors without a
+data-control protocol, such as GNOME, it maps a window for every read. It
+works even when the terminal refuses to paste; held keys read once, and one
+trailing newline is dropped.
 Clicking a selected unset input value again opens its entry field. While a
 search is active, the status line counts matches and those hidden by filters.
 Attributes that do not apply to a value, such as the user of a system

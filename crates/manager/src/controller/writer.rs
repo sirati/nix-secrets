@@ -136,7 +136,7 @@ impl SecretWriter for Controller {
         crate::clipboard::copy(value)
     }
     fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
-        crate::clipboard::paste(false)
+        crate::clipboard::paste()
     }
 
     fn write(
