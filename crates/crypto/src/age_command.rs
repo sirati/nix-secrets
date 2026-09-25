@@ -8,7 +8,8 @@ use std::{
 use zeroize::Zeroizing;
 
 use crate::{
-    CryptoError, CryptoProvider,
+    AgeFailure, CryptoError, CryptoProvider,
+    age_failure::CAPTURED_BYTES,
     secret::{MAX_CIPHERTEXT_SIZE, MAX_PLAINTEXT_SIZE},
 };
 
@@ -16,6 +17,7 @@ use crate::{
 pub struct AgeCommandProvider {
     program: OsString,
     decryption: DecryptionMode,
+    op_program: OsString,
 }
 
 enum DecryptionMode {
@@ -28,6 +30,7 @@ impl Default for AgeCommandProvider {
         Self {
             program: OsString::from("age"),
             decryption: DecryptionMode::OnePassword,
+            op_program: OsString::from("op"),
         }
     }
 }
@@ -37,6 +40,7 @@ impl AgeCommandProvider {
         Self {
             program: program.into(),
             decryption: DecryptionMode::OnePassword,
+            op_program: OsString::from("op"),
         }
     }
 
@@ -45,11 +49,18 @@ impl AgeCommandProvider {
         Self::with_identity_file("age", identity)
     }
 
+    /// Names the 1Password CLI that is probed to explain a failed plugin run.
+    pub fn with_one_password_cli(mut self, program: impl Into<OsString>) -> Self {
+        self.op_program = program.into();
+        self
+    }
+
     /// Selects both the age executable and a runtime SSH identity file.
     pub fn with_identity_file(program: impl Into<OsString>, identity: impl Into<PathBuf>) -> Self {
         Self {
             program: program.into(),
             decryption: DecryptionMode::IdentityFile(identity.into()),
+            op_program: OsString::from("op"),
         }
     }
 
@@ -59,11 +70,14 @@ impl AgeCommandProvider {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        // AGEDEBUG=plugin would copy plugin traffic, including unwrapped file
+        // keys, to stderr, which is captured for error reports.
         let mut child = Command::new(&self.program)
             .args(arguments)
+            .env_remove("AGEDEBUG")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
         let mut stdin = child.stdin.take().ok_or_else(|| {
             CryptoError::AgeIo(std::io::Error::other("age stdin was not created"))
@@ -71,10 +85,22 @@ impl AgeCommandProvider {
         let mut stdout = child.stdout.take().ok_or_else(|| {
             CryptoError::AgeIo(std::io::Error::other("age stdout was not created"))
         })?;
+        let mut stderr = child.stderr.take().ok_or_else(|| {
+            CryptoError::AgeIo(std::io::Error::other("age stderr was not created"))
+        })?;
         let input = Zeroizing::new(input.to_vec());
         let mut output = Zeroizing::new(Vec::with_capacity(output_limit.min(4096)));
-        let (write_result, read_result) = std::thread::scope(|scope| {
+        let (write_result, read_result, diagnostics) = std::thread::scope(|scope| {
             let writer = scope.spawn(move || stdin.write_all(&input));
+            let diagnostics = scope.spawn(move || {
+                let mut captured = Vec::new();
+                let _ = stderr
+                    .by_ref()
+                    .take(CAPTURED_BYTES)
+                    .read_to_end(&mut captured);
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+                captured
+            });
             let read = stdout
                 .by_ref()
                 .take((output_limit + 1) as u64)
@@ -82,17 +108,19 @@ impl AgeCommandProvider {
             if read.is_err() || output.len() > output_limit {
                 let _ = child.kill();
             }
-            (writer.join(), read)
+            (writer.join(), read, diagnostics.join())
         });
         let status = child.wait()?;
         read_result?;
-        write_result.map_err(|_| CryptoError::InputWorkerFailed)??;
         if output.len() > output_limit {
             return Err(CryptoError::AgeOutputTooLarge);
         }
         if !status.success() {
-            return Err(CryptoError::AgeFailed(status.code()));
+            let mut failure = AgeFailure::new(status, &diagnostics.unwrap_or_default());
+            failure.probe_one_password(&self.op_program);
+            return Err(CryptoError::AgeFailed(Box::new(failure)));
         }
+        write_result.map_err(|_| CryptoError::InputWorkerFailed)??;
         Ok(output)
     }
 }

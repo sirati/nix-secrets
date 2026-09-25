@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::NoticeSeverity;
 use buttons::Button;
 
 fn key(label: &'static str, shortcut: Shortcut) -> Button {
@@ -9,8 +10,14 @@ fn letter(label: &'static str, character: char) -> Button {
 }
 
 pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
-    if model.message.is_some() {
-        return vec![key("Enter Continue", Shortcut::Enter)];
+    // An informational notice leaves the current actions usable; a failure
+    // offers only its OK button.
+    if model
+        .message
+        .as_ref()
+        .is_some_and(|notice| notice.severity == NoticeSeverity::Failure)
+    {
+        return vec![key("Enter OK", Shortcut::Enter)];
     }
     match &model.mode {
         Mode::Browse => {

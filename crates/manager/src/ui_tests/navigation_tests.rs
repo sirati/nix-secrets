@@ -85,10 +85,7 @@ fn deleting_a_set_leaf_requires_confirmation_and_never_requests_deployment() {
     let mut unset = model(false);
     reduce(&mut unset, UiEvent::Character('d'), &mut writer);
     assert_eq!(writer.deletions, ["h.services.s.key"]);
-    assert_eq!(
-        unset.message.as_deref(),
-        Some("select a set secret to delete")
-    );
+    assert_eq!(unset.message_text(), Some("select a set secret to delete"));
 }
 
 #[test]

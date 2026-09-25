@@ -36,8 +36,8 @@ fn unset_leaf_enters_editor_directly() {
 #[test]
 fn notices_are_acknowledged_in_order_before_pending_approval() {
     let mut model = Model::new(vec![]);
-    model.notify("first");
-    model.notify("second");
+    model.fail("first");
+    model.inform("second");
     model.offer_approval(ApprovalRequest {
         id: "id".into(),
         target: "host".into(),
@@ -48,9 +48,9 @@ fn notices_are_acknowledged_in_order_before_pending_approval() {
         tasks: vec![],
     });
     assert!(matches!(model.mode, Mode::Browse));
-    assert_eq!(model.message.as_deref(), Some("first"));
+    assert_eq!(model.message_text(), Some("first"));
     model.acknowledge();
-    assert_eq!(model.message.as_deref(), Some("second"));
+    assert_eq!(model.message_text(), Some("second"));
     model.acknowledge();
     assert!(matches!(model.mode, Mode::Approval(_)));
 }

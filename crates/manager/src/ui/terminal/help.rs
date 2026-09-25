@@ -38,6 +38,11 @@ A target deployer requests one server's values.
 y  Approve the verified target and displayed changes
 n / Esc  Reject the request
 
-Enter  Acknowledge a notice
+NOTICES
+A success notice closes on the next key or click, which then acts as usual:
+↓ moves the selection and S opens profiles. Esc and paste only close it.
+Above a confirmation or entry dialog the key only closes the notice.
+An error stays until Enter or its OK button; other input is ignored.
+
 Esc  Leave a view, or quit from the tree"
 }

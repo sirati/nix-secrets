@@ -55,7 +55,7 @@ pub(super) fn prompt(model: &Model) -> String {
             format!("Provider failed: {message}. r: retry · Esc: cancel")
         }
         Mode::Approval(request) => {
-            let failure = model.message.as_deref().unwrap_or_default();
+            let failure = model.message_text().unwrap_or_default();
             if let Some(host_key) = &request.host_key {
                 format!(
                     "{failure} {host_key} Trust this host and inspect its deployment state? y/n"

@@ -11,8 +11,9 @@ mod hit;
 mod layout;
 mod text;
 mod tree;
+use crate::model::NoticeSeverity;
 use actions::hotkeys;
-use buttons::{draw_rows, wrap_buttons};
+use buttons::{draw_rows, wrap_buttons, Button};
 use filters::render_filters;
 use frontend::CrosstermFrontend;
 use help::help_text;
@@ -45,8 +46,12 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
         );
     }
     if zones.status.height > 0 {
-        let status = if model.message.is_some() {
-            "Notice pending · Enter acknowledges".to_owned()
+        let status = if model
+            .message
+            .as_ref()
+            .is_some_and(|notice| notice.severity == NoticeSeverity::Failure)
+        {
+            "Error pending · Enter or OK closes it".to_owned()
         } else if matches!(model.mode, Mode::BulkProgress { .. }) {
             "Generating passwords".to_owned()
         } else {
@@ -87,43 +92,128 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
 }
 
 fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits: &mut HitMap) {
-    let (title, body, scroll) = if let Some(message) = &model.message {
-        (
-            "Notice",
-            format!("{message}\n\n↑↓: scroll · Enter: continue"),
-            model.modal_scroll,
-        )
-    } else {
-        match &model.mode {
-            Mode::Browse => return,
-            Mode::Help { scroll } => ("Help", help_text().to_owned(), *scroll),
-            Mode::Properties { scroll } => ("Properties", prompt(model), *scroll),
-            Mode::Reveal { value, scroll, .. } => (
-                "Reveal",
-                format!(
-                    "{}\n\nEsc: hide · c: copy",
-                    std::str::from_utf8(value).unwrap_or("<binary value: use c to copy>")
-                ),
-                *scroll,
-            ),
-            mode => (modal_title(mode), prompt(model), model.modal_scroll),
+    match &model.message {
+        Some(notice)
+            if notice.severity == NoticeSeverity::Failure
+                || !super::prelude::passes_through(&model.mode) =>
+        {
+            let failure = notice.severity == NoticeSeverity::Failure;
+            draw_dialog(
+                frame,
+                model,
+                area,
+                hits,
+                Dialog {
+                    title: if failure { "Error" } else { "Notice" },
+                    body: if failure {
+                        format!("{}\n\n↑↓: scroll · Enter or OK: close", notice.text)
+                    } else {
+                        // A key never reaches a confirmation or entry dialog below.
+                        format!("{}\n\n(press any key to close this)", notice.text)
+                    },
+                    scroll: model.modal_scroll,
+                    selector: None,
+                    footer: failure.then(|| hotkeys(model, area.width < 70)),
+                    exclusive: true,
+                },
+            );
+            if !failure {
+                hits.add(area, MouseTarget::Notice);
+            }
         }
-    };
-    if area.width == 0 || area.height == 0 {
-        return;
+        Some(notice) => {
+            // The screen underneath stays live: its hit regions remain so a
+            // click closes the notice and then acts on what it hit.
+            render_mode_modal(frame, model, area, hits);
+            let dialog = draw_dialog(
+                frame,
+                model,
+                area,
+                hits,
+                Dialog {
+                    title: "Notice",
+                    body: format!("{}\n\n{INFO_NOTICE_HINT}", notice.text),
+                    scroll: 0,
+                    selector: None,
+                    footer: None,
+                    exclusive: false,
+                },
+            );
+            hits.add(dialog, MouseTarget::Notice);
+        }
+        None => render_mode_modal(frame, model, area, hits),
     }
-    hits.regions.clear();
+}
+
+pub(super) const INFO_NOTICE_HINT: &str =
+    "(pressing any key will perform its usual action and close this)";
+
+fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits: &mut HitMap) {
+    let (title, body, scroll) = match &model.mode {
+        Mode::Browse => return,
+        Mode::Help { scroll } => ("Help", help_text().to_owned(), *scroll),
+        Mode::Properties { scroll } => ("Properties", prompt(model), *scroll),
+        Mode::Reveal { value, scroll, .. } => (
+            "Reveal",
+            format!(
+                "{}\n\nEsc: hide · c: copy",
+                std::str::from_utf8(value).unwrap_or("<binary value: use c to copy>")
+            ),
+            *scroll,
+        ),
+        mode => (modal_title(mode), prompt(model), model.modal_scroll),
+    };
+    draw_dialog(
+        frame,
+        model,
+        area,
+        hits,
+        Dialog {
+            title,
+            body,
+            scroll,
+            selector: selector_items(model),
+            footer: Some(hotkeys(model, area.width < 70)),
+            exclusive: true,
+        },
+    );
+}
+
+struct Dialog {
+    title: &'static str,
+    body: String,
+    scroll: u16,
+    selector: Option<Vec<String>>,
+    footer: Option<Vec<Button>>,
+    /// Whether the dialog replaces every hit region beneath it.
+    exclusive: bool,
+}
+
+fn draw_dialog(
+    frame: &mut ratatui::Frame<'_>,
+    model: &Model,
+    area: Rect,
+    hits: &mut HitMap,
+    dialog: Dialog,
+) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return Rect::default();
+    }
+    if dialog.exclusive {
+        hits.regions.clear();
+    }
+    let body = dialog.body;
     let width = area.width.min(80).max(1);
     let inner_width = width.saturating_sub(2).max(1) as usize;
-    let selector = selector_items(model);
-    let lines = if selector.is_some() {
+    let lines = if dialog.selector.is_some() {
         body.lines().count()
     } else {
         body.lines()
             .map(|line| line.chars().count().div_ceil(inner_width).max(1))
             .sum::<usize>()
     };
-    let height = area.height.min((lines + 4).max(5) as u16);
+    let chrome = if dialog.footer.is_some() { 4 } else { 2 };
+    let height = area.height.min((lines + chrome).max(chrome + 1) as u16);
     let box_area = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
@@ -132,16 +222,16 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
     };
     frame.render_widget(Clear, box_area);
     frame.render_widget(
-        Block::default().title(title).borders(Borders::ALL),
+        Block::default().title(dialog.title).borders(Borders::ALL),
         box_area,
     );
     let body_area = Rect {
         x: box_area.x + 1,
         y: box_area.y + 1,
         width: box_area.width.saturating_sub(2),
-        height: box_area.height.saturating_sub(4),
+        height: box_area.height.saturating_sub(chrome as u16),
     };
-    if let Some(items) = selector {
+    if let Some(items) = dialog.selector {
         let top = selector_selected(model)
             .unwrap_or(0)
             .saturating_add(2)
@@ -182,26 +272,23 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
         frame.render_widget(
             Paragraph::new(body)
                 .alignment(Alignment::Left)
-                .scroll((scroll, 0))
+                .scroll((dialog.scroll, 0))
                 .wrap(Wrap { trim: false }),
             body_area,
         );
     }
-    if box_area.height >= 5 {
-        let footer = Rect {
-            x: box_area.x,
-            y: box_area.bottom() - 3,
-            width: box_area.width,
-            height: 3,
-        };
-        draw_rows(
-            frame,
-            footer,
-            vec![hotkeys(model, box_area.width < 70)],
-            model.hover,
-            hits,
-        );
+    if let Some(buttons) = dialog.footer {
+        if box_area.height >= 5 {
+            let footer = Rect {
+                x: box_area.x,
+                y: box_area.bottom() - 3,
+                width: box_area.width,
+                height: 3,
+            };
+            draw_rows(frame, footer, vec![buttons], model.hover, hits);
+        }
     }
+    box_area
 }
 
 fn modal_title(mode: &Mode) -> &'static str {

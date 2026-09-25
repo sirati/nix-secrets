@@ -1,9 +1,10 @@
 use super::*;
 
 pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter) -> Action {
-    if let Some(action) = prelude::handle(model, &event, writer) {
-        return action;
-    }
+    let event = match prelude::handle(model, event, writer) {
+        Ok(action) => return action,
+        Err(event) => event,
+    };
     let mode = std::mem::replace(&mut model.mode, Mode::Browse);
     match (mode, event) {
         (Mode::Browse, UiEvent::Up) => model.move_by(-1),
@@ -65,12 +66,12 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
                 GenerateKind::Passphrase
             };
             if paths.is_empty() {
-                model.notify("No missing passwords to generate");
+                model.inform("No missing passwords to generate");
             } else {
                 let total = paths.len();
                 match writer.generate_missing(paths, kind) {
                     Ok(()) => model.mode = Mode::BulkProgress { total, done: 0 },
-                    Err(error) => model.notify(error),
+                    Err(error) => model.fail(error),
                 }
             }
         }
@@ -148,7 +149,7 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
                     path: row.path.expect("secret row has path"),
                 }
             }
-            _ => model.notify("select a set secret to delete"),
+            _ => model.inform("select a set secret to delete"),
         },
         (Mode::Browse, UiEvent::Character('r')) => match model.selected().cloned() {
             Some(row) if row.is_secret() && row.is_set => {
@@ -161,38 +162,34 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
                             scroll: 0,
                         }
                     }
-                    Err(error) => notify_operation_result(model, error),
+                    Err(error) => fail_unless_queued(model, error),
                 }
             }
-            _ => model.notify("select a set secret to reveal"),
+            _ => model.inform("select a set secret to reveal"),
         },
         (Mode::Browse, UiEvent::Character('c')) => match model.selected().cloned() {
             Some(row) if row.is_secret() && row.is_set => {
                 let path = row.path.expect("secret row has path");
-                let result = match writer.reveal(&path).and_then(|value| writer.copy(&value)) {
-                    Ok(()) => format!("copied {path}"),
-                    Err(error) => error,
-                };
-                notify_operation_result(model, result);
+                let result = writer.reveal(&path).and_then(|value| writer.copy(&value));
+                report(model, result.map(|()| format!("copied {path}")));
             }
-            _ => model.notify("select a set secret to copy"),
+            _ => model.inform("select a set secret to copy"),
         },
         (Mode::Browse, UiEvent::Character('p')) => match model.selected().cloned() {
             Some(row) if row.is_secret() && row.is_set => {
                 let path = row.path.expect("secret row has path");
-                notify_operation_result(
+                report(
                     model,
-                    match writer.copy_public(&path) {
-                        Ok(()) => format!("copied public key for {path}"),
-                        Err(error) => error,
-                    },
+                    writer
+                        .copy_public(&path)
+                        .map(|()| format!("copied public key for {path}")),
                 );
             }
-            _ => model.notify("select a set OpenSSH private key"),
+            _ => model.inform("select a set OpenSSH private key"),
         },
         (Mode::DeleteConfirm { path }, UiEvent::Character('y')) => match writer.delete(&path) {
             Ok(()) => model.mark_deleted(&path),
-            Err(error) => notify_operation_result(model, error),
+            Err(error) => fail_unless_queued(model, error),
         },
         (Mode::DeleteConfirm { .. }, UiEvent::Character('n') | UiEvent::Escape) => {}
         (Mode::DeleteConfirm { path }, _) => model.mode = Mode::DeleteConfirm { path },
@@ -233,13 +230,7 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             },
             UiEvent::Character('c'),
         ) => {
-            notify_operation_result(
-                model,
-                match writer.copy(&value) {
-                    Ok(()) => "value copied".into(),
-                    Err(error) => error,
-                },
-            );
+            report(model, writer.copy(&value).map(|()| "value copied".into()));
             model.mode = Mode::Reveal {
                 path,
                 value,

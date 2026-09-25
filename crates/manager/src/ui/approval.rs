@@ -11,14 +11,14 @@ pub(super) fn reduce(
             Ok(Some(next)) => model.mode = Mode::Approval(next),
             Ok(None) => return Action::Approved,
             Err(message) => {
-                notify_operation_result(model, message);
+                fail_unless_queued(model, message);
                 model.mode = Mode::Approval(request);
             }
         },
         UiEvent::Character('n') | UiEvent::Escape => match writer.approval(false) {
             Ok(_) => return Action::Rejected,
             Err(message) => {
-                notify_operation_result(model, message);
+                fail_unless_queued(model, message);
                 model.mode = Mode::Approval(request);
             }
         },

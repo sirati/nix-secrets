@@ -48,8 +48,10 @@ editor. Pasting while a leaf is selected sets it from the clipboard. Replacing
 an existing value requires confirmation.
 Press `d` to delete a selected value after confirmation, `r` to reveal it,
 `c` to copy it, or `p` to copy the public half of a stored OpenSSH private key
-without decrypting. Dialogs appear over the tree. Notices require Enter to
-acknowledge. Press `1` for values needing operator input, `2` for all items,
+without decrypting. Dialogs appear over the tree. A success notice closes on the
+next key or click, which then performs its usual action; above a confirmation
+or entry dialog that key only closes the notice. Errors stay until Enter or a
+click on OK. Press `1` for values needing operator input, `2` for all items,
 `3` for private keys, `4` for passwords, or `5` for public information.
 Press `6` for all audiences or `7` for human-facing values; `/` searches names,
 identifiers, and descriptions. The views compose. Key and password views use
@@ -115,7 +117,11 @@ signing API. Per-request prompts depend on 1Password policy and session state.
 See [AGE-PLUGIN-1P-REVIEW.md](AGE-PLUGIN-1P-REVIEW.md).
 
 The flake keeps runtime tools opt in. Use `.#nix-secrets-1password` for the
-1Password provider. Use `.#nix-secrets-age` together with
+1Password provider. The desktop-app integration accepts only an `op` that is
+setgid `onepassword-cli`; on NixOS enable `programs._1password` so
+`/run/wrappers/bin/op` exists. The package appends its own 1Password CLI to the
+end of `PATH`, so a system `op` always takes precedence. The bundled one is only
+a fallback, for example for `OP_SERVICE_ACCOUNT_TOKEN`. Use `.#nix-secrets-age` together with
 `--secret-identity /runtime/path/to/key` for a private identity file. The bare
 package expects compatible `age` and OpenSSH programs already in `PATH`.
 

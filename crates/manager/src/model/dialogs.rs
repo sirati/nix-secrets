@@ -1,21 +1,30 @@
 use super::*;
 
 impl Model {
-    pub fn notify(&mut self, message: impl Into<String>) {
-        let message = message.into();
-        if self.message.as_deref() == Some(message.as_str())
-            || self
-                .notifications
-                .back()
-                .is_some_and(|queued| queued == &message)
-        {
+    /// Shows a success or informational notice that any input dismisses.
+    pub fn inform(&mut self, message: impl Into<String>) {
+        self.push_notice(message.into(), NoticeSeverity::Info);
+    }
+
+    /// Shows a failure that stays until the operator explicitly acknowledges it.
+    pub fn fail(&mut self, message: impl Into<String>) {
+        self.push_notice(message.into(), NoticeSeverity::Failure);
+    }
+
+    fn push_notice(&mut self, text: String, severity: NoticeSeverity) {
+        let notice = Notice { text, severity };
+        if self.message.as_ref() == Some(&notice) || self.notifications.back() == Some(&notice) {
             return;
         }
         if self.message.is_none() {
-            self.message = Some(message);
+            self.message = Some(notice);
         } else {
-            self.notifications.push_back(message);
+            self.notifications.push_back(notice);
         }
+    }
+
+    pub fn message_text(&self) -> Option<&str> {
+        self.message.as_ref().map(|notice| notice.text.as_str())
     }
 
     pub fn acknowledge(&mut self) {
