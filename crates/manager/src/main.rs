@@ -173,11 +173,12 @@ fn runtime_directory(home: &Path) -> PathBuf {
         .unwrap_or_else(|| home.join(".local/state"))
 }
 
-/// Starts each 1Password decryption in its own session through the
-/// `nix-secrets-1password` launcher installed next to this binary, so an
-/// authorization covers one decryption and the prompt names nix-secrets.
+/// Runs each 1Password decryption through the `nix-secrets-1password`
+/// launcher installed next to this binary. It authorizes once before age
+/// starts, so a decryption raises at most one prompt, and by default gives
+/// each decryption its own session so one approval covers one decryption.
 fn one_password_scope(provider: AgeCommandProvider, shared: bool) -> AgeCommandProvider {
-    if shared || !provider.uses_one_password() {
+    if !provider.uses_one_password() {
         return provider;
     }
     let launcher = env::current_exe()
@@ -185,7 +186,14 @@ fn one_password_scope(provider: AgeCommandProvider, shared: bool) -> AgeCommandP
         .and_then(|path| Some(path.parent()?.join("nix-secrets-1password")))
         .filter(|path| path.is_file());
     match launcher {
-        Some(launcher) => provider.through(launcher, vec![]),
+        Some(launcher) => {
+            let prefix = if shared {
+                vec!["--shared-session".into()]
+            } else {
+                vec![]
+            };
+            provider.through(launcher, prefix)
+        }
         None => provider,
     }
 }

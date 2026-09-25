@@ -128,3 +128,29 @@ fn decryption_runs_through_the_launcher_but_encryption_does_not() {
         format!("launcher {}\nage --decrypt\nage --encrypt\n", age.display())
     );
 }
+
+#[test]
+fn launcher_authorization_failure_reads_as_denied_without_probing_op() {
+    let scripts = Scripts::new();
+    let age = scripts.script("age", "exit 0");
+    let launcher = scripts.script(
+        "launcher",
+        "cat >/dev/null\necho 'nix-secrets-1password: 1Password authorization failed: \
+         authorization prompt dismissed, please try again' >&2\nexit 77",
+    );
+    let calls = scripts.0.join("op-calls");
+    let op = scripts.script("op", &format!("echo \"$*\" >> {}", calls.display()));
+    let provider = AgeCommandProvider::new(&age)
+        .with_one_password_cli(&op)
+        .through(&launcher, vec![]);
+    let error = decrypt_secret(IDENTIFIER, &record(), &provider)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "decrypting host.services.mail.password failed: 1Password authorization denied or \
+         failed: authorization prompt dismissed, please try again\n\
+         Hint: approve the 1Password authorization prompt and retry"
+    );
+    assert!(!calls.exists(), "no op call after a denial");
+}

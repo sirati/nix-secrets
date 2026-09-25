@@ -15,6 +15,8 @@ use std::{
 };
 
 const SHOWN_CHARACTERS: usize = 600;
+/// How `nix-secrets-1password` reports that 1Password did not authorize.
+const AUTHORIZATION_FAILED: &str = "nix-secrets-1password: 1Password authorization failed:";
 pub(crate) const CAPTURED_BYTES: u64 = 16 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -34,9 +36,17 @@ impl fmt::Display for AgeFailure {
         if let Some(operation) = &self.operation {
             write!(formatter, "{operation} failed: ")?;
         }
-        write!(formatter, "age exited with {}", self.status)?;
-        if !self.stderr.is_empty() {
-            write!(formatter, ": {}", self.stderr)?;
+        if let Some(reason) = self.stderr.strip_prefix(AUTHORIZATION_FAILED) {
+            // The launcher stopped before age started.
+            write!(
+                formatter,
+                "1Password authorization denied or failed:{reason}"
+            )?;
+        } else {
+            write!(formatter, "age exited with {}", self.status)?;
+            if !self.stderr.is_empty() {
+                write!(formatter, ": {}", self.stderr)?;
+            }
         }
         if let Some(diagnostic) = &self.op_diagnostic {
             write!(formatter, "\n{diagnostic}")?;
@@ -61,8 +71,10 @@ impl AgeFailure {
         }
     }
 
-    /// The 1Password plugin discards `op`'s stderr, so rerun a harmless `op`
-    /// command from the same PATH to recover its message and location.
+    /// The 1Password plugin discards `op`'s stderr, so rerun `op account list`
+    /// from the same PATH to recover its message and location. That command
+    /// only lists configured accounts and never asks for authorization, so
+    /// it cannot raise a second prompt.
     pub(crate) fn probe_one_password(&mut self, op_program: &OsStr) {
         if !self.stderr.contains("1p plugin") {
             return;
