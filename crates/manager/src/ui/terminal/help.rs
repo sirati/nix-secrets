@@ -7,6 +7,7 @@ P  Show all attributes of the selected value
 F  Filter by any identity or presentation attribute
 T  Choose which attributes form the tree and reorder them
 S  Open named view profiles; Enter loads, n saves new, s overwrites, d deletes
+O  Settings for this session (reset on restart; never saved to the repository)
 1 Required (external values only) · 2 All · 3 Keys · 4 Passwords · 5 Public info
 6 Everyone · 7 Human-facing
 ?  Show or close this help
@@ -26,8 +27,10 @@ Tree attributes remain filterable.
 
 EDIT
 Enter  Edit selected value; Enter again saves
-Click  Select a row; click a selected unset input value again to enter it
+Click  Select a row; a click on an unset input value also opens its entry
 Paste  Set from clipboard; replacement asks first
+Tab    In the entry field: toggle 'Autosave unset on paste'. When on, pasting
+       one line into an unset value saves it at once
 Ctrl+V Read the clipboard directly over X11 or Xwayland, without opening a
        window; works when the terminal's own paste fails
 g  Generate password or passphrase for one field
@@ -36,6 +39,9 @@ r  Reveal selected value
 c  Copy the selected value
 p  Copy the public half of a stored OpenSSH private key
 d  Delete selected value after confirmation
+Replacing a value that was never committed to git warns first; only
+Ctrl+Shift+Y or its Yes button overwrites it; n, Enter, Space and Esc keep it.
+Terminals that cannot report Shift with Ctrl need the Yes button
 
 DEPLOYMENT
 A target deployer requests one server's values.

@@ -3,9 +3,9 @@ mod public_info;
 mod subscription;
 use nix_secrets_core::framing::{read_json, write_json};
 use nix_secrets_core::{
-    ApprovalRequest, ApprovalStatus, BackendEvent, Decision, EncryptedSecret as StoredSecret,
-    GeneratedPublicKey, ProfileSnapshot, PublicInfoRecord, Request, Response, SecretPath,
-    ViewProfile,
+    ApprovalRequest, ApprovalStatus, BackendEvent, CommitState, Decision,
+    EncryptedSecret as StoredSecret, GeneratedPublicKey, ProfileSnapshot, PublicInfoRecord,
+    Request, Response, SecretPath, ViewProfile,
 };
 use nix_secrets_crypto::{encrypt_secret, CryptoProvider, Recipient};
 use std::collections::BTreeMap;
@@ -24,6 +24,14 @@ impl BackendClient {
     pub fn list(&mut self) -> io::Result<BTreeMap<String, StoredSecret>> {
         match self.exchange(&Request::List)? {
             Response::Secrets { entries } => Ok(entries),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn commit_state(&mut self, path: &SecretPath) -> io::Result<CommitState> {
+        match self.exchange(&Request::CommitState { path: path.clone() })? {
+            Response::CommitState { state } => Ok(state),
+            Response::Error { message } => Err(io::Error::other(message)),
             response => Err(unexpected(response)),
         }
     }

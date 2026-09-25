@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
+mod committed;
 mod generated_metadata;
+pub use committed::CommitState;
 mod persistence;
 mod public_info;
 mod validation;

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 // Bump this when the backend protocol or its persisted document format becomes
 // incompatible with a running backend. The socket name keeps older processes
 // and their active clients untouched while a compatible backend starts.
-const BACKEND_COMPATIBILITY_VERSION: u32 = 4;
+const BACKEND_COMPATIBILITY_VERSION: u32 = 5;
 
 pub fn socket_name(repository: &Path) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};

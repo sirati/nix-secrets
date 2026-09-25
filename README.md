@@ -52,12 +52,19 @@ window appears. `wl-paste` is not used because on compositors without a
 data-control protocol, such as GNOME, it maps a window for every read. It
 works even when the terminal refuses to paste; held keys read once, and one
 trailing newline is dropped.
-Clicking a selected unset input value again opens its entry field. While a
+Clicking an unset input value selects it and opens its entry field. While a
 search is active, the status line counts matches and those hidden by filters.
 Attributes that do not apply to a value, such as the user of a system
 service, add no tree level or filter value; a filter on them leaves such
 values visible. Replacing
-an existing value requires confirmation.
+an existing value requires confirmation. Before that, the backend compares the
+stored record with `HEAD:nix-secrets.toml`; only HEAD is checked, not older
+commits. If the value is not in HEAD, or git cannot answer, a warning explains
+that overwriting loses the old value for good. Only Ctrl+Shift+Y or its Yes
+button confirms; n, Enter, Space and Esc keep the value. `O` opens session
+settings, which reset on restart and are never written to the repository. With
+"Autosave unset on paste" on, toggled by Tab or a click in the entry field, a
+one-line paste into an unset value saves it at once.
 Press `d` to delete a selected value after confirmation, `r` to reveal it,
 `c` to copy it, or `p` to copy the public half of a stored OpenSSH private key
 without decrypting. Dialogs appear over the tree. A success notice closes on the

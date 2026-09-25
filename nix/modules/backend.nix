@@ -36,7 +36,8 @@ in
       description = "Nix secrets encrypted store backend";
       wantedBy = [ "multi-user.target" ];
       after = [ "local-fs.target" ];
-      path = [ pkgs.nix ];
+      # git answers whether a value about to be overwritten was committed.
+      path = [ pkgs.nix pkgs.git ];
       serviceConfig = {
         User = cfg.user;
         RuntimeDirectory = "nix-secrets";

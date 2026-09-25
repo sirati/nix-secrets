@@ -312,3 +312,49 @@ impl SecretWriter for NoWriter {
         Err(("not used".into(), value))
     }
 }
+
+#[test]
+fn uncommitted_warning_shows_its_yes_button_with_the_hotkey() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::Replace {
+        path: "h.services.s.key".into(),
+        value: Zeroizing::new(b"new".to_vec()),
+        commit: nix_secrets_core::CommitState::Uncommitted,
+    };
+    let mut hits = HitMap::default();
+    terminal.draw(|frame| hits = render(frame, &model)).unwrap();
+    let screen = (0..30)
+        .map(|y| line(&terminal, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("never committed to git"), "{screen}");
+    assert!(screen.contains("Ctrl+Shift+Y Yes, overwrite"), "{screen}");
+    assert!(hits
+        .regions
+        .iter()
+        .any(|(_, target)| *target == MouseTarget::ConfirmLoss));
+    assert!(!screen.contains("new"), "the new value is masked");
+}
+
+#[test]
+fn settings_dialog_lists_session_settings() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::Settings { selected: 0 };
+    let screen = draw(&mut terminal, &model);
+    assert!(
+        screen.contains("□ Autosave unset values on paste"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("reset when nix-secrets restarts"),
+        "{screen}"
+    );
+    model.settings.autosave_unset_on_paste = true;
+    let screen = draw(&mut terminal, &model);
+    assert!(
+        screen.contains("☑ Autosave unset values on paste"),
+        "{screen}"
+    );
+}

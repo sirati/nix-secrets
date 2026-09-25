@@ -1,4 +1,5 @@
 use super::*;
+use nix_secrets_core::CommitState;
 
 pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter) -> Action {
     let event = match prelude::handle(model, event, writer) {
@@ -151,9 +152,11 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             model.mode = Mode::Search { query };
         }
         (Mode::Search { query }, _) => model.mode = Mode::Search { query },
-        (Mode::Browse, UiEvent::Enter) => model.begin_value(Vec::new()),
+        (Mode::Browse, UiEvent::Enter) => {
+            model.begin_value_with(Vec::new(), |path| writer.commit_state(path))
+        }
         (Mode::Browse, UiEvent::Paste(value)) => {
-            model.begin_value(value);
+            model.begin_value_with(value, |path| writer.commit_state(path));
             submit_if_edit(model, writer);
         }
         (Mode::Browse, UiEvent::Character('g')) => generated::begin(model, writer),
@@ -276,7 +279,20 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         }
         (Mode::Edit { path, mut value }, UiEvent::Paste(pasted)) => {
             let pasted = Zeroizing::new(pasted);
+            // Edit only opens for unset values, so autosave never replaces one.
+            let autosave = model.settings.autosave_unset_on_paste
+                && value.is_empty()
+                && !pasted.is_empty()
+                && !pasted.contains(&b'\n');
             value.extend_from_slice(&pasted);
+            if autosave {
+                submit(model, writer, path, value);
+            } else {
+                model.mode = Mode::Edit { path, value };
+            }
+        }
+        (Mode::Edit { path, value }, UiEvent::Tab) => {
+            model.settings.autosave_unset_on_paste = !model.settings.autosave_unset_on_paste;
             model.mode = Mode::Edit { path, value };
         }
         (Mode::Edit { path, mut value }, UiEvent::Backspace) => {
@@ -286,12 +302,43 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         (Mode::Edit { path, value }, UiEvent::Enter) => submit(model, writer, path, value),
         (Mode::Edit { .. }, UiEvent::Escape) => {}
         (Mode::Edit { path, value }, _) => model.mode = Mode::Edit { path, value },
-        (Mode::Replace { path, value }, UiEvent::Character('y')) => {
+        (
+            Mode::Replace {
+                path,
+                value,
+                commit: CommitState::Committed,
+            },
+            UiEvent::Character('y'),
+        )
+        | (Mode::Replace { path, value, .. }, UiEvent::ConfirmLoss) => {
             model.mode = Mode::Edit { path, value };
             submit_if_nonempty(model, writer);
         }
-        (Mode::Replace { .. }, UiEvent::Character('n') | UiEvent::Escape) => {}
-        (Mode::Replace { path, value }, _) => model.mode = Mode::Replace { path, value },
+        // Uncommitted values default to No: Enter, Space, n and Esc cancel.
+        (
+            Mode::Replace { .. },
+            UiEvent::Character('n' | ' ') | UiEvent::Escape | UiEvent::Enter,
+        ) => {}
+        (mode @ Mode::Replace { .. }, _) => model.mode = mode,
+        (Mode::Browse, UiEvent::Character('O')) => model.mode = Mode::Settings { selected: 0 },
+        (Mode::Settings { selected }, UiEvent::Up) => {
+            model.mode = Mode::Settings {
+                selected: selected.saturating_sub(1),
+            }
+        }
+        (Mode::Settings { selected }, UiEvent::Down) => {
+            model.mode = Mode::Settings {
+                selected: (selected + 1).min(crate::model::Settings::ITEMS.len() - 1),
+            }
+        }
+        (Mode::Settings { selected }, UiEvent::Enter | UiEvent::Character(' ')) => {
+            model
+                .settings
+                .toggle(crate::model::Settings::ITEMS[selected]);
+            model.mode = Mode::Settings { selected };
+        }
+        (Mode::Settings { .. }, UiEvent::Escape | UiEvent::Character('O')) => {}
+        (mode @ Mode::Settings { .. }, _) => model.mode = mode,
         (preview @ Mode::GeneratedPreview { .. }, event) => {
             return generated::reduce(model, writer, preview, event)
         }

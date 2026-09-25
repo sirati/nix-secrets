@@ -212,7 +212,8 @@ fn human_filter_and_search_compose() {
 
 #[test]
 fn mouse_clicks_select_without_editing_and_shortcuts_use_keyboard_behavior() {
-    let mut model = model(false);
+    // Set values: a click only selects.
+    let mut model = model(true);
     let mut second = model.rows[0].clone();
     second.name = "other".into();
     second.path = Some("h.services.s.other".into());
@@ -283,7 +284,7 @@ fn ticks_copy_the_writer_activity_into_the_model() {
 }
 
 #[test]
-fn clicking_a_selected_unset_input_value_opens_entry() {
+fn clicking_an_unset_input_value_opens_entry() {
     let mut model = model(false);
     let mut second = model.rows[0].clone();
     second.name = "other".into();
@@ -294,14 +295,10 @@ fn clicking_a_selected_unset_input_value_opens_entry() {
         reduce(model, UiEvent::Click(MouseTarget::Tree(index)), writer);
     };
     click(&mut model, &mut writer, 1);
-    assert!(
-        matches!(model.mode, Mode::Browse),
-        "first click only selects"
-    );
-    click(&mut model, &mut writer, 1);
+    assert_eq!(model.selected, 1);
     assert!(
         matches!(model.mode, Mode::Edit { .. }),
-        "second click opens entry"
+        "one click selects and opens entry"
     );
 
     model.mode = Mode::Browse;

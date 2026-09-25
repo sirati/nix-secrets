@@ -83,6 +83,17 @@ impl Frontend for CrosstermFrontend {
                     KeyCode::Enter => return Ok(UiEvent::Enter),
                     KeyCode::Esc => return Ok(UiEvent::Escape),
                     KeyCode::Backspace => return Ok(UiEvent::Backspace),
+                    KeyCode::Tab => return Ok(UiEvent::Tab),
+                    // Terminals differ: some report Ctrl+Shift+Y as Ctrl with an
+                    // uppercase Y, others add SHIFT to a lowercase y. Plain y and
+                    // Ctrl+y without Shift never confirm.
+                    KeyCode::Char(character @ ('y' | 'Y'))
+                        if key.modifiers.contains(event::KeyModifiers::CONTROL)
+                            && (character == 'Y'
+                                || key.modifiers.contains(event::KeyModifiers::SHIFT)) =>
+                    {
+                        return Ok(UiEvent::ConfirmLoss)
+                    }
                     KeyCode::Char('v' | 'V')
                         if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
                     {

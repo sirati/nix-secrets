@@ -19,4 +19,6 @@ pub use schema::{
     LeafSpec, Schema, SchemaError, SchemaLoadError, SecretKind, SecretPath, SecretSpec,
     StorageBoxBootstrap, ValueType,
 };
-pub use store::{EncryptedSecret, GeneratedPublicKey, PublicInfoRecord, SecretStore, StoreError};
+pub use store::{
+    CommitState, EncryptedSecret, GeneratedPublicKey, PublicInfoRecord, SecretStore, StoreError,
+};

@@ -116,6 +116,10 @@ fn handle_client(
                 .get(&path)
                 .map(|envelope| Response::Secret { envelope })
                 .map_err(|error| error.to_string()),
+            Request::CommitState { path } => store
+                .commit_state(&path)
+                .map(|state| Response::CommitState { state })
+                .map_err(|error| error.to_string()),
             Request::List => store
                 .list()
                 .map(|entries| Response::Secrets { entries })

@@ -44,9 +44,52 @@ pub struct TaskApproval {
     pub requires_input: bool,
 }
 
+/// Client-side preferences for this session only. They reset on restart and
+/// are never written to the repository or to profiles. To add a setting, add
+/// a field and a line to [`Settings::ITEMS`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Settings {
+    /// A paste into the entry field of an unset value saves it at once.
+    pub autosave_unset_on_paste: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Setting {
+    AutosaveUnsetOnPaste,
+}
+
+impl Settings {
+    pub const ITEMS: [Setting; 1] = [Setting::AutosaveUnsetOnPaste];
+
+    pub fn get(&self, setting: Setting) -> bool {
+        match setting {
+            Setting::AutosaveUnsetOnPaste => self.autosave_unset_on_paste,
+        }
+    }
+
+    pub fn toggle(&mut self, setting: Setting) {
+        match setting {
+            Setting::AutosaveUnsetOnPaste => {
+                self.autosave_unset_on_paste = !self.autosave_unset_on_paste
+            }
+        }
+    }
+}
+
+impl Setting {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AutosaveUnsetOnPaste => "Autosave unset values on paste",
+        }
+    }
+}
+
 #[derive(Eq, PartialEq)]
 pub enum Mode {
     Browse,
+    Settings {
+        selected: usize,
+    },
     Properties {
         scroll: u16,
     },
@@ -97,6 +140,8 @@ pub enum Mode {
     Replace {
         path: String,
         value: Zeroizing<Vec<u8>>,
+        /// Whether the value being replaced is committed in git.
+        commit: nix_secrets_core::CommitState,
     },
     GenerateChoice {
         path: String,
@@ -155,6 +200,7 @@ pub struct Model {
     pub active_profile: Option<String>,
     /// The slow background operation in progress, shown as an overlay.
     pub activity: Option<Activity>,
+    pub settings: Settings,
 }
 
 pub struct VisibleRow {
@@ -231,6 +277,7 @@ impl Model {
             profiles: nix_secrets_core::ProfileSnapshot::default(),
             active_profile: None,
             activity: None,
+            settings: Settings::default(),
         };
         if structured {
             model.rebuild_tree();
@@ -271,17 +318,32 @@ impl Model {
         self.selected = self.selected.saturating_add_signed(amount).min(count - 1);
     }
 
-    pub fn begin_value(&mut self, value: Vec<u8>) {
+    /// Opens entry for an unset value, or the replace confirmation for a set
+    /// one. `commit` tells whether the stored value is in git.
+    pub fn begin_value_with(
+        &mut self,
+        value: Vec<u8>,
+        commit: impl FnOnce(&str) -> nix_secrets_core::CommitState,
+    ) {
         let Some(row) = self.selected().filter(|row| row.is_secret()) else {
             return;
         };
         let path = row.path.clone().expect("secret row has path");
         let value = Zeroizing::new(value);
         self.mode = if row.is_set {
-            Mode::Replace { path, value }
+            let commit = commit(&path);
+            Mode::Replace {
+                path,
+                value,
+                commit,
+            }
         } else {
             Mode::Edit { path, value }
         };
+    }
+
+    pub fn begin_value(&mut self, value: Vec<u8>) {
+        self.begin_value_with(value, |_| nix_secrets_core::CommitState::Committed)
     }
 
     pub fn mark_saved(&mut self, path: &str) {

@@ -10,6 +10,7 @@ pub(super) fn prompt(model: &Model) -> String {
             Mode::FacetFirstChoice { .. } => "Choose the first filter rule for this value:",
             Mode::TreeOrder { .. } => "Space moves an attribute into/out of the tree. [ and ] reorder tree attributes.",
             Mode::Profiles { .. } => "Enter loads a profile; n creates one; s overwrites the selected profile; d deletes it.",
+            Mode::Settings { .. } => "Settings last for this session only; they reset when nix-secrets restarts.",
             _ => unreachable!(),
         };
         return format!("{header}\n\n{}", items.join("\n"));
@@ -36,10 +37,22 @@ pub(super) fn prompt(model: &Model) -> String {
         Mode::DeleteConfirm { path } => format!("Delete {path} from encrypted store? y/n"),
         Mode::Reveal { .. } => "Esc: hide".into(),
         Mode::Edit { value, .. } => format!(
-            "value: {}  (Enter saves, Esc cancels)",
-            "•".repeat(value.len())
+            "value: {}  (Enter saves, Esc cancels)\n\n{} Autosave unset on paste (disable in settings/restart) · Tab toggles",
+            "•".repeat(value.len()),
+            if model.settings.autosave_unset_on_paste { "☑" } else { "□" }
         ),
-        Mode::Replace { path, .. } => format!("Replace {path}? y/n"),
+        Mode::Replace { path, commit, .. } => match commit {
+            nix_secrets_core::CommitState::Committed | nix_secrets_core::CommitState::Unset => {
+                format!("Replace {path}? y/n")
+            }
+            nix_secrets_core::CommitState::Uncommitted => format!(
+                "The current value of {path} was never committed to git. Overwriting it will lose the old value irrevocably. Overwrite?\n\nCtrl+Shift+Y: overwrite · n, Enter, Space or Esc: keep it"
+            ),
+            nix_secrets_core::CommitState::Unknown { reason } => format!(
+                "Whether the current value of {path} is committed to git could not be checked ({reason}), so it is treated as never committed. Overwriting it may lose the old value irrevocably. Overwrite?\n\nCtrl+Shift+Y: overwrite · n, Enter, Space or Esc: keep it"
+            ),
+        },
+        Mode::Settings { .. } => unreachable!("settings render as a selector"),
         Mode::GenerateChoice { .. } => "Generate p: password · w: passphrase · Esc: cancel".into(),
         Mode::BulkGenerateConfirm { paths } => format!("Generate all {} missing password values? Existing values will be kept.\np: passwords · w: passphrases · Esc: cancel", paths.len()),
         Mode::BulkProgress { total, done } => format!("Generated {done} of {total} missing passwords.\nEsc: hide progress; generation continues"),
@@ -164,6 +177,24 @@ pub(super) fn selector_items(model: &Model) -> Option<Vec<String>> {
                 })
                 .collect(),
         ),
+        Mode::Settings { selected } => Some(
+            crate::model::Settings::ITEMS
+                .iter()
+                .enumerate()
+                .map(|(index, setting)| {
+                    format!(
+                        "{} {} {}",
+                        marker(*selected, index),
+                        if model.settings.get(*setting) {
+                            "☑"
+                        } else {
+                            "□"
+                        },
+                        setting.label()
+                    )
+                })
+                .collect(),
+        ),
         Mode::Profiles { selected } => Some(
             std::iter::once(format!(
                 "{} Save current view as new profile",
@@ -196,7 +227,7 @@ pub(super) fn selector_selected(model: &Model) -> Option<usize> {
         Mode::FacetCategories { selected }
         | Mode::FacetValues { selected, .. }
         | Mode::TreeOrder { selected } => Some(*selected),
-        Mode::Profiles { selected } => Some(*selected),
+        Mode::Profiles { selected } | Mode::Settings { selected } => Some(*selected),
         Mode::FacetFirstChoice { .. } => Some(0),
         _ => None,
     }

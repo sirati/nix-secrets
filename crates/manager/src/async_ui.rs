@@ -58,11 +58,15 @@ pub struct AsyncWriter {
     activity: Option<crate::model::Activity>,
     /// Whether decryption goes through 1Password and may wait for approval.
     one_password: bool,
+    /// Answers commit checks on their own connection, so they never wait
+    /// behind the worker's queue.
+    socket: Option<PathBuf>,
 }
 
 impl AsyncWriter {
     pub fn spawn(mut controller: Controller, socket: PathBuf) -> Self {
         let one_password = controller.uses_one_password();
+        let check_socket = socket.clone();
         let (commands, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
         std::thread::spawn(move || {
@@ -134,6 +138,7 @@ impl AsyncWriter {
             busy: false,
             activity: None,
             one_password,
+            socket: Some(check_socket),
         }
     }
 
@@ -300,6 +305,25 @@ impl SecretWriter for AsyncWriter {
     // The clipboard is local and quick to read, so this runs on the UI thread.
     fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
         crate::clipboard::paste()
+    }
+
+    fn commit_state(&mut self, path: &str) -> nix_secrets_core::CommitState {
+        use nix_secrets_core::CommitState;
+        let Some(socket) = &self.socket else {
+            return CommitState::Unknown {
+                reason: "no backend connection".into(),
+            };
+        };
+        let result = (|| -> Result<CommitState, String> {
+            let path =
+                nix_secrets_core::SecretPath::parse(path).map_err(|error| error.to_string())?;
+            let stream =
+                crate::socket::connect_verified(socket).map_err(|error| error.to_string())?;
+            crate::client::BackendClient::new(stream)
+                .commit_state(&path)
+                .map_err(|error| error.to_string())
+        })();
+        result.unwrap_or_else(|reason| CommitState::Unknown { reason })
     }
 
     fn activity(&mut self) -> Option<crate::model::Activity> {

@@ -138,6 +138,16 @@ impl SecretWriter for Controller {
     fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
         crate::clipboard::paste()
     }
+    fn commit_state(&mut self, path: &str) -> nix_secrets_core::CommitState {
+        let result = SecretPath::parse(path)
+            .map_err(|error| error.to_string())
+            .and_then(|path| {
+                self.client
+                    .commit_state(&path)
+                    .map_err(|error| error.to_string())
+            });
+        result.unwrap_or_else(|reason| nix_secrets_core::CommitState::Unknown { reason })
+    }
 
     fn write(
         &mut self,

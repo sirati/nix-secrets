@@ -21,19 +21,19 @@ pub(super) fn click(
             if index >= model.visible_rows().len() {
                 return Action::Continue;
             }
-            // The first click selects; clicking the selected row again opens
-            // entry when it is an unset value that needs operator input.
-            let again = model.selected == index;
+            // A click selects the row. On an unset value that needs operator
+            // input it also opens entry, so a list can be filled click by click.
             model.selected = index;
-            if again
-                && model.selected().is_some_and(|row| {
-                    row.is_secret() && !row.is_set && row.external_input_required
-                })
+            if model
+                .selected()
+                .is_some_and(|row| row.is_secret() && !row.is_set && row.external_input_required)
             {
                 model.begin_value(Vec::new());
             }
             Action::Continue
         }
+        MouseTarget::ConfirmLoss => reduce(model, UiEvent::ConfirmLoss, writer),
+        MouseTarget::AutosaveToggle => reduce(model, UiEvent::Tab, writer),
         MouseTarget::Shortcut(shortcut) => {
             let event = match shortcut {
                 Shortcut::Enter => UiEvent::Enter,
