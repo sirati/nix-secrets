@@ -4,10 +4,10 @@ use crate::model::{Attribute, FacetMode};
 pub(super) fn reduce(model: &mut Model, mode: Mode, event: UiEvent) {
     match mode {
         Mode::FacetCategories { mut selected } => {
-            selected = moved(selected, &event, Attribute::ALL.len());
+            selected = moved(selected, &event, Attribute::GROUPING.len());
             model.mode = match event {
                 UiEvent::Enter => Mode::FacetValues {
-                    attribute: Attribute::ALL[selected],
+                    attribute: Attribute::GROUPING[selected],
                     selected: 0,
                 },
                 UiEvent::Escape => Mode::Browse,
@@ -53,7 +53,7 @@ pub(super) fn reduce(model: &mut Model, mode: Mode, event: UiEvent) {
                     }
                 }
                 UiEvent::Escape => Mode::FacetCategories {
-                    selected: Attribute::ALL
+                    selected: Attribute::GROUPING
                         .iter()
                         .position(|item| *item == attribute)
                         .unwrap_or(0),

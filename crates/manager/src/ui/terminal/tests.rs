@@ -216,3 +216,99 @@ fn activity_overlay_shows_spinner_elapsed_time_and_keeps_screen_clickable() {
         "buttons stay usable while the operation runs"
     );
 }
+
+fn draw(terminal: &mut Terminal<TestBackend>, model: &Model) -> String {
+    terminal
+        .draw(|frame| {
+            render(frame, model);
+        })
+        .unwrap();
+    let height = terminal.backend().buffer().area.height;
+    (0..height)
+        .map(|y| line(terminal, y))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn long_error_scroll_stops_with_its_last_line_visible() {
+    let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    let mut model = Model::new(vec![]);
+    let text = (1..=40)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    model.fail(text);
+    draw(&mut terminal, &model);
+    let mut writer = NoWriter;
+    for _ in 0..200 {
+        reduce(&mut model, UiEvent::Down, &mut writer);
+        draw(&mut terminal, &model);
+    }
+    let limit = model.scroll_limit.get();
+    assert_eq!(model.modal_scroll, limit, "clamped, not 200");
+    let screen = draw(&mut terminal, &model);
+    assert!(screen.contains("Enter or OK: close"), "{screen}");
+    reduce(&mut model, UiEvent::Up, &mut writer);
+    assert_eq!(model.modal_scroll, limit - 1, "one ↑ moves back one line");
+}
+
+#[test]
+fn short_error_does_not_scroll() {
+    let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.fail("save failed");
+    draw(&mut terminal, &model);
+    let mut writer = NoWriter;
+    reduce(&mut model, UiEvent::Down, &mut writer);
+    reduce(&mut model, UiEvent::Down, &mut writer);
+    assert_eq!(model.modal_scroll, 0);
+}
+
+#[test]
+fn help_scroll_is_clamped_to_its_content() {
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::Help { scroll: 0 };
+    draw(&mut terminal, &model);
+    let mut writer = NoWriter;
+    for _ in 0..500 {
+        reduce(&mut model, UiEvent::Down, &mut writer);
+        draw(&mut terminal, &model);
+    }
+    let Mode::Help { scroll } = model.mode else {
+        panic!("help closed")
+    };
+    assert_eq!(scroll, model.scroll_limit.get());
+    assert!(scroll < 200, "{scroll}");
+    let screen = draw(&mut terminal, &model);
+    assert!(screen.contains("Esc  Leave a view"), "{screen}");
+}
+
+#[test]
+fn long_success_notice_grows_instead_of_scrolling() {
+    let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.inform(
+        (1..=12)
+            .map(|line| format!("saved item {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let screen = draw(&mut terminal, &model);
+    assert!(screen.contains("saved item 1"), "{screen}");
+    assert!(screen.contains("saved item 12"), "{screen}");
+    assert!(screen.contains("usual action and close"), "{screen}");
+}
+
+struct NoWriter;
+
+impl SecretWriter for NoWriter {
+    fn write(
+        &mut self,
+        _path: &str,
+        value: Zeroizing<Vec<u8>>,
+    ) -> Result<Action, (String, Zeroizing<Vec<u8>>)> {
+        Err(("not used".into(), value))
+    }
+}

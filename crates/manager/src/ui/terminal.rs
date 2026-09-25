@@ -54,6 +54,8 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
             "Error pending · Enter or OK closes it".to_owned()
         } else if matches!(model.mode, Mode::BulkProgress { .. }) {
             "Generating passwords".to_owned()
+        } else if let Some(summary) = model.search_summary() {
+            format!("Search \"{}\": {}", model.search, summary.text())
         } else {
             model
                 .active_profile
@@ -255,9 +257,10 @@ fn draw_dialog(
     let lines = if dialog.selector.is_some() {
         body.lines().count()
     } else {
-        body.lines()
-            .map(|line| line.chars().count().div_ceil(inner_width).max(1))
-            .sum::<usize>()
+        // Counts the lines exactly as the wrapped paragraph renders them.
+        Paragraph::new(body.as_str())
+            .wrap(Wrap { trim: false })
+            .line_count(inner_width as u16)
     };
     let chrome = if dialog.footer.is_some() { 4 } else { 2 };
     let height = area.height.min((lines + chrome).max(chrome + 1) as u16);
@@ -316,10 +319,17 @@ fn draw_dialog(
             }
         }
     } else {
+        // Scrolling stops once the last line is at the bottom of the box.
+        let limit = lines
+            .saturating_sub(body_area.height as usize)
+            .min(u16::MAX as usize) as u16;
+        if dialog.exclusive {
+            model.scroll_limit.set(limit);
+        }
         frame.render_widget(
             Paragraph::new(body)
                 .alignment(Alignment::Left)
-                .scroll((dialog.scroll, 0))
+                .scroll((dialog.scroll.min(limit), 0))
                 .wrap(Wrap { trim: false }),
             body_area,
         );

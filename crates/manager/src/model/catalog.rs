@@ -24,7 +24,7 @@ impl Model {
         self.rows
             .iter()
             .filter(|row| row.is_secret())
-            .map(|row| attribute.value(row))
+            .filter_map(|row| attribute.value(row))
             .collect()
     }
 
@@ -42,7 +42,7 @@ impl Model {
             .iter()
             .copied()
             .chain(
-                Attribute::ALL
+                Attribute::GROUPING
                     .into_iter()
                     .filter(|attribute| !self.tree_order.contains(attribute)),
             )

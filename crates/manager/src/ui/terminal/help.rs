@@ -2,6 +2,7 @@ pub(super) fn help_text() -> &'static str {
     r"NAVIGATE
 ↑ / ↓  Move between visible items
 /  Search names, identifiers, and explanations
+   While searching, the status line counts matches and those hidden by filters
 P  Show all attributes of the selected value
 F  Filter by any identity or presentation attribute
 T  Choose which attributes form the tree and reorder them
@@ -25,7 +26,10 @@ Tree attributes remain filterable.
 
 EDIT
 Enter  Edit selected value; Enter again saves
+Click  Select a row; click a selected unset input value again to enter it
 Paste  Set from clipboard; replacement asks first
+Ctrl+V Read the clipboard directly (wl-paste, xclip, xsel or pbpaste), in the
+       tree or an entry field; works when the terminal's own paste fails
 g  Generate password or passphrase for one field
 G  Generate all missing passwords; keeps existing values
 r  Reveal selected value

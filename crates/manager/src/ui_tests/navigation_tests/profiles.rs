@@ -161,3 +161,21 @@ fn click_on_success_notice_acts_on_what_is_under_the_pointer() {
         "clicking the notice itself only closes it"
     );
 }
+
+#[test]
+fn arrows_under_a_success_notice_move_the_tree_not_the_notice() {
+    let mut model = model(false);
+    let mut writer = ProfileWriter::default();
+    model.rows.push(model.rows[0].clone());
+    model.rebuild_tree();
+    model.selected = 0;
+    model.inform("saved");
+    reduce(&mut model, UiEvent::Down, &mut writer);
+    assert!(model.message.is_none());
+    assert_eq!(model.selected, 1);
+    assert_eq!(model.modal_scroll, 0, "the notice never scrolled");
+    model.inform("saved");
+    reduce(&mut model, UiEvent::Up, &mut writer);
+    assert!(model.message.is_none());
+    assert_eq!(model.selected, 0);
+}

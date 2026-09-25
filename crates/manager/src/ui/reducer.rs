@@ -5,6 +5,17 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         Ok(action) => return action,
         Err(event) => event,
     };
+    // Ctrl+V reads the clipboard itself and then acts like a terminal paste.
+    let event = match event {
+        UiEvent::PasteRequest => match writer.paste() {
+            Ok(value) => UiEvent::Paste(value.to_vec()),
+            Err(error) => {
+                model.fail(error);
+                return Action::Continue;
+            }
+        },
+        event => event,
+    };
     let mode = std::mem::replace(&mut model.mode, Mode::Browse);
     match (mode, event) {
         (Mode::Browse, UiEvent::Up) => model.move_by(-1),
@@ -89,24 +100,24 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         }
         (Mode::Properties { scroll }, UiEvent::Up) => {
             model.mode = Mode::Properties {
-                scroll: scroll.saturating_sub(1),
+                scroll: model.scrolled(scroll, false),
             }
         }
         (Mode::Properties { scroll }, UiEvent::Down) => {
             model.mode = Mode::Properties {
-                scroll: scroll.saturating_add(1),
+                scroll: model.scrolled(scroll, true),
             }
         }
         (Mode::Properties { .. }, UiEvent::Escape | UiEvent::Enter) => {}
         (Mode::Properties { scroll }, _) => model.mode = Mode::Properties { scroll },
         (Mode::Help { scroll }, UiEvent::Up) => {
             model.mode = Mode::Help {
-                scroll: scroll.saturating_sub(1),
+                scroll: model.scrolled(scroll, false),
             }
         }
         (Mode::Help { scroll }, UiEvent::Down) => {
             model.mode = Mode::Help {
-                scroll: scroll.saturating_add(1),
+                scroll: model.scrolled(scroll, true),
             }
         }
         (Mode::Help { .. }, UiEvent::Escape | UiEvent::Character('?')) => {}
@@ -132,6 +143,12 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         (Mode::Search { .. }, UiEvent::Escape) => {
             model.search.clear();
             model.selected = 0;
+        }
+        (Mode::Search { mut query }, UiEvent::Paste(pasted)) => {
+            query.push_str(&String::from_utf8_lossy(&pasted));
+            model.search = query.clone();
+            model.selected = 0;
+            model.mode = Mode::Search { query };
         }
         (Mode::Search { query }, _) => model.mode = Mode::Search { query },
         (Mode::Browse, UiEvent::Enter) => model.begin_value(Vec::new()),
@@ -205,7 +222,7 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             model.mode = Mode::Reveal {
                 path,
                 value,
-                scroll: scroll.saturating_sub(1),
+                scroll: model.scrolled(scroll, false),
             }
         }
         (
@@ -219,7 +236,7 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             model.mode = Mode::Reveal {
                 path,
                 value,
-                scroll: scroll.saturating_add(1),
+                scroll: model.scrolled(scroll, true),
             }
         }
         (
@@ -255,6 +272,11 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         (Mode::Edit { path, mut value }, UiEvent::Character(character)) => {
             let mut bytes = [0; 4];
             value.extend_from_slice(character.encode_utf8(&mut bytes).as_bytes());
+            model.mode = Mode::Edit { path, value };
+        }
+        (Mode::Edit { path, mut value }, UiEvent::Paste(pasted)) => {
+            let pasted = Zeroizing::new(pasted);
+            value.extend_from_slice(&pasted);
             model.mode = Mode::Edit { path, value };
         }
         (Mode::Edit { path, mut value }, UiEvent::Backspace) => {

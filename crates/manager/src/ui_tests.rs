@@ -16,6 +16,7 @@ struct Writer {
     approval_error: bool,
     copies: Vec<Vec<u8>>,
     bulk: Vec<Vec<String>>,
+    clipboard: Option<Vec<u8>>,
 }
 impl SecretWriter for Writer {
     fn generate_missing(&mut self, paths: Vec<String>, _kind: GenerateKind) -> Result<(), String> {
@@ -24,6 +25,12 @@ impl SecretWriter for Writer {
     }
     fn generate(&mut self, _path: &str, _kind: GenerateKind) -> Result<Zeroizing<Vec<u8>>, String> {
         Ok(Zeroizing::new(b"generated-value".to_vec()))
+    }
+    fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
+        self.clipboard
+            .clone()
+            .map(Zeroizing::new)
+            .ok_or_else(|| "cannot read the clipboard: no tool".into())
     }
     fn copy(&mut self, value: &[u8]) -> Result<(), String> {
         self.copies.push(value.to_vec());
@@ -244,6 +251,7 @@ fn writer() -> Writer {
         approval_error: false,
         copies: vec![],
         bulk: vec![],
+        clipboard: None,
     }
 }
 
@@ -281,3 +289,50 @@ fn bulk_generation_only_requests_unset_passwords() {
 
 mod generation_tests;
 mod navigation_tests;
+
+#[test]
+fn bracketed_paste_fills_the_entry_dialog_even_after_a_success_notice() {
+    let mut model = model(false);
+    let mut writer = writer();
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    assert!(matches!(model.mode, Mode::Edit { .. }));
+    reduce(&mut model, UiEvent::Paste(b"pasted".to_vec()), &mut writer);
+    model.inform("copied public key");
+    reduce(&mut model, UiEvent::Paste(b"-more".to_vec()), &mut writer);
+    assert!(model.message.is_none());
+    let Mode::Edit { value, .. } = &model.mode else {
+        panic!("entry closed")
+    };
+    assert_eq!(value.as_slice(), b"pasted-more");
+    assert!(!format!("{:?}", model.mode).contains("pasted"), "masked");
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    assert_eq!(writer.writes, [b"pasted-more"]);
+}
+
+#[test]
+fn ctrl_v_reads_the_clipboard_once_or_reports_why_not() {
+    let mut model = model(false);
+    let mut writer = writer();
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    reduce(&mut model, UiEvent::PasteRequest, &mut writer);
+    assert_eq!(
+        model.message_text(),
+        Some("cannot read the clipboard: no tool")
+    );
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    writer.clipboard = Some(b"from-clipboard".to_vec());
+    reduce(&mut model, UiEvent::PasteRequest, &mut writer);
+    let Mode::Edit { value, .. } = &model.mode else {
+        panic!("entry closed")
+    };
+    assert_eq!(value.as_slice(), b"from-clipboard");
+}
+
+#[test]
+fn ctrl_v_in_the_tree_sets_an_unset_leaf_like_a_terminal_paste() {
+    let mut model = model(false);
+    let mut writer = writer();
+    writer.clipboard = Some(b"direct".to_vec());
+    reduce(&mut model, UiEvent::PasteRequest, &mut writer);
+    assert_eq!(writer.writes, [b"direct"]);
+}

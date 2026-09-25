@@ -135,6 +135,9 @@ impl SecretWriter for Controller {
     fn copy(&mut self, value: &[u8]) -> Result<(), String> {
         crate::clipboard::copy(value)
     }
+    fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
+        crate::clipboard::paste(false)
+    }
 
     fn write(
         &mut self,

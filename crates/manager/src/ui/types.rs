@@ -31,6 +31,8 @@ pub enum UiEvent {
     Character(char),
     Backspace,
     Paste(Vec<u8>),
+    /// Ctrl+V: read the clipboard directly instead of waiting for the terminal.
+    PasteRequest,
     Approval(ApprovalRequest),
     Refresh,
     Tick,
@@ -149,6 +151,10 @@ pub trait SecretWriter {
         Err("bulk generation unavailable".into())
     }
     fn copy(&mut self, _value: &[u8]) -> Result<(), String> {
+        Err("no clipboard provider is available".into())
+    }
+    /// Reads the local clipboard for Ctrl+V in an entry dialog.
+    fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
         Err("no clipboard provider is available".into())
     }
     /// The slow operation currently running in the background, if any.
