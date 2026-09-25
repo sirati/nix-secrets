@@ -32,7 +32,9 @@ pub(super) fn click(
             reduce(model, event, writer)
         }
         MouseTarget::ModalItem(index) => match &mut model.mode {
-            Mode::FacetCategories { selected } | Mode::FacetValues { selected, .. } => {
+            Mode::FacetCategories { selected }
+            | Mode::FacetValues { selected, .. }
+            | Mode::Profiles { selected } => {
                 *selected = index;
                 reduce(model, UiEvent::Enter, writer)
             }

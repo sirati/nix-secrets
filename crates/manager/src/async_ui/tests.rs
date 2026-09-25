@@ -79,6 +79,7 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
         commands,
         events,
         rows: None,
+        profiles: None,
         approvals: vec![],
         completions: vec![],
         busy: false,

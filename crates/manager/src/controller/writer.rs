@@ -1,55 +1,37 @@
+mod approval;
+mod generation;
+mod private_key;
 use super::generate::{generate_compatible, validate_password_value};
 use super::*;
 
-impl Controller {
-    pub(crate) fn generate_missing_password(
-        &mut self,
-        path: &str,
-        kind: GenerateKind,
-    ) -> Result<(), String> {
-        let parsed = SecretPath::parse(path).map_err(|error| error.to_string())?;
-        let leaf = self
-            .schema
-            .leaf(&parsed)
-            .map_err(|error| error.to_string())?;
-        let (value_type, constraints, ids, keys, external_input_required) = match leaf {
-            LeafSpec::Stored(spec) => (
-                spec.value_type,
-                spec.consumer_constraints,
-                spec.recipient_ids,
-                spec.recipient_public_keys,
-                spec.external_input_required,
-            ),
-            LeafSpec::Generated(spec) => (
-                spec.value_type,
-                spec.consumer_constraints,
-                spec.recipient_ids,
-                spec.recipient_public_keys,
-                spec.external_input_required,
-            ),
-        };
-        if external_input_required {
-            return Err("this value must be supplied from the external system".into());
+impl SecretWriter for Controller {
+    fn refresh_profiles(&mut self) -> Result<Option<ProfileSnapshot>, String> {
+        if self.background.is_some() {
+            self.drain_background();
+            return Ok(self.pending_profiles.take());
         }
-        if value_type != Some(ValueType::Password) {
-            return Err("not a password leaf".into());
-        }
-        let value = generate_compatible(kind, constraints.as_ref())?;
-        let recipients = ids
-            .iter()
-            .zip(keys.iter())
-            .map(|(id, key)| Recipient {
-                id,
-                ssh_public_key: key,
-            })
-            .collect::<Vec<_>>();
         self.client
-            .set_if_version(&parsed, &value, &recipients, &self.provider, None)
+            .list_profiles()
+            .map(Some)
             .map_err(|error| error.to_string())
     }
-}
 
-impl SecretWriter for Controller {
+    fn save_profile(
+        &mut self,
+        name: String,
+        profile: ViewProfile,
+        revision: u64,
+    ) -> Result<ProfileSnapshot, String> {
+        self.client
+            .save_profile(name, profile, revision)
+            .map_err(|error| error.to_string())
+    }
+
+    fn delete_profile(&mut self, name: String, revision: u64) -> Result<ProfileSnapshot, String> {
+        self.client
+            .delete_profile(name, revision)
+            .map_err(|error| error.to_string())
+    }
     fn refresh_rows(&mut self) -> Result<Option<Vec<Row>>, String> {
         if self.background.is_some() {
             self.drain_background();
@@ -228,195 +210,9 @@ impl SecretWriter for Controller {
     }
 
     fn poll_approval(&mut self) -> Result<Option<UiApproval>, String> {
-        self.drain_background();
-        if let Some(active) = &self.active {
-            if active.renewed_at.elapsed() < Duration::from_secs(60) {
-                return Ok(None);
-            }
-            let id = active.request.id.clone();
-            let lease_id = active.lease_id;
-            if let Err(error) = self.client.renew(id, lease_id) {
-                self.active.take();
-                return Err(format!("approval lease was lost: {error}"));
-            }
-            self.active
-                .as_mut()
-                .expect("approval remains active")
-                .renewed_at = Instant::now();
-            return Ok(None);
-        }
-        if self.background.is_some() && !std::mem::take(&mut self.approvals_ready) {
-            return Ok(None);
-        }
-        let Some((request, lease_id)) = self
-            .client
-            .poll_and_claim()
-            .map_err(|error| error.to_string())?
-        else {
-            return Ok(None);
-        };
-        let set = self
-            .client
-            .list()
-            .map_err(|error| error.to_string())?
-            .into_keys()
-            .collect::<BTreeSet<_>>();
-        let mut details = match self.approval_details(&request, None, &set) {
-            Ok(details) => details,
-            Err(error) => {
-                self.client
-                    .resolve(request.id, lease_id, false)
-                    .map_err(|resolve| resolve.to_string())?;
-                return Err(error);
-            }
-        };
-        let host = match self.schema.0.get(&request.target) {
-            Some(host) => host,
-            None => {
-                self.client
-                    .resolve(request.id, lease_id, false)
-                    .map_err(|e| e.to_string())?;
-                return Err("target host is absent from schema".into());
-            }
-        };
-        let connection = Connection {
-            destination: host.metadata.deployment.destination.clone(),
-            host: host.metadata.deployment.host.clone(),
-            port: host.metadata.deployment.port,
-            known_hosts: self.known_hosts.clone(),
-        };
-        let expected = match expected_target(&self.schema, &request) {
-            Ok(expected) => expected,
-            Err(error) => {
-                self.client
-                    .resolve(request.id, lease_id, false)
-                    .map_err(|e| e.to_string())?;
-                return Err(error);
-            }
-        };
-        let host_key = match deployment::preflight(&connection) {
-            Ok(preflight) => preflight,
-            Err(error) => {
-                self.client
-                    .resolve(request.id, lease_id, false)
-                    .map_err(|e| e.to_string())?;
-                return Err(error);
-            }
-        };
-        let known = host_key.status == HostKeyStatus::Known;
-        details.host_key = deployment::unknown_description(&host_key);
-        self.active = Some(ActiveApproval {
-            request,
-            lease_id,
-            connection,
-            expected,
-            identity: host_key.identity,
-            prepared: None,
-            target_approved: known,
-            renewed_at: Instant::now(),
-        });
-        if known {
-            if let Err(error) = self.prepare_active() {
-                let active = self.active.take().expect("active approval exists");
-                self.client
-                    .resolve(active.request.id, active.lease_id, false)
-                    .map_err(|resolve| resolve.to_string())?;
-                return Err(error);
-            }
-            let active = self.active.as_ref().expect("active approval exists");
-            details = self.approval_details(
-                &active.request,
-                active.prepared.as_ref().map(PreparedDeployment::state),
-                &set,
-            )?;
-        }
-        Ok(Some(details))
+        self.poll_approval_inner()
     }
-
     fn approval(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
-        if accepted {
-            if !self
-                .active
-                .as_ref()
-                .ok_or("no claimed approval request")?
-                .target_approved
-            {
-                self.prepare_active()?;
-                let active = self.active.as_mut().expect("active approval exists");
-                active.target_approved = true;
-                let request = active.request.clone();
-                let state = active
-                    .prepared
-                    .as_ref()
-                    .map(PreparedDeployment::state)
-                    .cloned();
-                let set = self
-                    .client
-                    .list()
-                    .map_err(|error| error.to_string())?
-                    .into_keys()
-                    .collect::<BTreeSet<_>>();
-                return self
-                    .approval_details(&request, state.as_ref(), &set)
-                    .map(Some);
-            }
-            let (id, lease_id) = self
-                .active
-                .as_ref()
-                .map(|active| (active.request.id.clone(), active.lease_id))
-                .expect("active approval exists");
-            if let Err(error) = self.client.renew_for(id, lease_id, 900_000) {
-                self.active.take();
-                return Err(format!("approval lease was lost: {error}"));
-            }
-            self.active
-                .as_mut()
-                .expect("approval remains active")
-                .renewed_at = Instant::now();
-            self.deploy_active()?;
-            return Ok(None);
-        }
-        let active = self.active.take().ok_or("no claimed approval request")?;
-        self.client
-            .resolve(active.request.id, active.lease_id, false)
-            .map_err(|error| error.to_string())?;
-        Ok(None)
-    }
-}
-
-impl Controller {
-    fn save_private_key(
-        &mut self,
-        path: &SecretPath,
-        private: &[u8],
-        recipients: &[Recipient<'_>],
-        public: String,
-    ) -> Result<(), String> {
-        let version = self
-            .client
-            .set_private_key(path, private, recipients, &self.provider, public.clone())
-            .map_err(|error| error.to_string())?;
-        let stored = self
-            .client
-            .get(path)
-            .map_err(|error| error.to_string())?
-            .ok_or("private key record disappeared after save")?;
-        if stored.version_id != version || stored.public_key.as_deref() != Some(public.as_str()) {
-            return Err("private/public key record failed read-back verification".into());
-        }
-        let envelope = EncryptedSecret {
-            format_version: stored.format_version,
-            version_id: stored.version_id,
-            recipient_ids: stored.recipient_ids,
-            age_ciphertext: stored.age_ciphertext,
-        };
-        let decrypted = decrypt_secret(&path.to_string(), &envelope, &self.provider)
-            .map_err(|error| error.to_string())?;
-        let derived =
-            super::ssh_validation::derive_public(Some("openssh-private-key"), &decrypted)?;
-        if decrypted.as_slice() != private || derived.as_deref() != Some(public.as_str()) {
-            return Err("stored private key does not match public metadata".into());
-        }
-        Ok(())
+        self.approval_inner(accepted)
     }
 }

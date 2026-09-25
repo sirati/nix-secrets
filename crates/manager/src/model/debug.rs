@@ -28,6 +28,17 @@ impl fmt::Debug for Mode {
             Self::TreeOrder { selected } => {
                 formatter.debug_tuple("TreeOrder").field(selected).finish()
             }
+            Self::Profiles { selected } => {
+                formatter.debug_tuple("Profiles").field(selected).finish()
+            }
+            Self::ProfileSave { name } => formatter.debug_tuple("ProfileSave").field(name).finish(),
+            Self::ProfileOverwrite { name } => formatter
+                .debug_tuple("ProfileOverwrite")
+                .field(name)
+                .finish(),
+            Self::ProfileDelete { name } => {
+                formatter.debug_tuple("ProfileDelete").field(name).finish()
+            }
             Self::Help { scroll } => formatter.debug_tuple("Help").field(scroll).finish(),
             Self::Search { query } => formatter.debug_tuple("Search").field(query).finish(),
             Self::DeleteConfirm { path } => {

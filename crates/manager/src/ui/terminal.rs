@@ -6,6 +6,7 @@ mod actions;
 mod buttons;
 mod filters;
 mod frontend;
+mod help;
 mod hit;
 mod layout;
 mod text;
@@ -14,9 +15,10 @@ use actions::hotkeys;
 use buttons::{draw_rows, wrap_buttons};
 use filters::render_filters;
 use frontend::CrosstermFrontend;
+use help::help_text;
 use hit::HitMap;
 use layout::regions;
-use text::{help_text, prompt, selected_text, selector_items, selector_selected};
+use text::{prompt, selected_text, selector_items, selector_selected};
 use tree::{render_tree, task_status};
 
 pub fn run(rows: Vec<Row>, writer: &mut impl SecretWriter) -> io::Result<()> {
@@ -44,11 +46,21 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
     }
     if zones.status.height > 0 {
         let status = if model.message.is_some() {
-            "Notice pending · Enter acknowledges"
+            "Notice pending · Enter acknowledges".to_owned()
         } else if matches!(model.mode, Mode::BulkProgress { .. }) {
-            "Generating passwords"
+            "Generating passwords".to_owned()
         } else {
-            "Ready"
+            model
+                .active_profile
+                .as_deref()
+                .map(|name| {
+                    if model.profile_dirty() {
+                        format!("View: {name} (modified)")
+                    } else {
+                        format!("View: {name}")
+                    }
+                })
+                .unwrap_or_else(|| "Ready".into())
         };
         frame.render_widget(
             Paragraph::new(status).block(Block::default().title("Status").borders(Borders::ALL)),
@@ -199,6 +211,10 @@ fn modal_title(mode: &Mode) -> &'static str {
         Mode::FacetValues { .. } => "Filter · values",
         Mode::FacetFirstChoice { .. } => "Choose filter rule",
         Mode::TreeOrder { .. } => "Tree attributes and order",
+        Mode::Profiles { .. } => "View profiles",
+        Mode::ProfileSave { .. } => "Save view profile",
+        Mode::ProfileOverwrite { .. } => "Overwrite view profile",
+        Mode::ProfileDelete { .. } => "Delete view profile",
         Mode::Search { .. } => "Search",
         Mode::DeleteConfirm { .. } => "Delete",
         Mode::Edit { .. } => "Edit value",

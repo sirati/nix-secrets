@@ -1,4 +1,5 @@
 use super::*;
+use nix_secrets_core::{ProfileSnapshot, ViewProfile};
 
 pub const OPERATION_QUEUED: &str = "nix-secrets:operation-queued";
 
@@ -72,6 +73,14 @@ pub enum Completion {
     ApprovalDone(Option<ApprovalRequest>),
     ApprovalLost(String),
     Failed(String),
+    ProfileSaved {
+        name: String,
+        snapshot: ProfileSnapshot,
+    },
+    ProfileDeleted {
+        name: String,
+        snapshot: ProfileSnapshot,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +90,20 @@ pub enum GenerateKind {
 }
 
 pub trait SecretWriter {
+    fn refresh_profiles(&mut self) -> Result<Option<ProfileSnapshot>, String> {
+        Ok(None)
+    }
+    fn save_profile(
+        &mut self,
+        _name: String,
+        _profile: ViewProfile,
+        _revision: u64,
+    ) -> Result<ProfileSnapshot, String> {
+        Err("profile saving unavailable".into())
+    }
+    fn delete_profile(&mut self, _name: String, _revision: u64) -> Result<ProfileSnapshot, String> {
+        Err("profile deletion unavailable".into())
+    }
     fn poll_completion(&mut self) -> Option<Completion> {
         None
     }

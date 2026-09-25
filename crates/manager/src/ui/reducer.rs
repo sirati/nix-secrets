@@ -15,6 +15,14 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             model.mode = Mode::FacetCategories { selected: 0 }
         }
         (Mode::Browse, UiEvent::Character('T')) => model.mode = Mode::TreeOrder { selected: 0 },
+        (Mode::Browse, UiEvent::Character('S')) => model.mode = Mode::Profiles { selected: 0 },
+        (
+            mode @ (Mode::Profiles { .. }
+            | Mode::ProfileSave { .. }
+            | Mode::ProfileOverwrite { .. }
+            | Mode::ProfileDelete { .. }),
+            event,
+        ) => profiles::reduce(model, mode, event, writer),
         (
             mode @ (Mode::FacetCategories { .. }
             | Mode::FacetValues { .. }

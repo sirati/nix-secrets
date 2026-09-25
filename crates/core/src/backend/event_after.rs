@@ -28,6 +28,9 @@ pub(super) fn event_after_success(request: &Request, schema: &Schema) -> Option<
         Request::SubmitApproval { request } => Some(BackendEvent::ApprovalRequested {
             request: request.clone(),
         }),
+        Request::SaveProfile { .. } | Request::DeleteProfile { .. } => {
+            Some(BackendEvent::ProfilesChanged)
+        }
         _ => None,
     }
 }

@@ -9,6 +9,7 @@ pub enum BackendEvent {
     SecretChanged { path: String, set: bool },
     PublicInfoChanged { shared_id: String, set: bool },
     ApprovalRequested { request: ApprovalRequest },
+    ProfilesChanged,
 }
 
 #[derive(Default)]

@@ -17,6 +17,27 @@ pub enum Attribute {
 }
 
 impl Attribute {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Scope => "scope",
+            Self::User => "user",
+            Self::Service => "service",
+            Self::Responsibility => "responsibility",
+            Self::Namespace => "namespace",
+            Self::Name => "name",
+            Self::Explanation => "explanation",
+            Self::Facing => "facing",
+            Self::Type => "type",
+            Self::Status => "status",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|attribute| attribute.key() == key)
+    }
     pub const ALL: [Self; 11] = [
         Self::Host,
         Self::Scope,
