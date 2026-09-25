@@ -150,6 +150,12 @@ fn paste_replacement_waits_for_confirmation() {
         &mut writer,
     );
     assert!(writer.writes.is_empty());
+    assert!(
+        matches!(model.mode, Mode::Edit { .. }),
+        "the paste waits in the entry field"
+    );
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    assert!(matches!(model.mode, Mode::Replace { .. }));
     reduce(&mut model, UiEvent::Character('y'), &mut writer);
     assert_eq!(writer.writes, [b"replacement"]);
 }
@@ -407,23 +413,45 @@ fn autosave_never_replaces_a_set_value() {
     let mut model = model(true);
     let mut writer = writer();
     model.settings.autosave_unset_on_paste = true;
+    // A paste in the tree over a set value opens entry with the text.
     reduce(&mut model, UiEvent::Paste(b"new".to_vec()), &mut writer);
     assert!(writer.writes.is_empty());
-    assert!(matches!(model.mode, Mode::Replace { .. }));
+    assert!(matches!(model.mode, Mode::Edit { .. }));
+    // So does a paste inside the entry field of a set value.
+    model.mode = Mode::Browse;
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    reduce(&mut model, UiEvent::Paste(b"new".to_vec()), &mut writer);
+    assert!(writer.writes.is_empty());
+    assert!(matches!(model.mode, Mode::Edit { .. }));
+}
+
+fn entered(model: &Mode) -> Vec<u8> {
+    match model {
+        Mode::Edit { value, .. } | Mode::Replace { value, .. } => value.to_vec(),
+        other => panic!("not an entry dialog: {other:?}"),
+    }
 }
 
 #[test]
-fn uncommitted_overwrite_warns_and_only_ctrl_shift_y_confirms() {
+fn uncommitted_warning_comes_after_entry_and_no_keeps_the_typed_value() {
     let mut model = model(true);
     let mut writer = writer();
     writer.commit = Some(nix_secrets_core::CommitState::Uncommitted);
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    assert!(
+        matches!(model.mode, Mode::Edit { .. }),
+        "entry opens first, without a warning"
+    );
+    for character in "new".chars() {
+        reduce(&mut model, UiEvent::Character(character), &mut writer);
+    }
     for cancel in [
         UiEvent::Enter,
         UiEvent::Character(' '),
         UiEvent::Character('n'),
         UiEvent::Escape,
     ] {
-        reduce(&mut model, UiEvent::Paste(b"new".to_vec()), &mut writer);
+        reduce(&mut model, UiEvent::Enter, &mut writer);
         assert!(matches!(
             model.mode,
             Mode::Replace {
@@ -437,10 +465,14 @@ fn uncommitted_overwrite_warns_and_only_ctrl_shift_y_confirms() {
             "plain y does not confirm"
         );
         reduce(&mut model, cancel, &mut writer);
-        assert!(matches!(model.mode, Mode::Browse));
+        assert!(
+            matches!(model.mode, Mode::Edit { .. }),
+            "No returns to entry"
+        );
+        assert_eq!(entered(&model.mode), b"new", "the typed value is kept");
         assert!(writer.writes.is_empty());
     }
-    reduce(&mut model, UiEvent::Paste(b"new".to_vec()), &mut writer);
+    reduce(&mut model, UiEvent::Enter, &mut writer);
     reduce(&mut model, UiEvent::ConfirmLoss, &mut writer);
     assert_eq!(writer.writes, [b"new"]);
 }
@@ -451,6 +483,89 @@ fn committed_overwrite_keeps_the_plain_confirmation() {
     let mut writer = writer();
     writer.commit = Some(nix_secrets_core::CommitState::Committed);
     reduce(&mut model, UiEvent::Paste(b"new".to_vec()), &mut writer);
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    assert!(matches!(
+        model.mode,
+        Mode::Replace {
+            commit: nix_secrets_core::CommitState::Committed,
+            ..
+        }
+    ));
     reduce(&mut model, UiEvent::Character('y'), &mut writer);
     assert_eq!(writer.writes, [b"new"]);
+}
+
+#[test]
+fn reveal_current_is_offered_only_for_set_values_and_returns_to_the_dialog() {
+    let mut model = model(true);
+    let mut writer = writer();
+    writer.commit = Some(nix_secrets_core::CommitState::Uncommitted);
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    reduce(&mut model, UiEvent::Character('x'), &mut writer);
+    reduce(&mut model, UiEvent::RevealCurrent, &mut writer);
+    assert!(matches!(model.mode, Mode::Reveal { .. }));
+    assert!(!format!("{:?}", model.mode).contains("stored-value"));
+    reduce(&mut model, UiEvent::Escape, &mut writer);
+    assert!(matches!(model.mode, Mode::Edit { .. }));
+    assert_eq!(entered(&model.mode), b"x", "the typed value survives");
+
+    // From the uncommitted warning too.
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    assert!(matches!(model.mode, Mode::Replace { .. }));
+    reduce(&mut model, UiEvent::RevealCurrent, &mut writer);
+    assert!(matches!(model.mode, Mode::Reveal { .. }));
+    reduce(&mut model, UiEvent::Escape, &mut writer);
+    assert!(matches!(
+        model.mode,
+        Mode::Replace {
+            commit: nix_secrets_core::CommitState::Uncommitted,
+            ..
+        }
+    ));
+    assert_eq!(entered(&model.mode), b"x");
+
+    // An unset value has nothing to reveal.
+    let mut unset = model_unset();
+    reduce(&mut unset, UiEvent::Enter, &mut writer);
+    reduce(&mut unset, UiEvent::RevealCurrent, &mut writer);
+    assert!(matches!(unset.mode, Mode::Edit { .. }));
+}
+
+fn model_unset() -> Model {
+    model(false)
+}
+
+#[test]
+fn a_queued_reveal_lands_over_the_entry_dialog() {
+    struct Queued;
+    impl SecretWriter for Queued {
+        fn write(
+            &mut self,
+            _path: &str,
+            value: Zeroizing<Vec<u8>>,
+        ) -> Result<Action, (String, Zeroizing<Vec<u8>>)> {
+            Err(("unused".into(), value))
+        }
+        fn reveal(&mut self, _path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+            Err(crate::ui::OPERATION_QUEUED.into())
+        }
+    }
+    let mut model = model(true);
+    reduce(&mut model, UiEvent::Enter, &mut Queued);
+    reduce(&mut model, UiEvent::Character('x'), &mut Queued);
+    reduce(&mut model, UiEvent::RevealCurrent, &mut Queued);
+    assert!(
+        matches!(model.mode, Mode::Edit { .. }),
+        "waits in the dialog"
+    );
+    crate::ui::apply_completion_for_tests(
+        &mut model,
+        crate::ui::Completion::Revealed {
+            path: "h.services.s.key".into(),
+            value: Zeroizing::new(b"stored".to_vec()),
+        },
+    );
+    assert!(matches!(model.mode, Mode::Reveal { .. }));
+    reduce(&mut model, UiEvent::Escape, &mut Queued);
+    assert_eq!(entered(&model.mode), b"x");
 }

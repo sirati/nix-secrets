@@ -16,15 +16,19 @@ impl FakeOp {
         let directory = env::temp_dir().join(format!("nix-secrets-fake-op-{suffix}"));
         fs::create_dir(&directory).unwrap();
         let op = directory.join("op");
+        // Renamed into place: executing a file another test thread's child
+        // still holds open for writing fails with ETXTBSY.
+        let staging = directory.join(".op.tmp");
         fs::write(
-            &op,
+            &staging,
             format!(
                 "#!/bin/sh\necho \"$*\" >> {}\n{body}\n",
                 directory.join("calls").display()
             ),
         )
         .unwrap();
-        fs::set_permissions(&op, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&staging, &op).unwrap();
         Self(directory)
     }
 

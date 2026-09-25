@@ -2,6 +2,9 @@ mod width;
 use super::*;
 use width::{ellipsize, shorten};
 
+/// The label of the autosave checkbox in the entry field.
+pub(super) const AUTOSAVE_LABEL: &str = "Autosave unset on paste (disable in settings/restart)";
+
 pub(super) fn prompt(model: &Model) -> String {
     if let Some(items) = selector_items(model) {
         let header = match &model.mode {
@@ -37,7 +40,7 @@ pub(super) fn prompt(model: &Model) -> String {
         Mode::DeleteConfirm { path } => format!("Delete {path} from encrypted store? y/n"),
         Mode::Reveal { .. } => "Esc: hide".into(),
         Mode::Edit { value, .. } => format!(
-            "value: {}  (Enter saves, Esc cancels)\n\n{} Autosave unset on paste (disable in settings/restart) · Tab toggles",
+            "value: {}  (Enter saves, Esc cancels)\n\n{} {AUTOSAVE_LABEL} · Tab or click toggles",
             "•".repeat(value.len()),
             if model.settings.autosave_unset_on_paste { "☑" } else { "□" }
         ),

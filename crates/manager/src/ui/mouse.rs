@@ -34,6 +34,7 @@ pub(super) fn click(
         }
         MouseTarget::ConfirmLoss => reduce(model, UiEvent::ConfirmLoss, writer),
         MouseTarget::AutosaveToggle => reduce(model, UiEvent::Tab, writer),
+        MouseTarget::RevealCurrent => reduce(model, UiEvent::RevealCurrent, writer),
         MouseTarget::Shortcut(shortcut) => {
             let event = match shortcut {
                 Shortcut::Enter => UiEvent::Enter,
@@ -45,7 +46,8 @@ pub(super) fn click(
         MouseTarget::ModalItem(index) => match &mut model.mode {
             Mode::FacetCategories { selected }
             | Mode::FacetValues { selected, .. }
-            | Mode::Profiles { selected } => {
+            | Mode::Profiles { selected }
+            | Mode::Settings { selected } => {
                 *selected = index;
                 reduce(model, UiEvent::Enter, writer)
             }

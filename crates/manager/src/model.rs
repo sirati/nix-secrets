@@ -132,6 +132,9 @@ pub enum Mode {
         path: String,
         value: Zeroizing<Vec<u8>>,
         scroll: u16,
+        /// The entry or replace dialog the reveal was opened from; closing the
+        /// reveal returns there with its typed value.
+        underneath: Option<Box<Mode>>,
     },
     Edit {
         path: String,
@@ -318,32 +321,25 @@ impl Model {
         self.selected = self.selected.saturating_add_signed(amount).min(count - 1);
     }
 
-    /// Opens entry for an unset value, or the replace confirmation for a set
-    /// one. `commit` tells whether the stored value is in git.
-    pub fn begin_value_with(
-        &mut self,
-        value: Vec<u8>,
-        commit: impl FnOnce(&str) -> nix_secrets_core::CommitState,
-    ) {
+    /// Opens the entry field for the selected value. Replacing a set value is
+    /// confirmed only when the new value is submitted.
+    pub fn begin_value(&mut self, value: Vec<u8>) {
         let Some(row) = self.selected().filter(|row| row.is_secret()) else {
             return;
         };
         let path = row.path.clone().expect("secret row has path");
-        let value = Zeroizing::new(value);
-        self.mode = if row.is_set {
-            let commit = commit(&path);
-            Mode::Replace {
-                path,
-                value,
-                commit,
-            }
-        } else {
-            Mode::Edit { path, value }
+        self.mode = Mode::Edit {
+            path,
+            value: Zeroizing::new(value),
         };
     }
 
-    pub fn begin_value(&mut self, value: Vec<u8>) {
-        self.begin_value_with(value, |_| nix_secrets_core::CommitState::Committed)
+    /// Whether the value at `path` is stored, so saving over it needs a
+    /// confirmation.
+    pub fn is_set(&self, path: &str) -> bool {
+        self.rows
+            .iter()
+            .any(|row| row.path.as_deref() == Some(path) && row.is_set)
     }
 
     pub fn mark_saved(&mut self, path: &str) {

@@ -20,10 +20,14 @@ fn leaf(set: bool) -> Row {
 }
 
 #[test]
-fn replacing_a_set_leaf_requires_confirmation() {
+fn replacing_a_set_leaf_opens_entry_first() {
     let mut model = Model::new(vec![leaf(true)]);
     model.begin_value(b"new".to_vec());
-    assert!(matches!(model.mode, Mode::Replace { .. }));
+    assert!(
+        matches!(model.mode, Mode::Edit { .. }),
+        "confirmation waits for Enter"
+    );
+    assert!(model.is_set("h.services.s.key"));
 }
 
 #[test]

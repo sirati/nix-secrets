@@ -109,24 +109,32 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
         Mode::Replace {
             commit: nix_secrets_core::CommitState::Committed,
             ..
-        } => vec![letter("y Replace", 'y'), letter("n Cancel", 'n')],
+        } => vec![
+            letter("y Replace", 'y'),
+            letter("n Cancel", 'n'),
+            Button::new("Ctrl+R Reveal current", MouseTarget::RevealCurrent),
+        ],
         Mode::Replace { .. } => vec![
             Button::new("Ctrl+Shift+Y Yes, overwrite", MouseTarget::ConfirmLoss),
             key("Enter No", Shortcut::Enter),
+            Button::new("Ctrl+R Reveal current", MouseTarget::RevealCurrent),
         ],
         Mode::Reveal { .. } => vec![key("Esc Hide", Shortcut::Escape), letter("c Copy", 'c')],
-        Mode::Edit { .. } => vec![
-            key("Enter Save", Shortcut::Enter),
-            key("Esc Cancel", Shortcut::Escape),
-            Button::new(
-                if model.settings.autosave_unset_on_paste {
-                    "Tab ☑ Autosave on paste"
-                } else {
-                    "Tab □ Autosave on paste"
-                },
-                MouseTarget::AutosaveToggle,
-            ),
-        ],
+        Mode::Edit { path, .. } => {
+            let mut buttons = vec![
+                key("Enter Save", Shortcut::Enter),
+                key("Esc Cancel", Shortcut::Escape),
+            ];
+            // Only a stored value can be revealed; the checkbox matters only
+            // for unset values, since autosave never replaces one.
+            if model.is_set(path) {
+                buttons.push(Button::new(
+                    "Ctrl+R Reveal current",
+                    MouseTarget::RevealCurrent,
+                ));
+            }
+            buttons
+        }
         Mode::GenerateChoice { .. } | Mode::BulkGenerateConfirm { .. } => vec![
             letter("p Password", 'p'),
             letter("w Passphrase", 'w'),

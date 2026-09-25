@@ -30,7 +30,8 @@ Enter  Edit selected value; Enter again saves
 Click  Select a row; a click on an unset input value also opens its entry
 Paste  Set from clipboard; replacement asks first
 Tab    In the entry field: toggle 'Autosave unset on paste'. When on, pasting
-       one line into an unset value saves it at once
+       one line into an unset value saves it at once. Clicking the checkbox or its
+       label toggles it
 Ctrl+V Read the clipboard directly over X11 or Xwayland, without opening a
        window; works when the terminal's own paste fails
 g  Generate password or passphrase for one field
@@ -39,7 +40,10 @@ r  Reveal selected value
 c  Copy the selected value
 p  Copy the public half of a stored OpenSSH private key
 d  Delete selected value after confirmation
-Replacing a value that was never committed to git warns first; only
+Replacing a set value asks after you enter the new one and press Enter.
+Ctrl+R  In the entry field or that question: reveal the current stored value;
+        closing the reveal returns to the dialog with your typed value
+A value that was never committed to git gets a loss warning; only
 Ctrl+Shift+Y or its Yes button overwrites it; n, Enter, Space and Esc keep it.
 Terminals that cannot report Shift with Ctrl need the Yes button
 

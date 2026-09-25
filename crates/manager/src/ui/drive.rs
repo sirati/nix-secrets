@@ -134,14 +134,30 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             model.inform(format!("deleted {path}"));
         }
         Completion::Revealed { path, value } => {
-            if matches!(model.mode, Mode::Browse)
-                && model.selected().and_then(|row| row.path.as_deref()) == Some(path.as_str())
-            {
-                model.mode = Mode::Reveal {
-                    path,
-                    value,
-                    scroll: 0,
-                };
+            let selected =
+                model.selected().and_then(|row| row.path.as_deref()) == Some(path.as_str());
+            match std::mem::replace(&mut model.mode, Mode::Browse) {
+                Mode::Browse if selected => {
+                    model.mode = Mode::Reveal {
+                        path,
+                        value,
+                        scroll: 0,
+                        underneath: None,
+                    }
+                }
+                // Requested from an entry or replace dialog for the same value:
+                // show it over that dialog, which closing the reveal restores.
+                dialog @ (Mode::Edit { .. } | Mode::Replace { .. })
+                    if dialog_path(&dialog) == Some(path.as_str()) =>
+                {
+                    model.mode = Mode::Reveal {
+                        path,
+                        value,
+                        scroll: 0,
+                        underneath: Some(Box::new(dialog)),
+                    }
+                }
+                other => model.mode = other,
             }
         }
         Completion::Copied(message) => model.inform(message),
@@ -222,5 +238,17 @@ fn set_row(model: &mut Model, path: &str, set: bool) {
         .find(|row| row.path.as_deref() == Some(path))
     {
         row.is_set = set;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn apply_completion_for_tests(model: &mut Model, completion: Completion) {
+    apply_completion(model, completion);
+}
+
+fn dialog_path(mode: &Mode) -> Option<&str> {
+    match mode {
+        Mode::Edit { path, .. } | Mode::Replace { path, .. } => Some(path),
+        _ => None,
     }
 }
