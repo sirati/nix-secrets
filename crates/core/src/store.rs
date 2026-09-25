@@ -102,6 +102,10 @@ impl SecretStore {
         Self { path, lock_path }
     }
 
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     pub fn get(&self, path: &SecretPath) -> Result<Option<EncryptedSecret>, StoreError> {
         self.with_lock(false, |document| {
             document

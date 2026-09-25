@@ -31,6 +31,7 @@ mod facets;
 mod generated;
 mod mouse;
 mod prelude;
+mod profiles;
 mod terminal;
 
 pub use terminal::run;

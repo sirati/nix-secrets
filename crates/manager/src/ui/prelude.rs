@@ -38,6 +38,8 @@ pub(super) fn handle(
             | Mode::FacetValues { .. }
             | Mode::FacetFirstChoice { .. }
             | Mode::TreeOrder { .. }
+            | Mode::Profiles { .. }
+            | Mode::ProfileSave { .. }
     ) {
         match event {
             UiEvent::Up => {

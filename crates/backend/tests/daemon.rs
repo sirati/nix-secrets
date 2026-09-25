@@ -292,3 +292,6 @@ fn evaluates_with_fixed_nix_arguments_and_persists_only_ciphertext() {
     assert!(store.contains("YWdlLWVuY3J5cHRlZC1yZWNvcmQ="));
     assert!(!store.contains("age-encrypted-record"));
 }
+
+#[path = "daemon/profiles.rs"]
+mod profiles;

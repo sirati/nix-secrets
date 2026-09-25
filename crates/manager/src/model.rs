@@ -5,6 +5,7 @@ use zeroize::Zeroizing;
 mod attributes;
 mod catalog;
 mod dialogs;
+mod profiles;
 mod visibility;
 pub use attributes::{Attribute, Facet, FacetMode};
 use std::collections::BTreeMap;
@@ -47,6 +48,18 @@ pub enum Mode {
     },
     TreeOrder {
         selected: usize,
+    },
+    Profiles {
+        selected: usize,
+    },
+    ProfileSave {
+        name: String,
+    },
+    ProfileOverwrite {
+        name: String,
+    },
+    ProfileDelete {
+        name: String,
     },
     Help {
         scroll: u16,
@@ -112,6 +125,8 @@ pub struct Model {
     pub search: String,
     pub tree_order: Vec<Attribute>,
     pub facets: BTreeMap<Attribute, Facet>,
+    pub profiles: nix_secrets_core::ProfileSnapshot,
+    pub active_profile: Option<String>,
 }
 
 pub struct VisibleRow {
@@ -184,6 +199,8 @@ impl Model {
             search: String::new(),
             tree_order: Attribute::DEFAULT_TREE.to_vec(),
             facets: BTreeMap::new(),
+            profiles: nix_secrets_core::ProfileSnapshot::default(),
+            active_profile: None,
         };
         if structured {
             model.rebuild_tree();

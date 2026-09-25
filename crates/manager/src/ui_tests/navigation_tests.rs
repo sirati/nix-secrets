@@ -1,6 +1,7 @@
 use super::*;
 
 mod facets;
+mod profiles;
 
 #[test]
 fn idle_ticks_do_not_redraw_the_terminal() {

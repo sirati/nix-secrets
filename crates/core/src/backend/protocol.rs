@@ -77,6 +77,16 @@ pub enum Request {
         request_id: String,
     },
     SubscribeChanges,
+    ListProfiles,
+    SaveProfile {
+        name: String,
+        profile: crate::ViewProfile,
+        expected_revision: u64,
+    },
+    DeleteProfile {
+        name: String,
+        expected_revision: u64,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -125,4 +135,7 @@ pub enum Response {
         update: BackendEvent,
     },
     Heartbeat,
+    Profiles {
+        snapshot: crate::ProfileSnapshot,
+    },
 }

@@ -27,6 +27,12 @@ pub(super) fn listen(
     }
     let mut last_rows = None;
     refresh(&mut client, &schema, &mut last_rows, sender)?;
+    if sender
+        .send(BackgroundUpdate::Profiles(client.list_profiles()?))
+        .is_err()
+    {
+        return Ok(());
+    }
     loop {
         match subscription.next_change()? {
             BackendEvent::ApprovalRequested { .. } => {
@@ -36,6 +42,14 @@ pub(super) fn listen(
             }
             BackendEvent::SecretChanged { .. } | BackendEvent::PublicInfoChanged { .. } => {
                 refresh(&mut client, &schema, &mut last_rows, sender)?;
+            }
+            BackendEvent::ProfilesChanged => {
+                if sender
+                    .send(BackgroundUpdate::Profiles(client.list_profiles()?))
+                    .is_err()
+                {
+                    return Ok(());
+                }
             }
         }
     }

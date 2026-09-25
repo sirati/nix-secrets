@@ -102,3 +102,36 @@ fn whitelist_blacklist_inversion_preserves_visible_values() {
     model.set_facet(Attribute::Namespace, facet);
     assert_eq!(identifiers(&model), before);
 }
+
+#[test]
+fn profile_round_trip_restores_order_filters_and_audience_without_search() {
+    let mut model = Model::new(vec![leaf("alpha", "token"), leaf("beta", "token")]);
+    model.tree_order = vec![Attribute::Namespace, Attribute::Name];
+    model.set_filter(ViewFilter::Passwords);
+    model.set_human_only(true);
+    model.search = "do-not-persist".into();
+    model.set_facet(
+        Attribute::Namespace,
+        Facet {
+            mode: FacetMode::Whitelist,
+            selected: ["alpha".to_owned()].into(),
+        },
+    );
+    let captured = model.capture_profile();
+    let serialized = serde_json::to_string(&captured).unwrap();
+    assert!(!serialized.contains("do-not-persist"));
+    model
+        .profiles
+        .profiles
+        .insert("work".into(), captured.clone());
+    model.tree_order.clear();
+    model.facets.clear();
+    model.set_filter(ViewFilter::All);
+    model.set_human_only(false);
+    model.load_profile("work").unwrap();
+    assert_eq!(model.capture_profile(), captured);
+    assert!(model.search.is_empty());
+    assert!(!model.profile_dirty());
+    model.tree_order.clear();
+    assert!(model.profile_dirty());
+}

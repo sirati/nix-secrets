@@ -1,7 +1,11 @@
+mod profiles;
+mod public_info;
+mod subscription;
 use nix_secrets_core::framing::{read_json, write_json};
 use nix_secrets_core::{
     ApprovalRequest, ApprovalStatus, BackendEvent, Decision, EncryptedSecret as StoredSecret,
-    GeneratedPublicKey, PublicInfoRecord, Request, Response, SecretPath,
+    GeneratedPublicKey, ProfileSnapshot, PublicInfoRecord, Request, Response, SecretPath,
+    ViewProfile,
 };
 use nix_secrets_crypto::{encrypt_secret, CryptoProvider, Recipient};
 use std::collections::BTreeMap;
@@ -13,79 +17,6 @@ pub struct BackendClient {
 }
 
 impl BackendClient {
-    pub fn subscribe_changes(&mut self) -> io::Result<()> {
-        match self.exchange(&Request::SubscribeChanges)? {
-            Response::Subscribed => Ok(()),
-            Response::Error { message } => Err(io::Error::other(message)),
-            response => Err(unexpected(response)),
-        }
-    }
-
-    pub fn next_change(&mut self) -> io::Result<BackendEvent> {
-        loop {
-            match read_json(&mut self.stream)? {
-                Some(Response::Change { update }) => return Ok(update),
-                Some(Response::Heartbeat) => {}
-                Some(Response::Error { message }) => return Err(io::Error::other(message)),
-                Some(response) => return Err(unexpected(response)),
-                None => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "change stream closed",
-                    ))
-                }
-            }
-        }
-    }
-    pub fn list_public_info(&mut self) -> io::Result<BTreeMap<String, PublicInfoRecord>> {
-        match self.exchange(&Request::ListPublicInfo)? {
-            Response::PublicInfoEntries { entries } => Ok(entries),
-            Response::Error { message } => Err(io::Error::other(message)),
-            response => Err(unexpected(response)),
-        }
-    }
-
-    pub fn get_public_info(&mut self, shared_id: &str) -> io::Result<Option<PublicInfoRecord>> {
-        match self.exchange(&Request::GetPublicInfo {
-            shared_id: shared_id.into(),
-        })? {
-            Response::PublicInfo { value } => Ok(value),
-            Response::Error { message } => Err(io::Error::other(message)),
-            response => Err(unexpected(response)),
-        }
-    }
-
-    pub fn set_public_info_if_version(
-        &mut self,
-        path: &SecretPath,
-        value: PublicInfoRecord,
-        expected_version: Option<String>,
-    ) -> io::Result<()> {
-        match self.exchange(&Request::SetPublicInfoIfVersion {
-            path: path.clone(),
-            value,
-            expected_version,
-        })? {
-            Response::Updated => Ok(()),
-            Response::Error { message } => Err(io::Error::other(message)),
-            response => Err(unexpected(response)),
-        }
-    }
-
-    pub fn remove_public_info_if_version(
-        &mut self,
-        path: &SecretPath,
-        expected_version: String,
-    ) -> io::Result<bool> {
-        match self.exchange(&Request::RemovePublicInfoIfVersion {
-            path: path.clone(),
-            expected_version,
-        })? {
-            Response::Removed { existed } => Ok(existed),
-            Response::Error { message } => Err(io::Error::other(message)),
-            response => Err(unexpected(response)),
-        }
-    }
     pub fn new(stream: UnixStream) -> Self {
         Self { stream }
     }

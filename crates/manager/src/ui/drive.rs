@@ -23,6 +23,17 @@ pub fn drive(
                 apply_completion(model, completion);
                 schedule(&mut redraw_at);
             }
+            match writer.refresh_profiles() {
+                Ok(Some(snapshot)) => {
+                    model.profiles = snapshot;
+                    schedule(&mut redraw_at);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    model.notify(error);
+                    schedule(&mut redraw_at);
+                }
+            }
             if matches!(model.mode, Mode::Browse) {
                 match writer.refresh_rows() {
                     Ok(Some(rows)) => {
@@ -180,6 +191,18 @@ fn apply_completion(model: &mut Model, completion: Completion) {
                 model.mode = Mode::Browse;
             }
             model.notify(message);
+        }
+        Completion::ProfileSaved { name, snapshot } => {
+            model.profiles = snapshot;
+            model.active_profile = Some(name.clone());
+            model.notify(format!("saved view profile {name}"));
+        }
+        Completion::ProfileDeleted { name, snapshot } => {
+            model.profiles = snapshot;
+            if model.active_profile.as_deref() == Some(name.as_str()) {
+                model.active_profile = None;
+            }
+            model.notify(format!("deleted view profile {name}"));
         }
     }
     model.show_pending_approval();

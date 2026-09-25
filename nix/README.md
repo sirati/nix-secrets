@@ -178,3 +178,15 @@ Enable `services.secretsReadyWaiter` to derive readiness gates from the same
 tree. It creates one waiter per service. Only units named by `consumerUnits`
 receive `Requires=` and `After=` edges. It does not add a dependency to
 `multi-user.target` or SSH.
+
+The TUI can save named view profiles with `S`. Profiles live in the repository's
+`nix-secrets-profiles.toml`, separately from encrypted secrets. They preserve
+the ordered tree attributes, attribute filters, type filter, and audience
+filter. Search text is transient and is never written to a profile. Opening
+the profile list leaves the current view intact; selecting a profile loads it.
+The status pane marks a loaded profile as modified when its view settings
+change. `n` saves under a new name, `s` confirms overwriting the selected
+profile, and `d` confirms deletion. These controls also work by mouse.
+The backend owns the file, writes it atomically, rejects malformed files and
+symlinks, and notifies other connected clients when profiles change. A stale
+client must reload before writing over another client's update.

@@ -1,5 +1,5 @@
 use crate::framing::{read_json, write_json};
-use crate::{ApprovalBroker, BrokerError, Schema, SecretStore};
+use crate::{ApprovalBroker, BrokerError, ProfileStore, Schema, SecretStore};
 use rustix::net::sockopt::socket_peercred;
 use rustix::process::geteuid;
 use std::fs;
@@ -25,6 +25,7 @@ pub struct Backend {
     listener: UnixListener,
     schema: Arc<Schema>,
     store: Arc<SecretStore>,
+    profiles: Arc<ProfileStore>,
     broker: Arc<Mutex<ApprovalBroker>>,
     next_session: Arc<AtomicU64>,
     feed: Arc<Feed>,
@@ -37,6 +38,11 @@ impl Backend {
         store: SecretStore,
     ) -> io::Result<Self> {
         let socket_path = socket_path.into();
+        let repository = store
+            .path()
+            .parent()
+            .ok_or_else(|| io::Error::other("store has no repository directory"))?;
+        let profiles = ProfileStore::new(repository)?;
         prepare_socket_path(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)?;
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
@@ -45,6 +51,7 @@ impl Backend {
             listener,
             schema: Arc::new(schema),
             store: Arc::new(store),
+            profiles: Arc::new(profiles),
             broker: Arc::new(Mutex::new(ApprovalBroker::default())),
             next_session: Arc::new(AtomicU64::new(1)),
             feed: Arc::new(Feed::default()),
@@ -61,11 +68,12 @@ impl Backend {
             }
             let schema = Arc::clone(&self.schema);
             let store = Arc::clone(&self.store);
+            let profiles = Arc::clone(&self.profiles);
             let broker = Arc::clone(&self.broker);
             let feed = Arc::clone(&self.feed);
             let session = self.next_session.fetch_add(1, Ordering::Relaxed);
             thread::spawn(move || {
-                let _ = handle_client(stream, &schema, &store, &broker, &feed, session);
+                let _ = handle_client(stream, &schema, &store, &profiles, &broker, &feed, session);
                 if let Ok(mut state) = broker.lock() {
                     state.disconnect(session);
                 }
@@ -83,6 +91,7 @@ fn handle_client(
     mut stream: UnixStream,
     schema: &Schema,
     store: &SecretStore,
+    profiles: &ProfileStore,
     broker: &Mutex<ApprovalBroker>,
     feed: &Feed,
     session: u64,
@@ -110,6 +119,25 @@ fn handle_client(
             Request::List => store
                 .list()
                 .map(|entries| Response::Secrets { entries })
+                .map_err(|error| error.to_string()),
+            Request::ListProfiles => profiles
+                .list()
+                .map(|snapshot| Response::Profiles { snapshot })
+                .map_err(|error| error.to_string()),
+            Request::SaveProfile {
+                name,
+                profile,
+                expected_revision,
+            } => profiles
+                .save(&name, profile, expected_revision)
+                .map(|snapshot| Response::Profiles { snapshot })
+                .map_err(|error| error.to_string()),
+            Request::DeleteProfile {
+                name,
+                expected_revision,
+            } => profiles
+                .delete(&name, expected_revision)
+                .map(|snapshot| Response::Profiles { snapshot })
                 .map_err(|error| error.to_string()),
             Request::Set { path, envelope } => store
                 .set(schema, &path, envelope)
@@ -256,25 +284,8 @@ fn handle_client(
     Ok(())
 }
 
-fn with_broker(
-    broker: &Mutex<ApprovalBroker>,
-    operation: impl FnOnce(&mut ApprovalBroker) -> Result<Response, BrokerError>,
-) -> Result<Response, String> {
-    let mut state = broker
-        .lock()
-        .map_err(|_| "approval broker lock is poisoned".to_owned())?;
-    operation(&mut state).map_err(broker_error)
-}
-
-fn broker_error(error: BrokerError) -> String {
-    match error {
-        BrokerError::Invalid(message) => message.to_owned(),
-        BrokerError::Full => "approval broker capacity reached".to_owned(),
-        BrokerError::Unknown => "unknown approval request".to_owned(),
-        BrokerError::Unavailable => "approval request is unavailable".to_owned(),
-        BrokerError::WrongLease => "approval lease is invalid".to_owned(),
-    }
-}
+mod broker;
+use broker::with_broker;
 
 mod socket_path;
 use socket_path::prepare_socket_path;

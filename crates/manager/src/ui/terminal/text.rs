@@ -1,4 +1,6 @@
+mod width;
 use super::*;
+use width::{ellipsize, shorten};
 
 pub(super) fn prompt(model: &Model) -> String {
     if let Some(items) = selector_items(model) {
@@ -7,6 +9,7 @@ pub(super) fn prompt(model: &Model) -> String {
             Mode::FacetValues { .. } => "Choose All, Whitelist, Blacklist, or toggle a value. Switching lists preserves visible values.",
             Mode::FacetFirstChoice { .. } => "Choose the first filter rule for this value:",
             Mode::TreeOrder { .. } => "Space moves an attribute into/out of the tree. [ and ] reorder tree attributes.",
+            Mode::Profiles { .. } => "Enter loads a profile; n creates one; s overwrites the selected profile; d deletes it.",
             _ => unreachable!(),
         };
         return format!("{header}\n\n{}", items.join("\n"));
@@ -25,6 +28,9 @@ pub(super) fn prompt(model: &Model) -> String {
         }
         Mode::Help { .. } => "All actions are described above. Use ↑↓ to scroll.".into(),
         Mode::Search { query } => format!("Search: {query} · Enter: keep filter · Esc: clear"),
+        Mode::ProfileSave { name } => format!("Name: {name} · Enter saves current view · Esc cancels"),
+        Mode::ProfileOverwrite { name } => format!("Replace view profile {name} with current layout? y/n"),
+        Mode::ProfileDelete { name } => format!("Delete view profile {name}? y/n"),
         Mode::DeleteConfirm { path } => format!("Delete {path} from encrypted store? y/n"),
         Mode::Reveal { .. } => "Esc: hide".into(),
         Mode::Edit { value, .. } => format!(
@@ -65,7 +71,7 @@ pub(super) fn prompt(model: &Model) -> String {
                 )
             }
         }
-        Mode::FacetCategories { .. } | Mode::FacetValues { .. } | Mode::FacetFirstChoice { .. } | Mode::TreeOrder { .. } => unreachable!(),
+        Mode::FacetCategories { .. } | Mode::FacetValues { .. } | Mode::FacetFirstChoice { .. } | Mode::TreeOrder { .. } | Mode::Profiles { .. } => unreachable!(),
     }
 }
 
@@ -156,6 +162,29 @@ pub(super) fn selector_items(model: &Model) -> Option<Vec<String>> {
                 })
                 .collect(),
         ),
+        Mode::Profiles { selected } => Some(
+            std::iter::once(format!(
+                "{} Save current view as new profile",
+                marker(*selected, 0)
+            ))
+            .chain(
+                model
+                    .profiles
+                    .profiles
+                    .keys()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        let active = model.active_profile.as_deref() == Some(name.as_str());
+                        format!(
+                            "{} {}{}",
+                            marker(*selected, index + 1),
+                            name,
+                            if active { " · active" } else { "" }
+                        )
+                    }),
+            )
+            .collect(),
+        ),
         _ => None,
     }
 }
@@ -165,6 +194,7 @@ pub(super) fn selector_selected(model: &Model) -> Option<usize> {
         Mode::FacetCategories { selected }
         | Mode::FacetValues { selected, .. }
         | Mode::TreeOrder { selected } => Some(*selected),
+        Mode::Profiles { selected } => Some(*selected),
         Mode::FacetFirstChoice { .. } => Some(0),
         _ => None,
     }
@@ -176,26 +206,6 @@ fn marker(selected: usize, index: usize) -> &'static str {
     } else {
         " "
     }
-}
-
-fn shorten(value: &str, max: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
-    if UnicodeWidthStr::width(value) <= max {
-        return value.into();
-    }
-    let mut output = String::new();
-    for character in value.chars() {
-        if UnicodeWidthStr::width(output.as_str())
-            + unicode_width::UnicodeWidthChar::width(character).unwrap_or(0)
-            + 1
-            > max
-        {
-            break;
-        }
-        output.push(character);
-    }
-    output.push('…');
-    output
 }
 
 pub(super) fn selected_text(model: &Model, width: u16) -> String {
@@ -266,30 +276,4 @@ pub(super) fn selected_text(model: &Model, width: u16) -> String {
         last.push_str(&ellipsize(&explanation, budget));
     }
     lines.join("\n")
-}
-
-fn ellipsize(value: &str, width: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-    if UnicodeWidthStr::width(value) <= width {
-        return value.to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let mut output = String::new();
-    let mut used = 0;
-    for character in value.chars() {
-        let size = UnicodeWidthChar::width(character).unwrap_or(0);
-        if used + size + 1 > width {
-            break;
-        }
-        output.push(character);
-        used += size;
-    }
-    output.push('…');
-    output
-}
-
-pub(super) fn help_text() -> &'static str {
-    "NAVIGATE\n↑ / ↓  Move between visible items\n/  Search names, identifiers, and explanations\nP  Show all attributes of the selected value\nF  Filter by any identity or presentation attribute\nT  Choose which attributes form the tree and reorder them\n1 Required (external values only) · 2 All · 3 Keys · 4 Passwords · 5 Public info\n6 Everyone · 7 Human-facing\n?  Show or close this help\n\nFACET FILTERS\nChoose an attribute, then All, Whitelist, Blacklist, or a value.\nSwitching Whitelist and Blacklist inverts checked values to preserve the visible set.\nFrom All, click a value for four choices: only this, only others,\nwhitelist this off, or blacklist all other values off.\nTree attributes remain filterable.\n\nEDIT\nEnter  Edit selected value; Enter again saves\nPaste  Set from clipboard; replacement asks first\ng  Generate password or passphrase for one field\nG  Generate all missing passwords; keeps existing values\nr  Reveal selected value\nc  Copy the selected value\np  Copy the public half of a stored OpenSSH private key\nd  Delete selected value after confirmation\n\nDEPLOYMENT\nA target deployer requests one server's values.\ny  Approve the verified target and displayed changes\nn / Esc  Reject the request\n\nEnter  Acknowledge a notice\nEsc  Leave a view, or quit from the tree"
 }

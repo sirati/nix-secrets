@@ -2,6 +2,7 @@ use crate::controller::Controller;
 use crate::model::ApprovalRequest;
 use crate::tree::Row;
 use crate::ui::{Action, Completion, GenerateKind, SecretWriter, OPERATION_QUEUED};
+use nix_secrets_core::{ProfileSnapshot, ViewProfile};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
@@ -26,10 +27,20 @@ enum Command {
         kind: GenerateKind,
     },
     Approval(bool),
+    SaveProfile {
+        name: String,
+        profile: ViewProfile,
+        revision: u64,
+    },
+    DeleteProfile {
+        name: String,
+        revision: u64,
+    },
 }
 
 enum Event {
     Rows(Vec<Row>),
+    Profiles(ProfileSnapshot),
     Approval(ApprovalRequest),
     Completion(Completion),
     Error(String),
@@ -40,6 +51,7 @@ pub struct AsyncWriter {
     commands: Sender<Command>,
     events: Receiver<Event>,
     rows: Option<Vec<Row>>,
+    profiles: Option<ProfileSnapshot>,
     approvals: Vec<ApprovalRequest>,
     completions: Vec<Completion>,
     busy: bool,
@@ -80,6 +92,19 @@ impl AsyncWriter {
                         }
                     }
                 }
+                match controller.refresh_profiles() {
+                    Ok(Some(snapshot)) => {
+                        if outgoing.send(Event::Profiles(snapshot)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        if outgoing.send(Event::Error(error)).is_err() {
+                            return;
+                        }
+                    }
+                }
                 match controller.poll_approval() {
                     Ok(Some(request)) => {
                         if outgoing.send(Event::Approval(request)).is_err() {
@@ -99,6 +124,7 @@ impl AsyncWriter {
             commands,
             events,
             rows: None,
+            profiles: None,
             approvals: vec![],
             completions: vec![],
             busy: false,
@@ -109,6 +135,7 @@ impl AsyncWriter {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Rows(rows) => self.rows = Some(rows),
+                Event::Profiles(snapshot) => self.profiles = Some(snapshot),
                 Event::Approval(request) => self.approvals.push(request),
                 Event::Completion(result) => {
                     if !matches!(result, Completion::BulkProgress { .. }) {
@@ -136,57 +163,34 @@ impl AsyncWriter {
     }
 }
 
-fn execute(controller: &mut Controller, command: Command) -> Completion {
-    match command {
-        Command::Write { path, value } => match controller.write(&path, value) {
-            Ok(Action::Saved(path)) => Completion::Saved(path),
-            Ok(_) => Completion::Failed("save did not complete".into()),
-            Err((message, value)) => Completion::SaveFailed {
-                path,
-                value,
-                message,
-            },
-        },
-        Command::Delete(path) => match controller.delete(&path) {
-            Ok(()) => Completion::Deleted(path),
-            Err(error) => Completion::Failed(error),
-        },
-        Command::Reveal(path) => match controller.reveal(&path) {
-            Ok(value) => Completion::Revealed { path, value },
-            Err(error) => Completion::Failed(error),
-        },
-        Command::CopyPublic(path) => match controller.copy_public(&path) {
-            Ok(()) => Completion::Copied(format!("copied public key for {path}")),
-            Err(error) => Completion::Failed(error),
-        },
-        Command::CopyValue(value) => match controller.copy(&value) {
-            Ok(()) => Completion::Copied("value copied".into()),
-            Err(error) => Completion::Failed(error),
-        },
-        Command::Generate {
-            path,
-            kind,
-            replacing,
-        } => match controller.generate(&path, kind) {
-            Ok(value) => Completion::Generated {
-                path,
-                value,
-                replacing,
-            },
-            Err(error) => Completion::Failed(error),
-        },
-        Command::BulkGenerate { .. } => unreachable!("bulk execution emits progress"),
-        Command::Approval(accepted) => match controller.approval(accepted) {
-            Ok(next) => Completion::ApprovalDone(next),
-            Err(error) => Completion::Failed(error),
-        },
-    }
-}
+mod execute;
+use execute::execute;
 
 mod bulk;
 use bulk::execute_bulk;
 
 impl SecretWriter for AsyncWriter {
+    fn refresh_profiles(&mut self) -> Result<Option<ProfileSnapshot>, String> {
+        self.pump();
+        Ok(self.profiles.take())
+    }
+    fn save_profile(
+        &mut self,
+        name: String,
+        profile: ViewProfile,
+        revision: u64,
+    ) -> Result<ProfileSnapshot, String> {
+        self.queue(Command::SaveProfile {
+            name,
+            profile,
+            revision,
+        })?;
+        Err(OPERATION_QUEUED.into())
+    }
+    fn delete_profile(&mut self, name: String, revision: u64) -> Result<ProfileSnapshot, String> {
+        self.queue(Command::DeleteProfile { name, revision })?;
+        Err(OPERATION_QUEUED.into())
+    }
     fn poll_completion(&mut self) -> Option<Completion> {
         self.pump();
         if self.completions.is_empty() {

@@ -5,6 +5,7 @@ use crate::tree::Row;
 use crate::ui::{Action, GenerateKind, SecretWriter};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use nix_secrets_core::{ApprovalRequest, LeafSpec, Schema, SecretKind, SecretPath, ValueType};
+use nix_secrets_core::{ProfileSnapshot, ViewProfile};
 use nix_secrets_crypto::{decrypt_secret, AgeCommandProvider, EncryptedSecret, Recipient};
 use nix_secrets_transport::{
     DeployEntry, Destination, ExpectedSecret, ExpectedTarget, ExpectedTask, HostIdentity,
@@ -36,12 +37,14 @@ pub struct Controller {
     active: Option<ActiveApproval>,
     background: Option<Receiver<BackgroundUpdate>>,
     pending_rows: Option<Vec<Row>>,
+    pending_profiles: Option<ProfileSnapshot>,
     approvals_ready: bool,
     background_error: Option<String>,
 }
 
 enum BackgroundUpdate {
     Rows(Vec<Row>),
+    Profiles(ProfileSnapshot),
     ApprovalPending,
     Error(String),
 }
@@ -62,6 +65,7 @@ impl Controller {
             active: None,
             background: None,
             pending_rows: None,
+            pending_profiles: None,
             approvals_ready: false,
             background_error: None,
         })
@@ -87,6 +91,7 @@ impl Controller {
         while let Ok(update) = receiver.try_recv() {
             match update {
                 BackgroundUpdate::Rows(rows) => self.pending_rows = Some(rows),
+                BackgroundUpdate::Profiles(snapshot) => self.pending_profiles = Some(snapshot),
                 BackgroundUpdate::ApprovalPending => self.approvals_ready = true,
                 BackgroundUpdate::Error(error) => self.background_error = Some(error),
             }
