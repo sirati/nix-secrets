@@ -99,6 +99,8 @@ fn flatten_target(
     output: &mut TargetLeaves,
 ) {
     match node {
+        // Operator-only values never reach a host.
+        SecretNode::Operator(_) => {}
         SecretNode::Branch(children) => {
             for (name, child) in children {
                 parents.push(name.clone());

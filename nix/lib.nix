@@ -27,6 +27,7 @@ let
     validateConsumerConstraints
     validateGeneratedSecret
     validateValueGenerator
+    validateKeypairGenerator
     ;
 
   normalizeLeaf =
@@ -129,6 +130,53 @@ let
         valueGenerator = validateValueGenerator node.valueGenerator;
       };
 
+  isOperatorLeaf = node: (node.kind or null) == "operator";
+  isLeaf = node: node ? destination || node ? generatedSecret || isOperatorLeaf node;
+
+  # An operator-only value: stored encrypted for the operator, never deployed,
+  # never part of a host manifest.
+  normalizeOperatorLeaf =
+    context: node:
+    let
+      names = node.recipientNames or (if node ? recipientPublicKeys then [ ] else context.recipientNames);
+      keys =
+        if names == [ ] then
+          node.recipientPublicKeys or context.recipientPublicKeys
+        else
+          map (
+            name: context.namedRecipientPublicKeys.${name} or (throw "unknown recipient name: ${name}")
+          ) names;
+      allowed = [
+        "kind"
+        "description"
+        "humanFacing"
+        "identity"
+        "presentation"
+        "recipientPublicKeys"
+        "recipientNames"
+        "generator"
+      ];
+      extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
+    in
+    if extra != [ ] then
+      throw "operator leaf has unknown fields: ${lib.concatStringsSep ", " extra}"
+    else if keys == [ ] || !(builtins.all validSshPublicKey keys) then
+      throw "operator leaf has no valid recipient public key"
+    else
+      builtins.removeAttrs node [
+        "recipientPublicKeys"
+        "recipientNames"
+      ]
+      // {
+        kind = "operator";
+        recipientNames = names;
+        recipientPublicKeys = keys;
+        recipientIds = map recipientId keys;
+      }
+      // lib.optionalAttrs (node ? generator) {
+        generator = validateKeypairGenerator node.generator;
+      };
+
   normalizeGeneratedLeaf =
     context: node:
     let
@@ -212,6 +260,10 @@ let
       in
       if !isAttrs node then
         throw "secret tree entry ${name} must be an attribute set"
+      else if isOperatorLeaf node && (node ? destination || node ? generatedSecret) then
+        throw "operator leaf ${name} cannot have a destination or generatedSecret"
+      else if isOperatorLeaf node then
+        normalizeOperatorLeaf childContext node
       else if node ? destination && node ? generatedSecret then
         throw "secret tree entry ${name} cannot have destination and generatedSecret"
       else if node ? destination then
@@ -230,7 +282,7 @@ let
         let
           node = tree.${name};
         in
-        if node ? destination || node ? generatedSecret then [ node ] else collectLeaves node
+        if isLeaf node then [ node ] else collectLeaves node
       ) (attrNames tree)
     );
 
@@ -260,7 +312,7 @@ let
         node:
         mapAttrs (
           name: value:
-          if value ? destination || value ? generatedSecret then
+          if isLeaf value then
             let
               identity = value.identity or { };
               presentation = value.presentation or { };
@@ -271,7 +323,8 @@ let
                 field: !(builtins.elem field [ "explanation" "facing" "type" ])
               ) (attrNames presentation);
               inferredType =
-                if (value.generatedSecret.type or null) == "storage-box-ssh-key" then "passphrase"
+                if (value.kind or null) == "operator" then "operator-key"
+                else if (value.generatedSecret.type or null) == "storage-box-ssh-key" then "passphrase"
                 else if (value.valueType or null) == "password" then "passphrase"
                 else if (value.kind or null) == "public-info" then
                   if (value.destination.contentType or null) == "openssh-public-key" then "public-key" else "public-info"
@@ -338,9 +391,31 @@ let
       }
       // lib.mapAttrs' (user: value: lib.nameValuePair "user-${user}-services" value) users;
     };
+  # Removes operator-only leaves, for anything that reaches a host.
+  withoutOperatorLeaves =
+    tree:
+    lib.filterAttrs (_: node: !(builtins.isAttrs node && isOperatorLeaf node)) (
+      builtins.mapAttrs (
+        _: node: if builtins.isAttrs node && !(isLeaf node) then withoutOperatorLeaves node else node
+      ) tree
+    );
+
+  # The public key the operator generated for an operator leaf, as the base64
+  # text stored in plain beside its ciphertext, or null while it is unset.
+  #   operatorPublicKey ./nix-secrets.toml "host.services.nmbl.generation-key"
+  operatorPublicKey =
+    store: identifier:
+    let
+      document = if builtins.pathExists store then builtins.fromTOML (builtins.readFile store) else { };
+    in
+    (document.secrets or { }).${identifier}.public_key or null;
 in
 {
   inherit
+    isLeaf
+    isOperatorLeaf
+    operatorPublicKey
+    withoutOperatorLeaves
     collectLeaves
     normalizeHost
     normalizeService

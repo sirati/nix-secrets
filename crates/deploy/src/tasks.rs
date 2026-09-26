@@ -156,7 +156,7 @@ fn read_attested_known_hosts(
             SecretNode::Branch(children) => children
                 .values()
                 .any(|child| matching(child, file, host, port)),
-            SecretNode::Generated(_) => false,
+            SecretNode::Generated(_) | SecretNode::Operator(_) => false,
         }
     }
     if !host_schema

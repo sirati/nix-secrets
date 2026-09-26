@@ -392,6 +392,7 @@ fn modal_title(mode: &Mode) -> &'static str {
         Mode::Edit { .. } => "Edit value",
         Mode::Replace { .. } => "Replace value",
         Mode::GenerateChoice { .. } => "Generate value",
+        Mode::KeypairConfirm { .. } => "Generate operator keypair",
         Mode::BulkGenerateConfirm { .. } => "Generate missing passwords",
         Mode::BulkProgress { .. } => "Generating passwords",
         Mode::GeneratedPreview { .. } => "Generated value",

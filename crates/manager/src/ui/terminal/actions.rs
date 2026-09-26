@@ -140,6 +140,12 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
             letter("w Passphrase", 'w'),
             key("Esc Cancel", Shortcut::Escape),
         ],
+        Mode::KeypairConfirm { .. } => {
+            vec![
+                letter("y Generate", 'y'),
+                key("Esc Cancel", Shortcut::Escape),
+            ]
+        }
         Mode::BulkProgress { .. } => vec![key("Esc Hide", Shortcut::Escape)],
         Mode::GeneratedPreview { .. } => vec![
             key("Enter Save", Shortcut::Enter),

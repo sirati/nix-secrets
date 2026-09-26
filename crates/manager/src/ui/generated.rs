@@ -14,9 +14,16 @@ pub(super) fn begin(model: &mut Model, _writer: &mut impl SecretWriter) {
         return;
     }
     let path = row.path.expect("secret row has path");
-    model.mode = Mode::GenerateChoice {
-        path,
-        replacing: row.is_set,
+    model.mode = if row.category == crate::tree::RowCategory::Operator {
+        Mode::KeypairConfirm {
+            path,
+            replacing: row.is_set,
+        }
+    } else {
+        Mode::GenerateChoice {
+            path,
+            replacing: row.is_set,
+        }
     };
 }
 

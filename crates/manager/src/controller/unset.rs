@@ -53,6 +53,8 @@ pub(crate) fn plan_unset(
         let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
         let spec = match schema.leaf(&path).map_err(|error| error.to_string())? {
             LeafSpec::Stored(spec) => spec,
+            // Rejected with a clear message when the request is inspected.
+            LeafSpec::Operator(_) => continue,
             LeafSpec::Generated(task) => {
                 if task.generated_secret.secret_type
                     != nix_secrets_core::GeneratedSecretType::LocalSshKey

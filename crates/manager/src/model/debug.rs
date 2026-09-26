@@ -68,6 +68,11 @@ impl fmt::Debug for Mode {
                 .field("path", path)
                 .field("replacing", replacing)
                 .finish(),
+            Self::KeypairConfirm { path, replacing } => formatter
+                .debug_struct("KeypairConfirm")
+                .field("path", path)
+                .field("replacing", replacing)
+                .finish(),
             Self::BulkGenerateConfirm { paths } => formatter
                 .debug_struct("BulkGenerateConfirm")
                 .field("count", &paths.len())

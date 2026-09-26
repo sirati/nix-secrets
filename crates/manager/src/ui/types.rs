@@ -74,6 +74,8 @@ pub enum Completion {
         value: Zeroizing<Vec<u8>>,
     },
     Copied(String),
+    /// An operator keypair was generated and stored.
+    KeypairGenerated(String),
     Generated {
         path: String,
         value: Zeroizing<Vec<u8>>,
@@ -161,6 +163,10 @@ pub trait SecretWriter {
         _replacing: bool,
     ) -> Result<Zeroizing<Vec<u8>>, String> {
         self.generate(path, kind)
+    }
+    /// Runs an operator leaf's keypair generator and stores the result.
+    fn generate_keypair(&mut self, _path: &str) -> Result<(), String> {
+        Err("keypair generation unavailable".into())
     }
     fn generate_missing(&mut self, _paths: Vec<String>, _kind: GenerateKind) -> Result<(), String> {
         Err("bulk generation unavailable".into())

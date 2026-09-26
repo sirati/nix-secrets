@@ -13,6 +13,7 @@ pub(super) fn flatten(
     output: &mut HashMap<String, ManifestEntry>,
 ) -> Result<(), DeployError> {
     match node {
+        SecretNode::Operator(_) => Ok(()),
         SecretNode::Branch(children) => {
             flatten_children(hostname, namespace, service, parents, children, output)
         }

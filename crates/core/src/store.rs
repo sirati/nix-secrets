@@ -36,7 +36,8 @@ pub struct EncryptedSecret {
     /// A complete age file encoded for TOML storage.
     #[serde(with = "base64_bytes")]
     pub age_ciphertext: Vec<u8>,
-    /// Plaintext public half of an OpenSSH private key, when applicable.
+    /// Plaintext public half: an OpenSSH public key for an OpenSSH private
+    /// key, or base64 of an operator generator's public key output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_key: Option<String>,
 }
@@ -158,19 +159,13 @@ impl SecretStore {
         if matches!(&leaf, LeafSpec::Stored(spec) if matches!(spec.kind, SecretKind::PublicInfo)) {
             return Err(StoreError::InvalidPublicInfo);
         }
-        let recipients = match &leaf {
-            LeafSpec::Stored(spec) => &spec.recipient_ids,
-            LeafSpec::Generated(spec) => &spec.recipient_ids,
-        };
-        if *recipients != envelope.recipient_ids {
+        let recipients = leaf.recipients().0;
+        if recipients != envelope.recipient_ids.as_slice() {
             return Err(StoreError::RecipientMismatch);
         }
         validate_public_metadata(&leaf, envelope.public_key.as_deref())?;
         validate_record(&envelope)?;
-        let names = match &leaf {
-            LeafSpec::Stored(spec) => &spec.recipient_names,
-            LeafSpec::Generated(spec) => &spec.recipient_names,
-        };
+        let names = leaf.recipient_names();
         self.with_lock(true, |document| {
             if let Some(expected) = expected_version {
                 let actual = document

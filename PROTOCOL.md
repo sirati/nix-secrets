@@ -231,6 +231,20 @@ target adopts the installed value instead of generating a different one. If
 someone entered the value in the store meanwhile, the conditional write keeps
 that value, the frontend reports it, and the next deployment installs it.
 
+## Operator-only values
+
+A `kind = "operator"` leaf has recipients but no destination. The Nix module
+removes it from every host manifest and readiness waiter, and the frontend
+refuses any deployment request naming it before connecting. Its stored record
+may carry `public_key`: base64 of the public key its declared generator wrote
+to file descriptor 3. The generator runs on the operator's machine as
+`nix run INSTALLABLE -- ARGS…` with stdin from `/dev/null`, the private key on
+stdout (at most 1 MiB) and the public key on fd 3 (at most 64 KiB). The private
+key is encrypted before it is stored; neither half is written to disk.
+
+`nix-secrets pipe-secret ID [-- COMMAND…]` decrypts one stored value and
+writes it to the command's stdin, or to a stdout that is not a terminal.
+
 ## Generated-secret tasks
 
 A generated leaf has `kind = "generated"` and a `generatedSecret` declaration

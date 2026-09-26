@@ -55,6 +55,24 @@ pub(super) fn validate_tree(
                 }
             }
         }
+        SecretNode::Operator(leaf) => {
+            let path = leaf_path(host, namespace, service, parents);
+            validate_description(&path, leaf.description.as_deref())?;
+            validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
+            if leaf
+                .recipient_public_keys
+                .iter()
+                .any(|key| !valid_ssh_public_key(key))
+            {
+                return Err(invalid(&path, "invalid OpenSSH recipient public key"));
+            }
+            if let Some(generator) = &leaf.generator {
+                generator
+                    .validate_definition()
+                    .map_err(|message| SchemaError::InvalidValueDefinition(path, message))?;
+            }
+            Ok(())
+        }
         SecretNode::Generated(leaf) => {
             validate_description(
                 &leaf_path(host, namespace, service, parents),

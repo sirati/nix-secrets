@@ -25,6 +25,9 @@ impl Controller {
                 spec.recipient_public_keys,
                 spec.external_input_required,
             ),
+            LeafSpec::Operator(_) => {
+                return Err("operator keys are generated with their declared generator".into())
+            }
         };
         if external_input_required {
             return Err("this value must be supplied from the external system".into());

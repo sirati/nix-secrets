@@ -11,8 +11,10 @@ pub use spec::{GeneratedSecretSpec, LeafSpec, SecretSpec};
 mod path;
 mod registry;
 use registry::{missing, synthetic_path, validate_named_recipients, validate_shared_public_specs};
+pub mod operator;
 pub(crate) mod validation;
 mod value;
+pub use operator::{KeypairGenerator, OperatorKind, OperatorLeaf, OperatorSpec};
 pub mod value_generator;
 pub use generated::{
     GeneratedKind, GeneratedSecret, GeneratedSecretLeaf, GeneratedSecretType, StorageBoxBootstrap,
@@ -61,6 +63,8 @@ pub struct HostSchema {
 pub enum SecretNode {
     Generated(GeneratedSecretLeaf),
     Secret(SecretLeaf),
+    /// Operator-only: never part of a host manifest or deployment.
+    Operator(OperatorLeaf),
     Branch(BTreeMap<String, SecretNode>),
 }
 
@@ -215,14 +219,18 @@ impl Schema {
     pub fn secret(&self, path: &SecretPath) -> Result<SecretSpec, SchemaError> {
         match self.leaf(path)? {
             LeafSpec::Stored(spec) => Ok(spec),
-            LeafSpec::Generated(_) => Err(SchemaError::WrongKind(path.clone())),
+            LeafSpec::Generated(_) | LeafSpec::Operator(_) => {
+                Err(SchemaError::WrongKind(path.clone()))
+            }
         }
     }
 
     pub fn generated_secret(&self, path: &SecretPath) -> Result<GeneratedSecretSpec, SchemaError> {
         match self.leaf(path)? {
             LeafSpec::Generated(spec) => Ok(spec),
-            LeafSpec::Stored(_) => Err(SchemaError::WrongKind(path.clone())),
+            LeafSpec::Stored(_) | LeafSpec::Operator(_) => {
+                Err(SchemaError::WrongKind(path.clone()))
+            }
         }
     }
 
@@ -238,7 +246,9 @@ impl Schema {
                 SecretNode::Branch(children) => {
                     children.get(component).ok_or_else(|| missing(path))?
                 }
-                SecretNode::Secret(_) | SecretNode::Generated(_) => return Err(missing(path)),
+                SecretNode::Secret(_) | SecretNode::Generated(_) | SecretNode::Operator(_) => {
+                    return Err(missing(path));
+                }
             };
         }
         match node {
@@ -264,6 +274,17 @@ impl Schema {
                 consumer_constraints: leaf.consumer_constraints.clone(),
                 value_generator: leaf.value_generator.clone(),
                 generate_on_deploy: leaf.generate_on_deploy,
+            })),
+            SecretNode::Operator(leaf) => Ok(LeafSpec::Operator(OperatorSpec {
+                path: path.clone(),
+                description: leaf.description.clone(),
+                human_facing: leaf.human_facing,
+                identity: leaf.identity.clone(),
+                presentation: leaf.presentation.clone(),
+                recipient_public_keys: leaf.recipient_public_keys.clone(),
+                recipient_ids: leaf.recipient_ids.clone(),
+                recipient_names: leaf.recipient_names.clone(),
+                generator: leaf.generator.clone(),
             })),
             SecretNode::Generated(leaf) => Ok(LeafSpec::Generated(GeneratedSecretSpec {
                 path: path.clone(),

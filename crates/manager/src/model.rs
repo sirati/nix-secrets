@@ -155,6 +155,11 @@ pub enum Mode {
         path: String,
         replacing: bool,
     },
+    /// Confirms running an operator leaf's declared keypair generator.
+    KeypairConfirm {
+        path: String,
+        replacing: bool,
+    },
     BulkGenerateConfirm {
         paths: Vec<String>,
     },
