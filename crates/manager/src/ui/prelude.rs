@@ -39,6 +39,7 @@ pub(super) fn handle(
             | Mode::TreeOrder { .. }
             | Mode::Profiles { .. }
             | Mode::ProfileSave { .. }
+            | Mode::DeployHost { .. }
     ) {
         match event {
             UiEvent::Up => {

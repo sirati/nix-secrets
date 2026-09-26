@@ -73,6 +73,10 @@ pub enum Request {
         request_id: String,
         lease_id: u64,
         decision: Decision,
+        /// What the frontend did, for the requester: the deployment summary
+        /// or why it refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     CancelApproval {
         request_id: String,
@@ -122,6 +126,16 @@ pub enum Request {
         identifiers: Vec<String>,
     },
     EndSecretSession,
+    /// Asks the registered frontends to deploy every deployable value of
+    /// `target`. The backend builds the [`ApprovalRequest`] from its schema
+    /// and answers [`Response::DeploymentRequested`]; the requester follows
+    /// it with [`Request::ApprovalStatus`]. Without a registered frontend it
+    /// fails with [`crate::backend::NO_OPERATOR`].
+    RequestDeployment {
+        target: String,
+        #[serde(default)]
+        allow_partial: bool,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -197,4 +211,8 @@ pub enum Response {
         socket: std::path::PathBuf,
     },
     SecretSessionEnded,
+    /// The deployment request is queued for the frontends.
+    DeploymentRequested {
+        request: ApprovalRequest,
+    },
 }

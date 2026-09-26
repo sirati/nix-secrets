@@ -41,6 +41,7 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                     key("Enter Edit", Shortcut::Enter).enabled(editable),
                     letter("G Missing", 'G').enabled(missing),
                     letter("C Git Commit", 'C'),
+                    letter("D Deploy", 'D'),
                 ]
             } else {
                 vec![
@@ -61,6 +62,7 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                     letter("p Public", 'p')
                         .enabled(selected.is_some_and(|row| row.can_copy_public && row.is_set)),
                     letter("C Git Commit", 'C'),
+                    letter("D Deploy host", 'D'),
                 ]
             }
         }
@@ -172,6 +174,26 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
         Mode::ProviderFailure { .. } => {
             vec![letter("r Retry", 'r'), key("Esc Cancel", Shortcut::Escape)]
         }
-        Mode::Approval(_) => vec![letter("y Approve", 'y'), letter("n Reject", 'n')],
+        Mode::Approval(request) => {
+            let mut buttons = vec![
+                letter("y Approve", 'y').enabled(request.host_key.is_some() || request.deployable()),
+                letter("n Reject", 'n'),
+            ];
+            if request.host_key.is_none() && request.partial_possible() {
+                buttons.push(letter(
+                    if request.allow_partial {
+                        "p Refuse partial"
+                    } else {
+                        "p Deploy rest, skip waiting"
+                    },
+                    'p',
+                ));
+            }
+            buttons
+        }
+        Mode::DeployHost { .. } => vec![
+            key("Enter Deploy", Shortcut::Enter),
+            key("Esc Cancel", Shortcut::Escape),
+        ],
     }
 }

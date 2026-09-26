@@ -226,11 +226,16 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             }
             model.inform("deployment request finished");
         }
-        Completion::Deployed { generated } => {
+        Completion::Deployed { generated, skipped } => {
             if matches!(model.mode, Mode::Approval(_)) {
                 model.mode = Mode::Browse;
             }
-            model.inform(deployed_notice(&generated));
+            model.inform(deployed_notice(&generated, &skipped));
+        }
+        Completion::DeploymentRequested(host) => {
+            model.inform(format!(
+                "Requested a deployment of {host}; its approval opens next."
+            ));
         }
         Completion::ApprovalLost(message) => {
             if matches!(model.mode, Mode::Approval(_)) {
@@ -290,9 +295,9 @@ fn dialog_path(mode: &Mode) -> Option<&str> {
     }
 }
 
-pub(crate) fn deployed_notice(generated: &[String]) -> String {
-    if generated.is_empty() {
-        "deployment request finished".into()
+pub(crate) fn deployed_notice(generated: &[String], skipped: &[String]) -> String {
+    let mut notice = if generated.is_empty() {
+        "deployment request finished".to_owned()
     } else {
         format!(
             "Deployment finished. The target generated and the store now holds {} value{}:\n{}",
@@ -300,5 +305,15 @@ pub(crate) fn deployed_notice(generated: &[String]) -> String {
             if generated.len() == 1 { "" } else { "s" },
             generated.join("\n")
         )
+    };
+    if !skipped.is_empty() {
+        notice.push_str(&format!(
+            "\n\nSkipped {} value{} whose source host is not deployed yet; the target keeps waiting for {}:\n{}",
+            skipped.len(),
+            if skipped.len() == 1 { "" } else { "s" },
+            if skipped.len() == 1 { "it" } else { "them" },
+            skipped.join("\n")
+        ));
     }
+    notice
 }

@@ -42,6 +42,29 @@ pub struct ApprovalRequest {
     pub missing: Vec<(String, String)>,
     /// Values deployed from another secret: (identifier, source).
     pub derived: Vec<(String, String)>,
+    /// Derived values in `missing` whose source is unset on another host.
+    /// When every missing value is one of them, the operator may deploy the
+    /// rest and skip these; the target keeps waiting for them.
+    pub skippable: Vec<String>,
+    /// The operator chose to deploy without the `skippable` values.
+    pub allow_partial: bool,
+}
+
+impl ApprovalRequest {
+    /// Whether a partial deployment can proceed: something is missing and
+    /// every missing value waits for another host.
+    pub fn partial_possible(&self) -> bool {
+        !self.missing.is_empty()
+            && self
+                .missing
+                .iter()
+                .all(|(identifier, _)| self.skippable.contains(identifier))
+    }
+
+    /// Whether approving deploys, rather than being refused as missing values.
+    pub fn deployable(&self) -> bool {
+        self.missing.is_empty() || (self.allow_partial && self.partial_possible())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,6 +203,10 @@ pub enum Mode {
         replacing: bool,
     },
     Approval(ApprovalRequest),
+    /// Picks the host to deploy; see [`Model::deploy_hosts`].
+    DeployHost {
+        selected: usize,
+    },
     /// The Git Commit dialog.
     Commit {
         draft: CommitDraft,

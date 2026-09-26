@@ -134,6 +134,7 @@ fn concurrent_launches_share_the_live_approval_broker() {
         id: "same-broker".into(),
         target: "target.example".into(),
         secrets: vec!["host.services.mail.password".into()],
+        allow_partial: false,
     };
     let mut submitter = UnixStream::connect(&socket).unwrap();
     assert!(matches!(

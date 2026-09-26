@@ -15,6 +15,11 @@ T  Choose which attributes form the tree and reorder them
 S  Open named view profiles; Enter loads, n saves new, s overwrites, d deletes
 O  Settings for this session (reset on restart; never saved to the repository)
 C  Git Commit: commit nix-secrets.toml and nix-secrets-profiles.toml only
+D  Deploy a host: pick it (the selected row's host is preselected) and every
+   deployable value of it is requested; approve it like any deployment request.
+   When the only missing values are derived from another host's unset value,
+   p in the dialog deploys everything else and lists those as skipped; the
+   host keeps waiting for them until their source host is deployed
 1 Required (external values, and unset values needed before install) · 2 All · 3 Keys · 4 Passwords · 5 Public info
 6 Everyone · 7 Human-facing
 ?  Show or close this help

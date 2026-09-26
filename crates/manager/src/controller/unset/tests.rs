@@ -303,6 +303,7 @@ fn values_that_cannot_be_generated_are_all_listed_and_nothing_is_written() {
         id: "r".into(),
         target: "host".into(),
         secrets: identifiers,
+        allow_partial: false,
     };
     let details = controller
         .approval_details(&request, None, &BTreeSet::new())
@@ -416,7 +417,11 @@ mod derived {
             "dns": host("dns", json!({"app": {
                 "update-key": leaf(&key, "update-key", json!({"valueType": "key",
                     "derivedFrom": {"identifier": "mail.services.app.dns-update-key",
-                        "prefix": KNOT_PREFIX, "suffix": "\n"}}))
+                        "prefix": KNOT_PREFIX, "suffix": "\n"}})),
+                "transfer-key": leaf(&key, "transfer-key", json!({"valueType": "key",
+                    "valueGenerator": {"kind": "random-bytes", "bytes": 32, "encoding": "base64"}})),
+                "api-token": leaf(&key, "api-token", json!({"valueType": "password",
+                    "externalInputRequired": true}))
             }}))
         });
         let schema = Schema::from_json(&document.to_string()).unwrap();
@@ -456,6 +461,61 @@ mod derived {
             "{refusal}"
         );
         assert!(plan.generate.is_empty());
+    }
+
+    /// ns1's case: its update key derives from a value another host has not
+    /// generated yet. Without the partial choice the whole deployment is
+    /// refused; with it everything else deploys and the key is listed as
+    /// skipped.
+    #[test]
+    fn a_partial_deployment_skips_only_values_waiting_for_another_host() {
+        let (_temp, schema, _controller) = pair();
+        let all = schema.deployable_identifiers("dns").unwrap();
+        assert_eq!(all.len(), 3, "{all:?}");
+        let host_only = all
+            .iter()
+            .filter(|id| !id.ends_with("api-token"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let plan = plan_unset(&schema, &host_only, &BTreeSet::new()).unwrap();
+        assert_eq!(plan.skippable, [DERIVED]);
+        assert_eq!(plan.generate.len(), 1);
+        assert!(plan.partial_possible());
+        // Without the choice the existing refusal stays.
+        let refusal = plan.refusal_for(false).unwrap();
+        assert!(refusal.contains("deploy mail first"), "{refusal}");
+        assert!(plan.refusal_for(true).is_none());
+        // A value that must be entered is never skipped.
+        let plan = plan_unset(&schema, &all, &BTreeSet::new()).unwrap();
+        assert_eq!(plan.skippable, [DERIVED]);
+        assert!(!plan.partial_possible());
+        let refusal = plan.refusal_for(true).unwrap();
+        assert!(refusal.contains("dns.services.app.api-token (external input)"), "{refusal}");
+        // A source on the same host is never skippable: it is generated in
+        // the same deployment or must be entered.
+        let fixture = fixture();
+        let plan = plan_unset(&fixture.schema, &Fixture::ids(&["knot"]), &BTreeSet::new()).unwrap();
+        assert!(plan.skippable.is_empty());
+    }
+
+    /// The deployment itself: the skipped value is left out of the target
+    /// selection and named in the result the requester receives.
+    #[test]
+    fn a_partial_deployment_reports_what_it_skipped() {
+        let summary = super::super::super::deployment_summary(
+            "dns",
+            &["dns.services.app.transfer-key".into()],
+            &[DERIVED.into()],
+            None,
+        );
+        assert!(summary.starts_with("deployed dns"), "{summary}");
+        assert!(summary.contains("generated and stored: dns.services.app.transfer-key"));
+        assert!(
+            summary.contains(&format!(
+                "skipped until their source host is deployed (the target keeps waiting for them): {DERIVED}"
+            )),
+            "{summary}"
+        );
     }
 
     #[test]

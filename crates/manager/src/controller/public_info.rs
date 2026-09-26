@@ -94,3 +94,39 @@ impl Controller {
             .ok_or_else(|| "public info is already unset".into())
     }
 }
+
+impl Controller {
+    /// What [`super::unset::plan_unset`] treats as set for `identifiers`:
+    /// every stored value, and each requested public-information leaf whose
+    /// shared value is stored.
+    pub(super) fn plan_set(
+        &mut self,
+        identifiers: &[String],
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        let mut set = self
+            .client
+            .list()
+            .map_err(|error| error.to_string())?
+            .into_keys()
+            .collect::<std::collections::BTreeSet<_>>();
+        let public = self
+            .client
+            .list_public_info()
+            .map_err(|error| error.to_string())?;
+        for identifier in identifiers {
+            let Ok(path) = SecretPath::parse(identifier) else {
+                continue;
+            };
+            if let Ok(LeafSpec::Stored(spec)) = self.schema.leaf(&path) {
+                if spec
+                    .shared_public_id
+                    .as_ref()
+                    .is_some_and(|id| public.contains_key(id))
+                {
+                    set.insert(identifier.clone());
+                }
+            }
+        }
+        Ok(set)
+    }
+}

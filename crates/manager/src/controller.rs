@@ -27,6 +27,8 @@ struct ActiveApproval {
     prepared: Option<PreparedDeployment>,
     target_approved: bool,
     renewed_at: Instant,
+    /// Why the last approval failed, reported if the operator then rejects.
+    last_error: Option<String>,
 }
 
 pub struct Controller {
@@ -42,6 +44,8 @@ pub struct Controller {
     background_error: Option<String>,
     /// Values the last deployment generated on its target and stored.
     last_generated: Vec<String>,
+    /// Values the last partial deployment skipped.
+    last_skipped: Vec<String>,
     /// Runs operator keypair generators; tests replace it.
     keypair_runner: KeypairRunner,
 }
@@ -76,6 +80,11 @@ impl Controller {
     pub fn take_generated(&mut self) -> Vec<String> {
         std::mem::take(&mut self.last_generated)
     }
+
+    /// Values the last partial deployment skipped, for the notice.
+    pub fn take_skipped(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.last_skipped)
+    }
 }
 
 impl Controller {
@@ -98,6 +107,7 @@ impl Controller {
             approvals_ready: false,
             background_error: None,
             last_generated: Vec::new(),
+            last_skipped: Vec::new(),
             keypair_runner: crate::keypair::generate,
         })
     }
@@ -199,6 +209,8 @@ impl Controller {
         }
         let plan = unset::plan_unset(&self.schema, &request.secrets, set)?;
         Ok(UiApproval {
+            skippable: plan.skippable.clone(),
+            allow_partial: request.allow_partial,
             id: request.id.clone(),
             target: request.target.clone(),
             create,
@@ -217,19 +229,31 @@ impl Controller {
     }
 
     fn deploy_active(&mut self) -> Result<(), String> {
-        let identifiers = self
-            .active
-            .as_ref()
-            .ok_or("no claimed approval request")?
-            .request
-            .secrets
-            .clone();
+        let active = self.active.as_ref().ok_or("no claimed approval request")?;
+        let mut identifiers = active.request.secrets.clone();
+        let allow_partial = active.request.allow_partial;
+        let set = self.plan_set(&identifiers)?;
         let entries = self.client.list().map_err(|error| error.to_string())?;
-        let set = entries.keys().cloned().collect::<BTreeSet<_>>();
         // Refuse before connecting, decrypting, generating, or writing.
         let plan = unset::plan_unset(&self.schema, &identifiers, &set)?;
-        if let Some(refusal) = plan.refusal() {
+        if let Some(refusal) = plan.refusal_for(allow_partial) {
             return Err(refusal);
+        }
+        // A partial deployment leaves the values that wait for another host
+        // out of the target selection, so the target keeps waiting for them.
+        let skipped = if allow_partial {
+            plan.skippable.clone()
+        } else {
+            Vec::new()
+        };
+        if !skipped.is_empty() {
+            identifiers.retain(|identifier| !skipped.contains(identifier));
+            let active = self.active.as_mut().expect("active approval exists");
+            let mut narrowed = active.request.clone();
+            narrowed.secrets = identifiers.clone();
+            active.expected = expected_target(&self.schema, &narrowed)?;
+            // The open session selected the whole request; select again.
+            active.prepared = None;
         }
         if self
             .active
@@ -369,12 +393,19 @@ impl Controller {
         let stored = self.store_generated(&applied.generated_records);
         let registered = self.register_public_keys(&source_host, &applied.generated_public_keys);
         let active = self.active.take().expect("approval remains active");
+        let summary = deployment_summary(
+            &source_host,
+            stored.as_ref().map(Vec::as_slice).unwrap_or(&[]),
+            &skipped,
+            stored.as_ref().err().or(registered.as_ref().err()),
+        );
         self.client
-            .resolve(active.request.id, active.lease_id, true)
+            .resolve(active.request.id, active.lease_id, true, Some(summary))
             .map_err(|error| error.to_string())?;
         let stored = stored?;
         registered?;
         self.last_generated = stored;
+        self.last_skipped = skipped;
         Ok(())
     }
 
@@ -387,6 +418,29 @@ impl Controller {
             .prepared = Some(prepared);
         Ok(())
     }
+}
+
+/// What a finished deployment did, for the requester of the approval.
+fn deployment_summary(
+    target: &str,
+    generated: &[String],
+    skipped: &[String],
+    problem: Option<&String>,
+) -> String {
+    let mut summary = format!("deployed {target}");
+    if !generated.is_empty() {
+        summary.push_str(&format!("; generated and stored: {}", generated.join(", ")));
+    }
+    if !skipped.is_empty() {
+        summary.push_str(&format!(
+            "; skipped until their source host is deployed (the target keeps waiting for them): {}",
+            skipped.join(", ")
+        ));
+    }
+    if let Some(problem) = problem {
+        summary.push_str(&format!("; {problem}"));
+    }
+    summary
 }
 
 mod background;

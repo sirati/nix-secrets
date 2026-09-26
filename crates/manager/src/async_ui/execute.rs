@@ -43,9 +43,14 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
             Ok(()) => Completion::KeypairGenerated(path),
             Err(error) => Completion::Failed(error),
         },
-        Command::Approval(accepted) => match controller.approval(accepted) {
+        Command::Approval { accepted, partial } => match if partial {
+            controller.approve_partial()
+        } else {
+            controller.approval(accepted)
+        } {
             Ok(None) if accepted => Completion::Deployed {
                 generated: controller.take_generated(),
+                skipped: controller.take_skipped(),
             },
             Ok(next) => Completion::ApprovalDone(next),
             Err(error) => Completion::Failed(error),
@@ -65,6 +70,10 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
         Command::Commit(options) => match controller.commit(options) {
             Ok(result) => Completion::Committed(result),
             Err(error) => Completion::CommitFailed(error),
+        },
+        Command::RequestDeployment(host) => match controller.request_deployment(&host) {
+            Ok(()) => Completion::DeploymentRequested(host),
+            Err(error) => Completion::Failed(error),
         },
         Command::DeleteProfile { name, revision } => {
             match controller.delete_profile(name.clone(), revision) {

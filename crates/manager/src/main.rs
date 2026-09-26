@@ -24,6 +24,11 @@ fn main() {
         .is_some()
     {
         with_secrets(arguments.collect())
+    } else if arguments
+        .next_if(|argument| argument == "deploy")
+        .is_some()
+    {
+        deploy(arguments.collect())
     } else {
         run(arguments.collect()).map(|()| 0)
     };
@@ -123,6 +128,33 @@ fn with_secrets(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Err
     let status = status.map_err(|error| format!("cannot run {program:?}: {error}"))?;
     ended?;
     Ok(exit_code(status))
+}
+
+/// Asks the attached TUI to deploy a host; see `deploy_command`.
+fn deploy(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_manager::deploy_command::{parse, run, Outcome};
+    let invocation = parse(arguments, env::current_dir()?)?;
+    let outcome = run(
+        &invocation,
+        &runtime_directory(&home()?),
+        Duration::from_millis(500),
+        &mut |line| eprintln!("nix-secrets: {line}"),
+    )?;
+    Ok(match outcome {
+        Outcome::Queued => 0,
+        Outcome::Deployed(summary) => {
+            println!("{summary}");
+            0
+        }
+        Outcome::Rejected(reason) => {
+            eprintln!("nix-secrets: deployment of {} not done: {reason}", invocation.host);
+            1
+        }
+        Outcome::Cancelled => {
+            eprintln!("nix-secrets: the deployment request of {} was cancelled", invocation.host);
+            1
+        }
+    })
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {

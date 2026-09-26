@@ -27,7 +27,11 @@ enum Command {
         kind: GenerateKind,
     },
     GenerateKeypair(String),
-    Approval(bool),
+    Approval {
+        accepted: bool,
+        partial: bool,
+    },
+    RequestDeployment(String),
     SaveProfile {
         name: String,
         profile: ViewProfile,
@@ -331,8 +335,23 @@ impl SecretWriter for AsyncWriter {
     }
 
     fn approval(&mut self, accepted: bool) -> Result<Option<ApprovalRequest>, String> {
-        self.queue(Command::Approval(accepted))?;
+        self.queue(Command::Approval {
+            accepted,
+            partial: false,
+        })?;
         Err(OPERATION_QUEUED.into())
+    }
+
+    fn approve_partial(&mut self) -> Result<Option<ApprovalRequest>, String> {
+        self.queue(Command::Approval {
+            accepted: true,
+            partial: true,
+        })?;
+        Err(OPERATION_QUEUED.into())
+    }
+
+    fn request_deployment(&mut self, host: &str) -> Result<(), String> {
+        self.queue(Command::RequestDeployment(host.to_owned()))
     }
 
     fn generate_keypair(&mut self, path: &str) -> Result<(), String> {
@@ -444,8 +463,13 @@ fn activity(label: String, waits_for_one_password: bool) -> crate::model::Activi
 fn describe(command: &Command, one_password: bool) -> Option<crate::model::Activity> {
     let (label, decrypts) = match command {
         Command::Reveal(path) => (format!("Decrypting {path}"), true),
-        Command::Approval(true) => ("Decrypting values for deployment".into(), true),
-        Command::Approval(false) => ("Rejecting deployment request".into(), false),
+        Command::Approval { accepted: true, .. } => {
+            ("Decrypting values for deployment".into(), true)
+        }
+        Command::Approval { accepted: false, .. } => {
+            ("Rejecting deployment request".into(), false)
+        }
+        Command::RequestDeployment(host) => (format!("Requesting a deployment of {host}"), false),
         // Saving verifies private keys and task values by decrypting them.
         Command::Write { path, .. } => (format!("Encrypting and saving {path}"), true),
         Command::Delete(path) => (format!("Deleting {path}"), false),

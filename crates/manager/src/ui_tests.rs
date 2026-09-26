@@ -188,6 +188,8 @@ fn approval_is_explicit_and_testable() {
         generate: vec![],
         missing: vec![],
         derived: vec![],
+        skippable: vec![],
+        allow_partial: false,
     };
     reduce(&mut model, UiEvent::Approval(request), &mut writer);
     assert_eq!(
@@ -234,6 +236,8 @@ fn task_approval_exposes_input_and_target_output_status() {
         generate: vec![],
         missing: vec![],
         derived: vec![],
+        skippable: vec![],
+        allow_partial: false,
     };
     assert_eq!(
         reduce(&mut model, UiEvent::Approval(request), &mut writer),
@@ -310,6 +314,7 @@ fn bulk_generation_only_requests_unset_passwords() {
 
 mod collapse_tests;
 mod commit_tests;
+mod deploy_host_tests;
 mod generation_tests;
 mod navigation_tests;
 mod secret_request_tests;

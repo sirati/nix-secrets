@@ -54,6 +54,8 @@ fn notices_are_acknowledged_in_order_before_pending_approval() {
         generate: vec![],
         missing: vec![],
         derived: vec![],
+        skippable: vec![],
+        allow_partial: false,
     });
     assert!(matches!(model.mode, Mode::Browse));
     assert_eq!(model.message_text(), Some("first"));

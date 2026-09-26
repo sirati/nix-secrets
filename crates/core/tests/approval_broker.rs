@@ -8,6 +8,7 @@ fn request(id: &str) -> ApprovalRequest {
         id: id.to_owned(),
         target: "host.example".to_owned(),
         secrets: vec!["host.services.mail.service.password".to_owned()],
+        allow_partial: false,
     }
 }
 
@@ -90,12 +91,13 @@ fn rejection_cancellation_and_reconnect_ids_are_stable() {
         .claim(1, "stable-id", Duration::from_secs(2))
         .unwrap();
     broker
-        .resolve(1, "stable-id", claim.lease_id, Decision::Rejected)
+        .resolve(1, "stable-id", claim.lease_id, Decision::Rejected, None)
         .unwrap();
     assert_eq!(
         broker.submit(original.clone()).unwrap(),
         ApprovalStatus::Resolved {
-            decision: Decision::Rejected
+            decision: Decision::Rejected,
+            message: None
         }
     );
     let mut collision = original;

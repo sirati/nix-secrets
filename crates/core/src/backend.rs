@@ -306,9 +306,10 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                 request_id,
                 lease_id,
                 decision,
+                message,
             } => with_broker(broker, |state| {
                 state
-                    .resolve(session, &request_id, lease_id, decision)
+                    .resolve(session, &request_id, lease_id, decision, message)
                     .map(|()| Response::ApprovalResolved)
             }),
             Request::CancelApproval { request_id } => with_broker(broker, |state| {
@@ -329,6 +330,10 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                 Err("answers are accepted only on an attached operator connection".into())
             }
             Request::EndSecretSession => Err("no secret session is open".into()),
+            Request::RequestDeployment {
+                target,
+                allow_partial,
+            } => deployment::request(schema, broker, target, allow_partial),
             Request::SubscribeChanges
             | Request::Commit { .. }
             | Request::AttachOperator
@@ -342,6 +347,12 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                 feed.publish(update);
             }
         }
+        // Its id is chosen here, so the event follows the response.
+        if let Response::DeploymentRequested { request } = &response {
+            feed.publish(BackendEvent::ApprovalRequested {
+                request: request.clone(),
+            });
+        }
         write_json(&mut stream, &response)?;
     }
     Ok(())
@@ -349,6 +360,7 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
 
 mod broker;
 use broker::with_broker;
+mod deployment;
 
 mod socket_path;
 use socket_path::prepare_socket_path;

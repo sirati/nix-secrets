@@ -152,6 +152,7 @@ impl Controller {
                     id,
                     target: target_host,
                     secrets: vec![destination_id],
+                    allow_partial: false,
                 })
                 .map_err(|e| e.to_string())?;
         }

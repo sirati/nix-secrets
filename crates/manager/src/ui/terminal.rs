@@ -421,6 +421,7 @@ fn modal_title(mode: &Mode) -> &'static str {
         Mode::TreeOrder { .. } => "Tree attributes and order",
         Mode::Profiles { .. } => "View profiles",
         Mode::Settings { .. } => "Settings",
+        Mode::DeployHost { .. } => "Deploy host",
         Mode::ProfileSave { .. } => "Save view profile",
         Mode::ProfileOverwrite { .. } => "Overwrite view profile",
         Mode::ProfileDelete { .. } => "Delete view profile",
