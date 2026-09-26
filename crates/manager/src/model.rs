@@ -39,6 +39,8 @@ pub struct ApprovalRequest {
     /// Unset values nobody can generate. A deployment with any of them is
     /// refused before anything is generated or written.
     pub missing: Vec<(String, String)>,
+    /// Values deployed from another secret: (identifier, source).
+    pub derived: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

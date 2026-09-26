@@ -16,10 +16,10 @@ pub use profiles::{
     ProfileFacet, ProfileFacetMode, ProfileSnapshot, ProfileStore, ProfileViewFilter, ViewProfile,
 };
 pub use schema::{
-    ConsumerConstraints, DeployGenerator, Destination, GeneratedSecret, GeneratedSecretSpec,
-    GeneratedSecretType, KeypairGenerator, LeafSpec, NotGeneratable, OperatorSpec, RandomEncoding,
-    Schema, SchemaError, SchemaLoadError, SecretKind, SecretPath, SecretSpec, StorageBoxBootstrap,
-    ValueGenerator, ValueType,
+    ConsumerConstraints, DeployGenerator, DerivedFrom, Destination, GeneratedSecret,
+    GeneratedSecretSpec, GeneratedSecretType, KeypairGenerator, LeafSpec, NotGeneratable,
+    OperatorSpec, RandomEncoding, Schema, SchemaError, SchemaLoadError, SecretKind, SecretPath,
+    SecretSpec, StorageBoxBootstrap, ValueGenerator, ValueType,
 };
 pub use store::{
     CommitState, EncryptedSecret, GeneratedPublicKey, PublicInfoRecord, SecretStore, StoreError,

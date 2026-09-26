@@ -28,6 +28,7 @@ let
     validateGeneratedSecret
     validateValueGenerator
     validateKeypairGenerator
+    validateDerivedFrom
     ;
 
   normalizeLeaf =
@@ -55,6 +56,7 @@ let
         "consumerConstraints"
         "valueGenerator"
         "generateOnDeploy"
+        "derivedFrom"
         "description"
         "humanFacing"
         "externalInputRequired"
@@ -75,6 +77,7 @@ let
         || node ? consumerConstraints
         || node ? valueGenerator
         || node ? generateOnDeploy
+        || node ? derivedFrom
       then
         throw "public-info cannot have encryption recipients or a private value type"
       else
@@ -110,6 +113,8 @@ let
       throw "valueGenerator contradicts externalInputRequired"
     else if node ? valueGenerator && (node.destination.contentType or null) != null then
       throw "valueGenerator cannot produce a typed destination contentType"
+    else if node ? derivedFrom && (node ? valueGenerator || (node.externalInputRequired or false)) then
+      throw "derivedFrom excludes valueGenerator and externalInputRequired"
     else
       builtins.removeAttrs node [
         "recipientPublicKeys"
@@ -128,6 +133,9 @@ let
       }
       // lib.optionalAttrs (node ? valueGenerator) {
         valueGenerator = validateValueGenerator node.valueGenerator;
+      }
+      // lib.optionalAttrs (node ? derivedFrom) {
+        derivedFrom = validateDerivedFrom node.derivedFrom;
       };
 
   isOperatorLeaf = node: (node.kind or null) == "operator";
