@@ -17,7 +17,9 @@ are metadata. They are not confidential.
 
 The local TUI is the only component that decrypts stored values. During an
 approved deployment, the final target also receives the values it requires.
-The repository backend and deployment relays are not trusted with plaintext.
+The repository backend and deployment relays are not trusted with plaintext,
+except for values the operator explicitly sends to a program on the backend
+host through a secret request (see below).
 
 Nix evaluation is trusted to describe the intended hosts, services, secret
 paths, recipients, and permissions. It receives no secret plaintext. The Nix
@@ -127,6 +129,31 @@ security properties of the user's desktop clipboard.
 
 1Password rejection and unlock failures do not cause fallback to weaker
 encryption or partial deployment.
+
+### Secret requests from the backend host
+
+`with-secrets` and `pipe-secret` let a program on the backend host obtain
+values. Decryption stays in the TUI; approval in its modal is the only way
+plaintext reaches the backend host. The modal shows every value, its
+recipient keys, and the requester's PID, executable, command line and
+working directory as the backend read them from `/proc` for the kernel-
+reported peer PID, so a requester cannot misreport itself. At most one
+request waits at a time, which prevents a flood of stacked prompts;
+approval needs the same deliberate key as the loss warning, and a request
+denies itself after 120 seconds.
+
+Approved values then live in backend memory for the lifetime of the command
+and are served on a 0600 socket in a 0700 directory, only to same-UID
+processes that descend from the requester, and only for the approved
+identifiers. A value outside the batch is refused and never re-prompts. The
+socket and values are removed when the command exits or the requester
+disconnects.
+
+This does not isolate the values from other processes of the same user on
+the backend host: such a process can read the requester's memory or ptrace
+it. The descendant check only prevents accidental use by unrelated programs.
+Approve only requests whose program, command and directory you expect, on a
+backend host whose user account you trust with the values.
 
 ## Availability and recovery
 

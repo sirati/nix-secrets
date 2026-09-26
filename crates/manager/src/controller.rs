@@ -57,6 +57,11 @@ enum BackgroundUpdate {
 }
 
 impl Controller {
+    /// The schema and decryption provider, for the secret-request channel.
+    pub fn schema_and_provider(&self) -> (Schema, AgeCommandProvider) {
+        (self.schema.clone(), self.provider.clone())
+    }
+
     pub fn uses_one_password(&self) -> bool {
         self.provider.uses_one_password()
     }

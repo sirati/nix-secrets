@@ -7,13 +7,10 @@
 //! such as an SSH login challenge, are refused with `SSH_AGENT_FAILURE`.
 //! The frontend applies the same filter before it touches its agent, so a
 //! compromised backend host cannot use the relay for anything else either.
-use rustix::net::sockopt::socket_peercred;
-use rustix::process::geteuid;
-use std::fs::{self, DirBuilder};
+use crate::private_socket::PrivateSocket;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
@@ -106,42 +103,19 @@ pub fn relay(socket: &Path, message: &[u8]) -> io::Result<Vec<u8>> {
 /// The backend's private agent socket for one commit. Dropping it removes
 /// the socket and its directory.
 pub struct AgentProxy {
-    directory: PathBuf,
-    socket: PathBuf,
-    listener: UnixListener,
+    socket: PrivateSocket,
 }
 
 impl AgentProxy {
     /// Binds `agent.sock` in a new 0700 directory under `runtime`.
     pub fn bind(runtime: &Path) -> io::Result<Self> {
-        let mut random = [0; 12];
-        getrandom::fill(&mut random).map_err(io::Error::other)?;
-        let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-        let directory = runtime.join(format!("nix-secrets-agent-{name}"));
-        DirBuilder::new().mode(0o700).create(&directory)?;
-        // The mode is applied again in case the umask narrowed nothing but a
-        // parent ACL widened it.
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-        let socket = directory.join("agent.sock");
-        let listener = match UnixListener::bind(&socket) {
-            Ok(listener) => listener,
-            Err(error) => {
-                let _ = fs::remove_dir(&directory);
-                return Err(error);
-            }
-        };
-        let proxy = Self {
-            directory,
-            socket,
-            listener,
-        };
-        fs::set_permissions(&proxy.socket, fs::Permissions::from_mode(0o600))?;
-        proxy.listener.set_nonblocking(true)?;
-        Ok(proxy)
+        Ok(Self {
+            socket: PrivateSocket::bind(runtime, "nix-secrets-agent", "agent.sock")?,
+        })
     }
 
     pub fn path(&self) -> &Path {
-        &self.socket
+        self.socket.path()
     }
 
     /// Relays agent requests through `forward` until `done` yields the
@@ -159,12 +133,9 @@ impl AgentProxy {
                 }
                 Err(TryRecvError::Empty) => {}
             }
-            match self.listener.accept() {
-                Ok((stream, _)) => self.serve_connection(stream, &mut forward)?,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => return Err(error),
+            match self.socket.accept()? {
+                Some(stream) => self.serve_connection(stream, &mut forward)?,
+                None => std::thread::sleep(Duration::from_millis(10)),
             }
         }
     }
@@ -174,11 +145,6 @@ impl AgentProxy {
         mut stream: UnixStream,
         forward: &mut impl FnMut(&[u8]) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
-        let peer = socket_peercred(&stream).map_err(io::Error::from)?;
-        if peer.uid != geteuid() {
-            return Ok(());
-        }
-        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         // A broken client connection only ends that connection.
         while let Ok(Some(message)) = read_message(&mut stream) {
@@ -195,20 +161,8 @@ impl AgentProxy {
     }
 }
 
-impl Drop for AgentProxy {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.socket);
-        let _ = fs::remove_dir(&self.directory);
-    }
-}
-
 /// Where the backend creates its private agent directory.
-pub fn runtime_directory() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute() && path.is_dir())
-        .unwrap_or_else(std::env::temp_dir)
-}
+pub use crate::private_socket::runtime_directory;
 
 #[cfg(test)]
 mod tests;

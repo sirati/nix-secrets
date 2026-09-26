@@ -29,6 +29,9 @@ pub fn drive(
                 schedule(&mut redraw_at);
             }
             model.activity = activity;
+            if super::secret_request::tick(model, writer) {
+                schedule(&mut redraw_at);
+            }
             match writer.refresh_profiles() {
                 Ok(Some(snapshot)) => {
                     model.profiles = snapshot;
@@ -256,6 +259,9 @@ fn apply_completion(model: &mut Model, completion: Completion) {
         // time they open, so they see the new commit without a refresh.
         Completion::Committed(result) => super::commit::committed(model, result),
         Completion::CommitFailed(error) => model.fail(format!("git commit failed:\n{error}")),
+        Completion::SecretRequestFinished { requester, result } => {
+            super::secret_request::finished(model, requester, result)
+        }
     }
     model.show_pending_approval();
 }

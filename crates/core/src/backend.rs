@@ -20,6 +20,8 @@ use feed::Feed;
 mod protocol;
 pub use protocol::{Request, Response};
 mod commit;
+mod secrets;
+pub use secrets::NO_OPERATOR;
 
 pub struct Backend {
     socket_path: PathBuf,
@@ -30,6 +32,7 @@ pub struct Backend {
     broker: Arc<Mutex<ApprovalBroker>>,
     next_session: Arc<AtomicU64>,
     feed: Arc<Feed>,
+    operators: Arc<secrets::Operators>,
 }
 
 impl Backend {
@@ -56,6 +59,7 @@ impl Backend {
             broker: Arc::new(Mutex::new(ApprovalBroker::default())),
             next_session: Arc::new(AtomicU64::new(1)),
             feed: Arc::new(Feed::default()),
+            operators: Arc::new(secrets::Operators::default()),
         })
     }
 
@@ -72,9 +76,21 @@ impl Backend {
             let profiles = Arc::clone(&self.profiles);
             let broker = Arc::clone(&self.broker);
             let feed = Arc::clone(&self.feed);
+            let operators = Arc::clone(&self.operators);
+            let peer_pid = rustix::process::Pid::as_raw(Some(peer.pid)) as u32;
             let session = self.next_session.fetch_add(1, Ordering::Relaxed);
             thread::spawn(move || {
-                let _ = handle_client(stream, &schema, &store, &profiles, &broker, &feed, session);
+                let context = Context {
+                    schema: &schema,
+                    store: &store,
+                    profiles: &profiles,
+                    broker: &broker,
+                    feed: &feed,
+                    operators: &operators,
+                    session,
+                    peer_pid,
+                };
+                let _ = handle_client(stream, &context);
                 if let Ok(mut state) = broker.lock() {
                     state.disconnect(session);
                 }
@@ -88,15 +104,29 @@ impl Backend {
     }
 }
 
-fn handle_client(
-    mut stream: UnixStream,
-    schema: &Schema,
-    store: &SecretStore,
-    profiles: &ProfileStore,
-    broker: &Mutex<ApprovalBroker>,
-    feed: &Feed,
+struct Context<'a> {
+    schema: &'a Schema,
+    store: &'a SecretStore,
+    profiles: &'a ProfileStore,
+    broker: &'a Mutex<ApprovalBroker>,
+    feed: &'a Feed,
+    operators: &'a secrets::Operators,
     session: u64,
-) -> io::Result<()> {
+    /// The connected process, from the kernel's peer credentials.
+    peer_pid: u32,
+}
+
+fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()> {
+    let Context {
+        schema,
+        store,
+        profiles,
+        broker,
+        feed,
+        operators,
+        session,
+        peer_pid,
+    } = *context;
     while let Some(request) = read_json::<Request>(&mut stream)? {
         if matches!(request, Request::SubscribeChanges) {
             let receiver = feed.subscribe();
@@ -118,6 +148,12 @@ fn handle_client(
             } => {
                 let response = commit::commit(&mut stream, store, options, forward_agent)?;
                 write_json(&mut stream, &response)?;
+                continue;
+            }
+            // The connection becomes the TUI's operator channel for good.
+            Request::AttachOperator => return secrets::attach(&mut stream, operators, session),
+            Request::RequestSecrets { identifiers } => {
+                secrets::request(&mut stream, operators, peer_pid, identifiers)?;
                 continue;
             }
             request => request,
@@ -289,7 +325,14 @@ fn handle_client(
                 .and_then(|repository| repository.summary())
                 .map(|summary| Response::CommitSummary { summary }),
             Request::AgentReply { .. } => Err("no signing request is pending".into()),
-            Request::SubscribeChanges | Request::Commit { .. } => unreachable!("handled above"),
+            Request::AnswerSecretRequest { .. } => {
+                Err("answers are accepted only on an attached operator connection".into())
+            }
+            Request::EndSecretSession => Err("no secret session is open".into()),
+            Request::SubscribeChanges
+            | Request::Commit { .. }
+            | Request::AttachOperator
+            | Request::RequestSecrets { .. } => unreachable!("handled above"),
         }
         .unwrap_or_else(|error| Response::Error {
             message: error.to_string(),

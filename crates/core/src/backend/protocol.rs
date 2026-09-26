@@ -104,6 +104,24 @@ pub enum Request {
     AgentReply {
         message: Vec<u8>,
     },
+    /// Makes this connection the operator channel of a TUI. The backend
+    /// answers [`Response::OperatorAttached`], then sends heartbeats and
+    /// [`Response::SecretRequested`] frames, each answered by
+    /// [`Request::AnswerSecretRequest`].
+    AttachOperator,
+    /// The TUI's answer to a [`Response::SecretRequested`]; carries the
+    /// plaintexts when the operator approved.
+    AnswerSecretRequest {
+        request_id: String,
+        answer: crate::secret_request::SecretAnswer,
+    },
+    /// Asks the attached TUI for these values. On approval the backend
+    /// answers [`Response::SecretSession`] and serves the values on that
+    /// socket until [`Request::EndSecretSession`] or a disconnect.
+    RequestSecrets {
+        identifiers: Vec<String>,
+    },
+    EndSecretSession,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -168,4 +186,15 @@ pub enum Response {
     Committed {
         result: crate::git::CommitResult,
     },
+    OperatorAttached,
+    /// A process on the backend host asks for secrets; see
+    /// [`Request::AttachOperator`].
+    SecretRequested {
+        request: crate::secret_request::SecretRequest,
+    },
+    /// The approved values are served on this private socket.
+    SecretSession {
+        socket: std::path::PathBuf,
+    },
+    SecretSessionEnded,
 }

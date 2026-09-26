@@ -33,6 +33,10 @@ The repository implements the local editing and target deployment path in
 - Operator-only leaves that are never deployed, keypair generation through a
   consumer-declared installable (private key on stdout, public key on fd 3),
   and `pipe-secret` to hand one value to another program's stdin.
+- Secret requests from the backend host: `with-secrets` and `pipe-secret`
+  ask the attached TUI, which shows one approval modal for the batch and
+  decrypts it with one 1Password authorization; the backend serves the
+  values to that command on a private session socket until it exits.
 - NixOS modules, packages, apps, Rust tests, a real-age check, and NixOS VM
   tests for the service and deployment boundaries.
 

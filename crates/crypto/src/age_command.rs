@@ -14,6 +14,7 @@ use crate::{
 };
 
 /// Encrypts and decrypts whole secrets with age through anonymous pipes.
+#[derive(Clone)]
 pub struct AgeCommandProvider {
     program: OsString,
     /// Launcher and leading arguments that run `program`, e.g. a session leader.
@@ -22,6 +23,7 @@ pub struct AgeCommandProvider {
     op_program: OsString,
 }
 
+#[derive(Clone)]
 enum DecryptionMode {
     OnePassword,
     IdentityFile(PathBuf),
@@ -51,6 +53,16 @@ impl AgeCommandProvider {
     /// Uses an SSH private key supplied only at runtime to decrypt secrets.
     pub fn identity_file(identity: impl Into<PathBuf>) -> Self {
         Self::with_identity_file("age", identity)
+    }
+
+    /// Where the private key for decryption comes from, for display.
+    pub fn identity_description(&self) -> String {
+        match &self.decryption {
+            DecryptionMode::OnePassword => {
+                "1Password on this machine (age-plugin-1p), one authorization".into()
+            }
+            DecryptionMode::IdentityFile(path) => format!("identity file {}", path.display()),
+        }
     }
 
     /// Whether decryption asks 1Password for the private key.
@@ -192,6 +204,57 @@ impl CryptoProvider for AgeCommandProvider {
             ciphertext,
             MAX_PLAINTEXT_SIZE,
         )
+    }
+
+    /// Decrypts several ciphertexts. With a launcher, all of them run inside
+    /// one launcher invocation (`--batch`), so 1Password authorizes once for
+    /// the whole batch; age still runs once per ciphertext.
+    fn decrypt_batch(&self, ciphertexts: &[&[u8]]) -> Result<Vec<Zeroizing<Vec<u8>>>, CryptoError> {
+        if ciphertexts
+            .iter()
+            .any(|ciphertext| ciphertext.len() > MAX_CIPHERTEXT_SIZE)
+        {
+            return Err(CryptoError::SecretTooLarge);
+        }
+        let Some((launcher, prefix)) = &self.launcher else {
+            return ciphertexts
+                .iter()
+                .map(|ciphertext| self.decrypt(ciphertext))
+                .collect();
+        };
+        if ciphertexts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut input = Vec::new();
+        for ciphertext in ciphertexts {
+            input.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+            input.extend_from_slice(ciphertext);
+        }
+        let mut batch_prefix = prefix.clone();
+        batch_prefix.push("--batch".into());
+        let output = self.run_with(
+            Some(&(launcher.clone(), batch_prefix)),
+            &self.decrypt_arguments(),
+            &input,
+            ciphertexts.len() * (MAX_PLAINTEXT_SIZE + 4),
+        )?;
+        let mut rest = output.as_slice();
+        let mut plaintexts = Vec::with_capacity(ciphertexts.len());
+        while !rest.is_empty() {
+            let malformed = || CryptoError::AgeIo(std::io::Error::other("malformed batch output"));
+            let length =
+                u32::from_be_bytes(rest.get(..4).ok_or_else(malformed)?.try_into().unwrap())
+                    as usize;
+            let value = rest.get(4..4 + length).ok_or_else(malformed)?;
+            plaintexts.push(Zeroizing::new(value.to_vec()));
+            rest = &rest[4 + length..];
+        }
+        if plaintexts.len() != ciphertexts.len() {
+            return Err(CryptoError::AgeIo(std::io::Error::other(
+                "the launcher returned a different number of values",
+            )));
+        }
+        Ok(plaintexts)
     }
 }
 

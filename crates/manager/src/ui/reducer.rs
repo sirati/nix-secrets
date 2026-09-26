@@ -2,6 +2,9 @@ use super::*;
 use nix_secrets_core::CommitState;
 
 pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter) -> Action {
+    if secret_request::intercept(model, &event, writer) {
+        return Action::Continue;
+    }
     let event = match prelude::handle(model, event, writer) {
         Ok(action) => return action,
         Err(event) => event,

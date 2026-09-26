@@ -91,6 +91,7 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
     }
     render_modal(frame, model, area, &mut hits);
     render_activity(frame, model, area, &mut hits);
+    render_secret_request(frame, model, area, &mut hits);
     hits
 }
 
@@ -428,4 +429,56 @@ fn checkbox_lines(model: &Model, body: &str) -> Vec<(usize, MouseTarget)> {
             Some((start, *target))
         })
         .collect()
+}
+
+/// The secret-request modal, drawn over everything including notices and
+/// the progress strip.
+fn render_secret_request(
+    frame: &mut ratatui::Frame<'_>,
+    model: &Model,
+    area: Rect,
+    hits: &mut HitMap,
+) {
+    let Some(prompt) = &model.secret_prompt else {
+        return;
+    };
+    draw_dialog(
+        frame,
+        model,
+        area,
+        hits,
+        Dialog {
+            title: "Secret request",
+            body: super::secret_request::body(prompt),
+            scroll: model.secret_scroll,
+            selector: None,
+            footer: Some(vec![
+                Button::new("Ctrl+Shift+Y Yes, send", MouseTarget::ConfirmLoss),
+                Button::new("n Deny", MouseTarget::Shortcut(Shortcut::Character('n'))),
+                Button::new("Esc Deny", MouseTarget::Shortcut(Shortcut::Escape)),
+            ]),
+            exclusive: true,
+        },
+    );
+}
+
+#[cfg(test)]
+pub(super) fn render_for_tests(
+    terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+    model: &Model,
+) -> String {
+    terminal
+        .draw(|frame| {
+            render(frame, model);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

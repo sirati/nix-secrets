@@ -279,8 +279,64 @@ to file descriptor 3. The generator runs on the operator's machine as
 stdout (at most 1 MiB) and the public key on fd 3 (at most 64 KiB). The private
 key is encrypted before it is stored; neither half is written to disk.
 
-`nix-secrets pipe-secret ID [-- COMMAND…]` decrypts one stored value and
-writes it to the command's stdin, or to a stdout that is not a terminal.
+`nix-secrets pipe-secret ID [-- COMMAND…]` writes one stored value to the
+command's stdin, or to a stdout that is not a terminal. Where the value comes
+from is described under Secret requests.
+
+## Secret requests
+
+A process on the backend host obtains plaintext only through the operator's
+TUI, which decrypts and returns it after the operator approves.
+
+1. The TUI opens a dedicated connection and sends `AttachOperator`; the
+   backend answers `OperatorAttached` and afterwards sends only `Heartbeat`
+   and `SecretRequested { request }` frames on it. The TUI sends nothing
+   unasked, so any readable byte or a hang-up detaches it.
+2. `nix-secrets with-secrets ID… -- CMD…` connects to the repository's
+   backend socket (never starting a backend) and sends
+   `RequestSecrets { identifiers }` (1 to 256 distinct canonical
+   identifiers). Only same-UID peers are accepted, as for every connection.
+3. The backend fills `request.requester` and `request.parent` from
+   `/proc/<peer pid>` (PID from `SO_PEERCRED`; executable, argv, cwd), never
+   from the request, and forwards the request to the most recently attached
+   TUI. At most one request waits for the operator; another is refused
+   immediately. Without an attached TUI the request fails with "open the
+   nix-secrets TUI and retry".
+4. The TUI rejects undeclared, public-info and unset identifiers without
+   asking. Otherwise it shows a modal above every other dialog: each value's
+   identifier, kind and description, its recipient names and SSH key
+   fingerprints, the decryption identity (1Password or an identity file),
+   the requester and its parent, and a 120-second countdown. Only
+   Ctrl+Shift+Y or the Yes button approves; n, Enter, Esc and the timeout
+   deny.
+5. On approval, the TUI decrypts every value with one provider batch: the
+   `nix-secrets-1password --batch` launcher authorizes once and runs age once
+   per ciphertext inside that authorization. It answers
+   `AnswerSecretRequest { request_id, answer: approved { values } }`, or
+   `denied { reason }`. The values travel only on this connection, which is
+   the authenticated TUI-backend channel (through the TUI's SSH tunnel for a
+   remote backend).
+6. The backend checks that exactly the requested identifiers came back,
+   binds `session.sock` (0600) in a new 0700 directory under
+   `$XDG_RUNTIME_DIR`, and answers `SecretSession { socket }`. It keeps the
+   values only in memory.
+7. `with-secrets` runs `CMD` with `NIX_SECRETS_SESSION=<socket>`. Each
+   connection to the session socket is answered only for a same-UID peer
+   whose process descends from the requester. It sends
+   `{"operation":"get","identifier":…}` and receives
+   `{"status":"value","value_base64":…}` or an error. An identifier outside
+   the approved batch is refused; the session never asks again.
+8. When `CMD` exits, `with-secrets` sends `EndSecretSession`; a disconnect
+   has the same effect. The backend removes the socket and directory,
+   erases the values, and answers `SecretSessionEnded`. `with-secrets` exits
+   with `CMD`'s status. On denial, timeout or failure `CMD` never runs.
+
+`pipe-secret ID` reads from `NIX_SECRETS_SESSION` when it is set. Otherwise it
+sends a one-identifier `RequestSecrets`, reads the value from the session and
+ends it. `--local` keeps the earlier behaviour of decrypting in the calling
+process, and `with-secrets --local` serves such a batch from its own process
+with the same session protocol. Adding these requests raised the backend
+compatibility version to 10.
 
 ## Generated-secret tasks
 

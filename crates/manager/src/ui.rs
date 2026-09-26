@@ -32,6 +32,7 @@ mod reducer;
 pub use reducer::reduce;
 mod approval;
 mod provider_failure;
+pub(crate) mod secret_request;
 
 mod commit;
 mod edit;
@@ -45,3 +46,16 @@ mod profiles;
 mod terminal;
 
 pub use terminal::run;
+
+#[cfg(test)]
+pub(crate) fn secret_request_tick_for_tests(model: &mut Model, writer: &mut impl SecretWriter) {
+    secret_request::tick(model, writer);
+}
+
+#[cfg(test)]
+pub(crate) fn render_for_tests(
+    terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+    model: &Model,
+) -> String {
+    terminal::render_for_tests(terminal, model)
+}

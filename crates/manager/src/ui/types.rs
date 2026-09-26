@@ -122,6 +122,12 @@ pub enum Completion {
     },
     CommitSummary(nix_secrets_core::git::CommitSummary),
     Committed(nix_secrets_core::git::CommitResult),
+    /// A secret request from the backend host finished: the number of values
+    /// sent, or why nothing was sent.
+    SecretRequestFinished {
+        requester: String,
+        result: Result<usize, String>,
+    },
     /// A commit failed; carries git's full error output.
     CommitFailed(String),
 }
@@ -217,6 +223,14 @@ pub trait SecretWriter {
         _options: nix_secrets_core::git::CommitOptions,
     ) -> Result<nix_secrets_core::git::CommitResult, String> {
         Err("committing is unavailable".into())
+    }
+    /// A secret request waiting for the operator.
+    fn poll_secret_prompt(&mut self) -> Option<crate::operator_channel::SecretPrompt> {
+        None
+    }
+    /// Answers the secret request `id`; approval decrypts and sends the values.
+    fn answer_secret(&mut self, _id: &str, _approved: bool, _count: usize) -> Result<(), String> {
+        Err("secret requests are unavailable".into())
     }
     /// The slow operation currently running in the background, if any.
     fn activity(&mut self) -> Option<crate::model::Activity> {

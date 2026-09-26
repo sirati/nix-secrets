@@ -87,6 +87,10 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
         activity: None,
         one_password: true,
         socket: None,
+        channel: None,
+        decisions: None,
+        secret_prompts: vec![],
+        secret_activity: None,
     };
     let worker = std::thread::spawn(move || {
         assert!(matches!(incoming.recv().unwrap(), Command::Reveal(_)));
@@ -143,6 +147,10 @@ fn slow_commands_describe_their_activity_until_completion() {
         activity: None,
         one_password: true,
         socket: None,
+        channel: None,
+        decisions: None,
+        secret_prompts: vec![],
+        secret_activity: None,
     };
     assert!(writer.activity().is_none());
     let _ = writer.reveal("host.services.test.first");
