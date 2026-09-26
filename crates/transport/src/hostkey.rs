@@ -14,6 +14,102 @@ pub struct PresentedKey {
     pub encoded: String,
 }
 
+impl PresentedKey {
+    /// The OpenSSH fingerprint, `SHA256:` and unpadded base64, as
+    /// `ssh-keygen -l` prints it.
+    pub fn fingerprint(&self) -> String {
+        fingerprint(&self.encoded)
+    }
+
+    /// `ssh-ed25519 SHA256:…`.
+    pub fn describe(&self) -> String {
+        format!("{} {}", self.algorithm, self.fingerprint())
+    }
+}
+
+/// The OpenSSH SHA256 fingerprint of a base64 key blob.
+pub fn fingerprint(encoded: &str) -> String {
+    use base64::Engine;
+    use sha2::Digest;
+    match base64::engine::general_purpose::STANDARD.decode(encoded) {
+        Ok(blob) => format!(
+            "SHA256:{}",
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(sha2::Sha256::digest(blob))
+        ),
+        Err(_) => format!("(undecodable key {encoded})"),
+    }
+}
+
+/// A key recorded in a known_hosts file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnownKey {
+    pub file: PathBuf,
+    pub line: Option<usize>,
+    pub key: PresentedKey,
+}
+
+/// The host offered keys, none of which known_hosts records for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangedHostKey {
+    pub host: String,
+    pub port: u16,
+    pub expected: Vec<KnownKey>,
+    pub offered: Vec<PresentedKey>,
+}
+
+impl ChangedHostKey {
+    /// The name `ssh-keygen -F/-R` uses: `host`, or `[host]:port`.
+    pub fn lookup_name(&self) -> String {
+        lookup_name(&self.host, self.port)
+    }
+}
+
+impl fmt::Display for ChangedHostKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let lookup = self.lookup_name();
+        let quoted = if self.port == 22 {
+            lookup.clone()
+        } else {
+            format!("'{lookup}'")
+        };
+        writeln!(
+            f,
+            "SSH HOST KEY MISMATCH for {}:{}: the host offers keys that known_hosts does not record for it. Someone may be intercepting the connection, or the host was reinstalled.",
+            self.host, self.port
+        )?;
+        for known in &self.expected {
+            let line = known
+                .line
+                .map(|line| format!(" line {line}"))
+                .unwrap_or_default();
+            writeln!(
+                f,
+                "  expected: {} ({}{line})",
+                known.key.describe(),
+                known.file.display()
+            )?;
+        }
+        for key in &self.offered {
+            writeln!(f, "  offered:  {}", key.describe())?;
+        }
+        let mut files = self
+            .expected
+            .iter()
+            .map(|known| known.file.clone())
+            .collect::<Vec<_>>();
+        files.dedup();
+        let removals = files
+            .iter()
+            .map(|file| format!("`ssh-keygen -R {quoted} -f {}`", file.display()))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        write!(
+            f,
+            "First compare the offered fingerprints with the host's own (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on its console). If the host was reinstalled, remove the old key on this machine with {removals}, also for any IP address you reach it by, and retry the deployment."
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostIdentity {
     pub host: String,
@@ -38,6 +134,8 @@ pub enum HostKeyStatus {
 pub struct HostKeyPreflight {
     pub identity: HostIdentity,
     pub status: HostKeyStatus,
+    /// Where known_hosts records the accepted keys; empty for an unknown host.
+    pub known: Vec<KnownKey>,
     pub(crate) known_host_lines: Vec<String>,
 }
 
@@ -59,7 +157,7 @@ pub enum HostKeyError {
     Io(io::Error),
     Tool(String),
     NoKeys,
-    Changed,
+    Changed(Box<ChangedHostKey>),
     UnknownRejected,
 }
 
@@ -69,7 +167,7 @@ impl fmt::Display for HostKeyError {
             Self::Io(error) => error.fmt(f),
             Self::Tool(message) => f.write_str(message),
             Self::NoKeys => f.write_str("target did not present an SSH host key"),
-            Self::Changed => f.write_str("SSH host key changed"),
+            Self::Changed(changed) => changed.fmt(f),
             Self::UnknownRejected => f.write_str("unknown SSH host was rejected"),
         }
     }
@@ -153,6 +251,7 @@ impl HostKeyVerifier {
         }
         let lookup = lookup_name(host, port);
         let mut known = Vec::new();
+        let mut recorded = Vec::new();
         for path in &self.known_hosts {
             if !path.exists() {
                 continue;
@@ -167,7 +266,16 @@ impl HostKeyVerifier {
                 ],
             )?;
             if output.success {
-                known.extend(parse_key_lines(&output.stdout));
+                let lines = parse_key_lines(&output.stdout);
+                let numbers = found_lines(&output.stdout);
+                for (index, line) in lines.iter().enumerate() {
+                    recorded.push(KnownKey {
+                        file: path.clone(),
+                        line: numbers.get(index).copied(),
+                        key: line.presented(),
+                    });
+                }
+                known.extend(lines);
             }
         }
         let matching: Vec<KeyLine> = scanned
@@ -176,7 +284,15 @@ impl HostKeyVerifier {
             .cloned()
             .collect();
         if !known.is_empty() && matching.is_empty() {
-            return Err(HostKeyError::Changed);
+            let mut offered = scanned.iter().map(KeyLine::presented).collect::<Vec<_>>();
+            offered.sort_by(|a, b| (&a.algorithm, &a.encoded).cmp(&(&b.algorithm, &b.encoded)));
+            offered.dedup();
+            return Err(HostKeyError::Changed(Box::new(ChangedHostKey {
+                host: host.into(),
+                port,
+                expected: recorded,
+                offered,
+            })));
         }
         let (mut accepted, status) = if known.is_empty() {
             (scanned, HostKeyStatus::Unknown)
@@ -193,9 +309,18 @@ impl HostKeyVerifier {
             keys: accepted.iter().map(KeyLine::presented).collect(),
             other_names_with_keys: aliases(&self.known_hosts, &accepted)?,
         };
+        let known = recorded
+            .into_iter()
+            .filter(|entry| {
+                accepted
+                    .iter()
+                    .any(|key| key.algorithm == entry.key.algorithm && key.encoded == entry.key.encoded)
+            })
+            .collect();
         Ok(HostKeyPreflight {
             identity,
             status,
+            known,
             known_host_lines: accepted
                 .into_iter()
                 .map(|key| key.for_host(&lookup))
@@ -269,7 +394,18 @@ fn aliases(paths: &[PathBuf], keys: &[KeyLine]) -> Result<Vec<String>, HostKeyEr
     Ok(names.into_iter().collect())
 }
 
-fn lookup_name(host: &str, port: u16) -> String {
+/// The line numbers `ssh-keygen -F` reports, one per key it prints:
+/// `# Host example found: line 10`.
+fn found_lines(bytes: &[u8]) -> Vec<usize> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter_map(|line| line.strip_prefix("# Host "))
+        .filter_map(|rest| rest.rsplit_once("found: line "))
+        .filter_map(|(_, number)| number.trim().parse().ok())
+        .collect()
+}
+
+pub(crate) fn lookup_name(host: &str, port: u16) -> String {
     if port == 22 {
         host.into()
     } else {

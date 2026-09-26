@@ -52,6 +52,11 @@ pub struct DeploymentMetadata {
     pub host: String,
     pub destination: String,
     pub port: u16,
+    /// The public keys the target's forwarder account authorizes. The
+    /// deployment SSH offers only these, so an agent holding many keys is
+    /// not cut off by the server's MaxAuthTries before the right one.
+    #[serde(rename = "identityPublicKeys", default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_public_keys: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

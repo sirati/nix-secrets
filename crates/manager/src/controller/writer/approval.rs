@@ -53,12 +53,22 @@ impl Controller {
             }
         };
         let connection = Connection {
+            name: request.target.clone(),
+            identity_public_keys: host.metadata.deployment.identity_public_keys.clone(),
             destination: host.metadata.deployment.destination.clone(),
             host: host.metadata.deployment.host.clone(),
             port: host.metadata.deployment.port,
             known_hosts: self.known_hosts.clone(),
         };
-        let expected = match expected_target(&self.schema, &request) {
+        // The one connection selects only what can be deployed: values that
+        // wait for another host are left out, so a partial deployment needs
+        // no second connection, and a full one is refused before sending.
+        let skippable = unset::plan_unset(&self.schema, &request.secrets, &set)
+            .map(|plan| plan.skippable)
+            .unwrap_or_default();
+        let mut selected = request.clone();
+        selected.secrets.retain(|identifier| !skippable.contains(identifier));
+        let expected = match expected_target(&self.schema, &selected) {
             Ok(expected) => expected,
             Err(error) => {
                 self.client
@@ -77,7 +87,7 @@ impl Controller {
             }
         };
         let known = host_key.status == HostKeyStatus::Known;
-        details.host_key = deployment::unknown_description(&host_key);
+        details.host_key = deployment::unknown_description(&connection, &host_key);
         self.active = Some(ActiveApproval {
             request,
             lease_id,
@@ -118,9 +128,18 @@ impl Controller {
         allow_partial: bool,
     ) -> Result<Option<UiApproval>, String> {
         let result = self.answer_approval(accepted, allow_partial);
-        if let (Err(error), Some(active)) = (&result, self.active.as_mut()) {
-            // Reported to the requester if the operator then rejects.
-            active.last_error = Some(error.clone());
+        // A failure is final: the request is resolved with its reason and
+        // never offered again. Retrying would open another authenticated
+        // connection, and with it another agent or 1Password prompt.
+        if let Err(error) = &result {
+            if let Some(active) = self.active.take() {
+                let _ = self.client.resolve(
+                    active.request.id,
+                    active.lease_id,
+                    false,
+                    Some(error.clone()),
+                );
+            }
         }
         result
     }

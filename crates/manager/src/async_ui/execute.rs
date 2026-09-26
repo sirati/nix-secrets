@@ -53,7 +53,8 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
                 skipped: controller.take_skipped(),
             },
             Ok(next) => Completion::ApprovalDone(next),
-            Err(error) => Completion::Failed(error),
+            // A failed deployment is final; the dialog closes.
+            Err(error) => Completion::ApprovalLost(error),
         },
         Command::SaveProfile {
             name,

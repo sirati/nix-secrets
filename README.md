@@ -425,6 +425,20 @@ values locally, and sends plaintext only inside the end-to-end SSH connection.
 Unknown SSH host keys require a separate approval before the target manifest
 is read. Editing or selecting one TUI item never initiates a deployment.
 
+The deployment offers only the key the target's forwarder account accepts,
+`services.nixSecrets.deployment.identityPublicKeys`, which defaults to the
+forwarder's `authorizedKeys` and is part of the evaluated schema. It uses
+the private key file of this machine's ssh config that holds it, or else asks
+the ssh-agent to sign with exactly that key (`IdentitiesOnly`). An agent
+holding many keys, such as 1Password's, is therefore not cut off by the
+target's `MaxAuthTries`. A deployment opens one authenticated connection, so
+the agent asks once. If the key is in neither place, the deployment fails and
+names the key by its agent comment and fingerprint. A failure after approval
+is final: the request is resolved with the reason, which `nix-secrets deploy
+--wait` prints, and is not offered again. A host key that differs from
+known_hosts is reported with the host, both fingerprints, the known_hosts file
+and line, and the `ssh-keygen -R` command that removes the old key.
+
 The operator starts a deployment. Press `D` in the tree to pick a host (the
 host of the selected row is preselected), or run from the backend host:
 
