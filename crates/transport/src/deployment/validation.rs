@@ -84,7 +84,12 @@ pub(super) fn validate_target(
     }
     Ok(())
 }
-type SecretSpec = (Vec<String>, Destination, Option<PublicInfoAttestation>);
+type SecretSpec = (
+    Vec<String>,
+    Destination,
+    Option<PublicInfoAttestation>,
+    Option<String>,
+);
 type TaskSpec = (
     String,
     Vec<String>,
@@ -102,6 +107,7 @@ fn map_target_secrets(
                 item.recipient_ids.clone(),
                 item.destination.clone(),
                 item.public_info.clone(),
+                item.derived.clone(),
             ),
         )
     })
@@ -116,6 +122,7 @@ fn map_expected_secrets(
                 item.recipient_ids.clone(),
                 item.destination.clone(),
                 item.public_info.clone(),
+                item.derived.clone(),
             ),
         )
     })
@@ -203,7 +210,9 @@ pub(super) fn validate_batch(
             "batch version is not supported by the target",
         ));
     }
-    if batch.version == LEGACY_DEPLOYMENT_PROTOCOL_VERSION && !batch.generate.is_empty() {
+    if batch.version == LEGACY_DEPLOYMENT_PROTOCOL_VERSION
+        && (!batch.generate.is_empty() || !batch.derive.is_empty())
+    {
         return Err(DeploymentError::Invalid(
             "deployment protocol 1 cannot generate values",
         ));
@@ -255,12 +264,39 @@ fn validate_entries(
             ));
         }
     }
+    let generated = batch
+        .generate
+        .iter()
+        .map(|item| item.identifier.as_str())
+        .collect::<BTreeSet<_>>();
+    for identifier in &batch.derive {
+        if supplied.contains(identifier) || generated.contains(identifier.as_str()) {
+            return Err(DeploymentError::Invalid(
+                "a derived value is also supplied or generated",
+            ));
+        }
+        let source = available
+            .iter()
+            .find(|secret| &secret.identifier == identifier)
+            .and_then(|secret| secret.derived.as_deref())
+            .and_then(|derived| serde_json::from_str::<serde_json::Value>(derived).ok())
+            .and_then(|derived| derived["identifier"].as_str().map(str::to_owned))
+            .ok_or(DeploymentError::Invalid(
+                "target declares no derivation for a derived value",
+            ))?;
+        if !generated.contains(source.as_str()) {
+            return Err(DeploymentError::Invalid(
+                "a target-derived value needs its source generated in the same batch",
+            ));
+        }
+    }
     validate_supplied(
         &batch.requested_identifiers,
         entries
             .iter()
             .map(|item| &item.identifier)
-            .chain(batch.generate.iter().map(|item| &item.identifier)),
+            .chain(batch.generate.iter().map(|item| &item.identifier))
+            .chain(batch.derive.iter()),
         available.iter().map(|item| &item.identifier),
     )?;
     if entries

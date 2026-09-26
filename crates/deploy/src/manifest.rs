@@ -135,6 +135,10 @@ fn flatten_target(
                     .deployment_generator()
                     .ok()
                     .map(|generator| generator.fingerprint()),
+                derived: leaf
+                    .derived_from
+                    .as_ref()
+                    .map(|derived| derived.fingerprint()),
             });
         }
         SecretNode::Generated(leaf) => {

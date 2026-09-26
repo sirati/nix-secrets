@@ -35,6 +35,36 @@ impl DerivedFrom {
         Ok(source)
     }
 
+    /// The deployed version: `d-` and 32 hex digits of SHA-256 over the
+    /// length-prefixed source version, source identifier, prefix and suffix.
+    /// Operator and target compute it alike, so a value derived on either
+    /// side has the same version and is replaced exactly when its source or
+    /// framing changes.
+    pub fn version(&self, source_version: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for part in [
+            source_version,
+            self.identifier.as_bytes(),
+            self.prefix.as_bytes(),
+            self.suffix.as_bytes(),
+        ] {
+            hasher.update((part.len() as u64).to_be_bytes());
+            hasher.update(part);
+        }
+        let digest = hasher.finalize();
+        let hex = digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("d-{hex}")
+    }
+
+    /// Canonical description compared between operator and target.
+    pub fn fingerprint(&self) -> String {
+        serde_json::to_string(self).expect("derivations serialize")
+    }
+
     /// The deployed bytes for a source value.
     pub fn frame(&self, source: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
         let mut output = zeroize::Zeroizing::new(Vec::with_capacity(

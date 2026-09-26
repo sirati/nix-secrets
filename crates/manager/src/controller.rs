@@ -203,7 +203,11 @@ impl Controller {
             tasks,
             generate: plan.generate,
             missing: plan.missing,
-            derived: plan.derived,
+            derived: plan
+                .derived
+                .into_iter()
+                .chain(plan.derived_on_target)
+                .collect(),
         })
     }
 
@@ -244,6 +248,11 @@ impl Controller {
             .map(|(identifier, _)| identifier.as_str())
             .collect::<BTreeSet<_>>();
         let generate_entries = unset::generate_entries(&plan)?;
+        let derive_on_target = plan
+            .derived_on_target
+            .iter()
+            .map(|(identifier, _)| identifier.clone())
+            .collect::<Vec<_>>();
         let mut deploy_entries = Vec::new();
         let mut task_entries = Vec::new();
         let derived = plan
@@ -252,7 +261,7 @@ impl Controller {
             .cloned()
             .collect::<std::collections::BTreeMap<_, _>>();
         for identifier in &identifiers {
-            if generating.contains(identifier.as_str()) {
+            if generating.contains(identifier.as_str()) || derive_on_target.contains(identifier) {
                 continue;
             }
             if let Some(source) = derived.get(identifier) {
@@ -344,7 +353,13 @@ impl Controller {
             .prepared
             .take()
             .expect("prepared above");
-        let applied = deployment::deploy(prepared, deploy_entries, task_entries, generate_entries)?;
+        let applied = deployment::deploy(
+            prepared,
+            deploy_entries,
+            task_entries,
+            generate_entries,
+            derive_on_target,
+        )?;
         // Store generated values first: they are the only copy outside the target.
         let stored = self.store_generated(&applied.generated_records);
         let registered = self.register_public_keys(&source_host, &applied.generated_public_keys);

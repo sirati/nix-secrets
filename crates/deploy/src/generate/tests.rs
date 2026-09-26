@@ -82,7 +82,9 @@ fn manifest(temp: &tempfile::TempDir) -> std::path::PathBuf {
                 "kind": "random-bytes", "bytes": 32, "encoding": "base64",
                 "prefix": "key:\n  - id: t\n    algorithm: hmac-sha256\n    secret: ", "suffix": "\n"}})),
             "external": leaf("external", json!({"valueType": "password", "externalInputRequired": true})),
-            "opaque": leaf("opaque", json!({"valueType": "key"}))
+            "opaque": leaf("opaque", json!({"valueType": "key"})),
+            "framed": leaf("framed", json!({"valueType": "key", "derivedFrom": {
+                "identifier": "host.services.app.password", "prefix": "pw=", "suffix": "\n"}}))
         }}
     }});
     let path = temp.path().join("manifest.json");
@@ -110,6 +112,7 @@ fn target_generates_installs_and_returns_only_ciphertext() {
             entry("host.services.app.password"),
             entry("host.services.app.tsig"),
         ],
+        &[],
         &BTreeMap::new(),
         &provider,
         &mut host,
@@ -164,6 +167,7 @@ fn retry_adopts_the_installed_value_instead_of_regenerating() {
         &manifest,
         "host",
         &[entry("host.services.app.password")],
+        &[],
         &installed,
         &provider,
         &mut host,
@@ -192,6 +196,7 @@ fn values_without_a_known_format_or_supplied_externally_are_refused() {
             &manifest,
             "host",
             &[entry(identifier)],
+            &[],
             &BTreeMap::new(),
             &Recording::default(),
             &mut host,
@@ -205,6 +210,62 @@ fn values_without_a_known_format_or_supplied_externally_are_refused() {
         &manifest,
         "other",
         &[entry("host.services.app.password")],
+        &[],
+        &BTreeMap::new(),
+        &Recording::default(),
+        &mut FakeHost::default(),
+    )
+    .is_err());
+}
+
+#[test]
+fn target_frames_a_derived_value_from_the_source_it_generates() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = manifest(&temp);
+    let mut host = FakeHost::default();
+    let derive = ["host.services.app.framed".to_string()];
+    let result = run_value_generation(
+        &manifest,
+        "host",
+        &[entry("host.services.app.password")],
+        &derive,
+        &BTreeMap::new(),
+        &Recording::default(),
+        &mut host,
+    )
+    .unwrap();
+    let value = |id: &str| {
+        let item = result
+            .deployments
+            .iter()
+            .find(|item| item.identifier == id)
+            .unwrap();
+        (
+            item.version_id.clone(),
+            STANDARD.decode(&item.contents_base64).unwrap(),
+        )
+    };
+    let (source_version, password) = value("host.services.app.password");
+    let (version, framed) = value("host.services.app.framed");
+    assert_eq!(framed, [b"pw=".as_slice(), &password, b"\n"].concat());
+    // Only the generated source returns a record; the derived value has none.
+    assert_eq!(result.records.len(), 1);
+    // The version is what the operator computes from the stored source.
+    let derived = nix_secrets_core::DerivedFrom {
+        identifier: "host.services.app.password".into(),
+        prefix: "pw=".into(),
+        suffix: "\n".into(),
+    };
+    assert_eq!(
+        version,
+        derived.version(&STANDARD.decode(source_version).unwrap())
+    );
+    // Without its source in the batch, the target refuses to derive.
+    assert!(run_value_generation(
+        &manifest,
+        "host",
+        &[],
+        &derive,
         &BTreeMap::new(),
         &Recording::default(),
         &mut FakeHost::default(),
