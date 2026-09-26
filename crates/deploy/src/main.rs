@@ -2,8 +2,9 @@
 
 use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_deploy::{
-    install_public_default, load_and_validate_manifest, load_target_state, run_generated_tasks,
-    run_value_generation, system_hostname, Deployer, DeploymentBatch, SecretDeployment, SystemHost,
+    install_public_default, load_and_validate_manifest, load_mock_values, load_target_state,
+    mock_install, run_generated_tasks, run_value_generation, system_hostname, Deployer,
+    DeploymentBatch, SecretDeployment, SystemHost,
 };
 use nix_secrets_transport::{serve_deployment, AppliedOutput};
 use std::io;
@@ -48,6 +49,43 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             version.to_str().ok_or("version is not UTF-8")?,
         )
         .map_err(Into::into);
+    }
+    if first.as_deref() == Some(std::ffi::OsStr::new("--mock-install")) {
+        // Test-only: see services.nixSecrets.mock.
+        let manifest_flag = args.next();
+        let manifest = args.next();
+        let values_flag = args.next();
+        let values = args.next();
+        let generate_rest = match args.next() {
+            None => false,
+            Some(flag) if flag == "--generate-rest" => true,
+            Some(_) => return Err("invalid mock install invocation".into()),
+        };
+        if manifest_flag.as_deref() != Some(std::ffi::OsStr::new("--manifest"))
+            || values_flag.as_deref() != Some(std::ffi::OsStr::new("--values"))
+            || args.next().is_some()
+        {
+            return Err(
+                "usage: secret-deploy --mock-install --manifest PATH --values PATH [--generate-rest]"
+                    .into(),
+            );
+        }
+        let values = load_mock_values(Path::new(&values.ok_or("missing values")?))?;
+        let report = mock_install(
+            Path::new(&manifest.ok_or("missing manifest")?),
+            &system_hostname()?,
+            &values,
+            generate_rest,
+            &Deployer::persistent(),
+            &Deployer::public_info(),
+        )?;
+        eprintln!(
+            "nix-secrets-mock: installed {} mock values ({} already installed): {}",
+            report.installed.len(),
+            report.already_installed,
+            report.installed.join(", ")
+        );
+        return Ok(());
     }
     if first.as_deref() != Some(std::ffi::OsStr::new("--manifest")) {
         return Err(

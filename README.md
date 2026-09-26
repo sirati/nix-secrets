@@ -578,6 +578,90 @@ An older target still receives values that are already set.
 See [PROTOCOL.md](PROTOCOL.md) for message flow and
 [THREAT-MODEL.md](THREAT-MODEL.md) for the security boundary.
 
+## How consumers should test
+
+A NixOS VM test of a configuration that uses nix-secrets should not write
+secret files by hand. Enable the mock in the test configuration instead:
+
+```nix
+services.nixSecrets.mock = {
+  enable = true;                                   # test configurations only
+  iUnderstandThisIsATestOnlyConfiguration = true;  # required whenever enable is set
+  values = {                                       # non-secret test data
+    "<service>.<leaf path>" = "…";                 # a machine service leaf
+    "HOST.NAMESPACE.SERVICE.PATH" = "…";           # any leaf, e.g. a userServices one
+  };
+  generateRest = true;                             # default
+};
+```
+
+At boot, `nix-secrets-mock-install.service` installs a value for every
+deployable leaf of the host that is not installed yet. It runs
+`secret-deploy --mock-install`, which validates and publishes the values
+with the same code as a real deployment: owner, group, mode, generations,
+service links and versions are exactly as in production, so the readiness
+waiters release their consumers normally. The unit is ordered before the
+consumer units and works with or without `receiver.enable`.
+
+Where the values come from:
+
+- An entry in `values`. Each key must name a deployable leaf of this host, or
+  evaluation fails; operator-only leaves are never deployed and not accepted.
+  A key naming a derived leaf gives its source value, which is then framed.
+- Otherwise, with `generateRest`:
+  - a leaf the target would generate at deployment uses the same generator:
+    the password rules under its `consumerConstraints`, or its
+    `valueGenerator`;
+  - a derived leaf is framed with its real `prefix`/`suffix` and version from
+    its same-host source's mock value. A source on another host gets a random
+    value, since that host's mock value is not known here;
+  - a `local-ssh-key` or `storage-box-ssh-key` task gets a fresh Ed25519
+    private key. No Storage Box is contacted;
+  - public information gets a known-hosts line for its `expectedSshHost` and
+    `expectedSshPort` (a declared public default, when present, installs first);
+  - any other leaf gets a value that passes the receiver's content checks: a
+    key for `openssh-private-key`, its public half for `openssh-public-key`,
+    `mock-<stamp> ssh-ed25519 …` for `named-ssh-ed25519-public-keys`, and
+    random base64url text otherwise.
+- With `generateRest = false`, a leaf without a value fails the unit, which
+  lists every missing leaf.
+
+Installed leaves are never replaced, so generated values stay the same across
+reboots, and a fully installed host is left untouched.
+
+The mock never reads or writes `nix-secrets.toml` and never talks to a
+backend. Explicit `values` are written to the world-readable Nix store: use
+only non-secret test data.
+
+Guard: the mock replaces every real secret of the host, so it must never be
+enabled in production by accident. Evaluation fails unless
+`iUnderstandThisIsATestOnlyConfiguration = true` is set next to
+`enable`. The mock does not require the NixOS test framework's `qemu-vm`
+module, because consumers also test custom VM setups that do not import it,
+such as a real disk image booted under SeaBIOS; the explicit acknowledgement
+is the guard. A mocked system is marked by the `nix-secrets-mock` entry in
+`system.nixos.tags` (and so in its boot label), an evaluation warning, and
+`/etc/nix-secrets/MOCK-SECRETS-TEST-ONLY`.
+
+Example:
+
+```nix
+pkgs.testers.runNixOSTest {
+  name = "app";
+  nodes.machine = {
+    imports = [ nix-secrets.nixosModules.default ./machine.nix ];
+    services.nixSecrets.mock = {
+      enable = true;
+      iUnderstandThisIsATestOnlyConfiguration = true;
+      values."app.api-token" = "test-token";
+    };
+  };
+  testScript = ''
+    machine.wait_for_unit("app.service")
+  '';
+}
+```
+
 ## License
 
 This project is available under the [MIT License](LICENSE).

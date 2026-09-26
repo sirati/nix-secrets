@@ -133,6 +133,16 @@
             inherit pkgs;
             module = self.nixosModules.default;
           };
+          mock-module =
+            assert import ./nix/tests/mock-module.nix {
+              inherit nixpkgs system;
+              module = self.nixosModules.default;
+            };
+            pkgs.runCommand "mock-module-test" { } "touch $out";
+          mock-vm = import ./nix/tests/mock.nix {
+            inherit pkgs;
+            module = self.nixosModules.default;
+          };
         }
       );
 
