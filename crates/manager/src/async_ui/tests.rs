@@ -59,6 +59,7 @@ fn delayed_backend_response_cannot_stall_terminal_navigation() {
         category: RowCategory::Other,
         human_facing: false,
         external_input_required: true,
+        required_for_install: false,
         identity: None,
         presentation: None,
     };
@@ -110,6 +111,7 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
         category: RowCategory::Other,
         human_facing: false,
         external_input_required: true,
+        required_for_install: false,
         identity: None,
         presentation: None,
     };

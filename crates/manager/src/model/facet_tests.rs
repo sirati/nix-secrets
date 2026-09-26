@@ -17,6 +17,7 @@ fn leaf(namespace: &str, name: &str) -> Row {
         category: RowCategory::Password,
         human_facing: false,
         external_input_required: false,
+        required_for_install: false,
         identity: Some(SecretIdentity {
             host: "host".into(),
             scope: "system".into(),

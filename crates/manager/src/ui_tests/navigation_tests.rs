@@ -122,6 +122,7 @@ fn filters_use_explicit_value_categories() {
         category: RowCategory::Other,
         human_facing: false,
         external_input_required: true,
+        required_for_install: false,
         identity: None,
         presentation: None,
     });
@@ -153,6 +154,7 @@ fn public_info_has_its_own_filter_category() {
         category: RowCategory::PublicInfo,
         human_facing: false,
         external_input_required: true,
+        required_for_install: false,
         identity: None,
         presentation: None,
     });
@@ -199,6 +201,7 @@ fn human_filter_and_search_compose() {
         category: RowCategory::Other,
         human_facing: false,
         external_input_required: true,
+        required_for_install: false,
         identity: None,
         presentation: None,
     });

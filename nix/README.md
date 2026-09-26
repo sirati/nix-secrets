@@ -109,6 +109,11 @@ from another value" in the top level README.
 STORE IDENTIFIER` returns its stored public key as base64, or null. See
 "Operator-only secrets" in the top level README.
 
+`requiredForInstall = true` makes evaluation fail, naming the identifier,
+while the leaf has no value in `storeFile`; `requiredBeforeInstall` adds
+identifiers declared elsewhere. See "Values required before install" in the
+top level README.
+
 Only consumer compatibility limits belong in `consumerConstraints`. For example,
 if a program rejects values longer than 64 characters, declare
 `consumerConstraints.cannotHandleLongerThan = 64;`. The optional fields are

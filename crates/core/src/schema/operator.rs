@@ -12,6 +12,9 @@ pub struct OperatorLeaf {
     pub description: Option<String>,
     #[serde(rename = "humanFacing", default)]
     pub human_facing: bool,
+    /// The host cannot be installed until this value is stored.
+    #[serde(rename = "requiredForInstall", default)]
+    pub required_for_install: bool,
     #[serde(default)]
     pub identity: Option<SecretIdentity>,
     #[serde(default)]

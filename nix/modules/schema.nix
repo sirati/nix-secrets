@@ -83,6 +83,14 @@ let
     ) cfg.userServices;
   };
   evaluatedHost = evaluated.${cfg.hostName};
+  requiredLeaves = secretsLib.requiredForInstallLeaves evaluated;
+  requiredEntries =
+    requiredLeaves
+    ++ map (identifier: {
+      inherit identifier;
+      leaf = (lib.findFirst (entry: entry.identifier == identifier) { leaf = null; } requiredLeaves).leaf;
+    }) cfg.requiredBeforeInstall;
+  missingBeforeInstall = lib.unique (secretsLib.missingBeforeInstall cfg.storeFile requiredEntries);
   serviceGroups = builtins.removeAttrs evaluatedHost [ "metadata" ];
   leaves = builtins.filter (leaf: !(secretsLib.isOperatorLeaf leaf)) (
     lib.concatMap (
@@ -210,6 +218,26 @@ in
       default = null;
       description = "Optional absolute TOML path read at evaluation; only selected public_info values enter generated defaults.";
     };
+    storeFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = cfg.publicInfoInventoryFile;
+      defaultText = lib.literalExpression "config.services.nixSecrets.publicInfoInventoryFile";
+      description = ''
+        The committed nix-secrets.toml, read purely at evaluation to check that
+        every value required before install is present.
+      '';
+    };
+    requiredBeforeInstall = lib.mkOption {
+      type = lib.types.listOf (lib.types.strMatching "[^.]+[.][^.]+[.].+");
+      default = [ ];
+      example = [ "ns1.services.nmbl.generation-key" ];
+      description = ''
+        Further identifiers, as HOST.NAMESPACE.SERVICE.PATH, that must have a
+        value in storeFile before this host is installed, in addition to this
+        host's leaves marked requiredForInstall. Use it for a value declared
+        on another host or consumed through operatorPublicKey.
+      '';
+    };
     services = lib.mkOption {
       type = lib.types.attrsOf serviceType;
       default = { };
@@ -233,7 +261,17 @@ in
         assertion = builtins.length destinationPaths == builtins.length (lib.unique destinationPaths);
         message = "services.nixSecrets secret destinations must be globally unique";
       }
-    ];
+      {
+        assertion = requiredEntries == [ ] || cfg.storeFile != null;
+        message = "services.nixSecrets.storeFile must name the committed nix-secrets.toml to check values required before install";
+      }
+    ]
+    ++ lib.optionals (cfg.storeFile != null) (
+      map (identifier: {
+        assertion = false;
+        message = secretsLib.missingBeforeInstallMessage identifier;
+      }) missingBeforeInstall
+    );
     services.nixSecrets.evaluated = evaluated;
     # Operator-only leaves never reach the host.
     system.build.nixSecretsManifest = pkgs.writeText "nix-secrets-${cfg.hostName}.json" (

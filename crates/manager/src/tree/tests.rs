@@ -26,6 +26,7 @@ fn builds_sorted_tree_and_marks_set_leaves() {
             category: RowCategory::Other,
             human_facing: false,
             external_input_required: false,
+            required_for_install: false,
             identity: None,
             presentation: None,
         }
@@ -137,4 +138,56 @@ fn semantic_name_is_used_instead_of_legacy_storage_leaf() {
     assert_eq!(row.name, "credential");
     assert_eq!(row.display_segments.last().unwrap(), "credential");
     assert_eq!(row.path.as_deref(), Some("host.services.mail.legacy-token"));
+}
+
+#[test]
+fn required_view_lists_values_needed_before_install_until_they_are_set() {
+    let key =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin";
+    let schema = serde_json::json!({
+        "host": {
+            "metadata": {"socketPath":"/run/s", "deployment":{"host":"host","destination":"secrets@host","port":22}},
+            "services": {"nmbl": {
+                "generation-key": {
+                    "kind":"operator", "requiredForInstall":true,
+                    "recipientPublicKeys":[key], "recipientIds":["key"],
+                    "generator":{"installable":"github:example/tool#keygen","args":[]}
+                },
+                "other-key": {
+                    "kind":"operator",
+                    "recipientPublicKeys":[key], "recipientIds":["key"]
+                },
+                "token": {
+                    "kind":"secret", "requiredForInstall":true, "recipientPublicKeys":[key], "recipientIds":["key"], "consumerUnits":[],
+                    "destination":{"path":"/persistent/secrets/nmbl/service/token","category":"service","owner":"root","group":"root","mode":"0400"}
+                }
+            }}
+        }
+    });
+    let schema = Schema::from_json(&schema.to_string()).unwrap();
+    let required = |set: &[&str]| {
+        let set = set.iter().map(|path| (*path).to_owned()).collect();
+        let model = crate::model::Model::new(rows(&schema, &set));
+        model
+            .visible_rows()
+            .into_iter()
+            .filter_map(|index| model.rows[index].path.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        required(&[]),
+        [
+            "host.services.nmbl.generation-key",
+            "host.services.nmbl.token"
+        ]
+    );
+    assert_eq!(
+        required(&["host.services.nmbl.generation-key"]),
+        ["host.services.nmbl.token"]
+    );
+    assert!(required(&[
+        "host.services.nmbl.generation-key",
+        "host.services.nmbl.token"
+    ])
+    .is_empty());
 }

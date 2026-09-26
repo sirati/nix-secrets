@@ -18,6 +18,8 @@ pub struct Row {
     pub category: RowCategory,
     pub human_facing: bool,
     pub external_input_required: bool,
+    /// Needed before its host can be installed; listed as required while unset.
+    pub required_for_install: bool,
     pub identity: Option<SecretIdentity>,
     pub presentation: Option<SecretPresentation>,
 }
@@ -182,6 +184,7 @@ fn visit(
             },
             human_facing: leaf.human_facing,
             external_input_required: leaf.external_input_required,
+            required_for_install: leaf.required_for_install,
             identity: leaf.identity.clone(),
             presentation: leaf.presentation.clone(),
         }),
@@ -216,6 +219,7 @@ fn visit(
                 category: RowCategory::Password,
                 human_facing: leaf.human_facing,
                 external_input_required: leaf.external_input_required,
+                required_for_install: leaf.required_for_install,
                 identity: leaf.identity.clone(),
                 presentation: leaf.presentation.clone(),
             })
@@ -247,6 +251,7 @@ fn visit(
             category: RowCategory::Operator,
             human_facing: leaf.human_facing,
             external_input_required: false,
+            required_for_install: leaf.required_for_install,
             identity: leaf.identity.clone(),
             presentation: leaf.presentation.clone(),
         }),
@@ -314,6 +319,7 @@ fn branch(depth: usize, name: &str, display_segments: Vec<String>) -> Row {
         category: RowCategory::Branch,
         human_facing: false,
         external_input_required: false,
+        required_for_install: false,
         identity: None,
         presentation: None,
     }
