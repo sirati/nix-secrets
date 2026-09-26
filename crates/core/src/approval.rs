@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 const MAX_REQUESTS: usize = 4096;
 const MAX_FRONTENDS: usize = 128;
 const MAX_QUEUE: usize = 4096;
+const MAX_MESSAGE: usize = 64 * 1024;
 const MAX_LEASE: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Eq, PartialEq)]
@@ -28,7 +29,7 @@ struct Entry {
 enum State {
     Pending,
     Claimed(Lease),
-    Resolved(Decision),
+    Resolved(Decision, Option<String>),
     Cancelled,
 }
 #[derive(Default)]
@@ -142,12 +143,16 @@ impl ApprovalBroker {
         id: &str,
         lease_id: u64,
         decision: Decision,
+        message: Option<String>,
     ) -> Result<(), BrokerError> {
         self.reclaim();
+        if message.as_ref().is_some_and(|message| message.len() > MAX_MESSAGE) {
+            return Err(BrokerError::Invalid("resolution message is too long"));
+        }
         let entry = self.entries.get_mut(id).ok_or(BrokerError::Unknown)?;
         match &entry.state {
             State::Claimed(lease) if lease.owner == session && lease.id == lease_id => {
-                entry.state = State::Resolved(decision);
+                entry.state = State::Resolved(decision, message);
                 Ok(())
             }
             _ => Err(BrokerError::WrongLease),
@@ -188,6 +193,11 @@ impl ApprovalBroker {
     pub fn status(&mut self, id: &str) -> Result<ApprovalStatus, BrokerError> {
         self.reclaim();
         self.entries.get(id).map(status).ok_or(BrokerError::Unknown)
+    }
+
+    /// Whether any frontend is registered to answer approval requests.
+    pub fn has_frontends(&self) -> bool {
+        !self.frontends.is_empty()
     }
 
     pub fn disconnect(&mut self, session: u64) {
@@ -251,8 +261,9 @@ fn status(entry: &Entry) -> ApprovalStatus {
             lease_id: lease.id,
             expires_in_ms: millis(lease.expires.saturating_duration_since(Instant::now())),
         },
-        State::Resolved(decision) => ApprovalStatus::Resolved {
+        State::Resolved(decision, message) => ApprovalStatus::Resolved {
             decision: *decision,
+            message: message.clone(),
         },
         State::Cancelled => ApprovalStatus::Cancelled,
     }

@@ -6,6 +6,7 @@ pub mod client;
 mod clipboard;
 pub mod command;
 pub mod controller;
+pub mod deploy_command;
 pub mod deployment;
 pub mod editor;
 pub mod generator;

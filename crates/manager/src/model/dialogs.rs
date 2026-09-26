@@ -64,3 +64,53 @@ impl Model {
         }
     }
 }
+
+impl Model {
+    /// Every host of the evaluated schema, in tree order, for the deploy
+    /// picker.
+    pub fn deploy_hosts(&self) -> Vec<String> {
+        let mut hosts = Vec::new();
+        for row in self.rows.iter().filter(|row| row.is_secret()) {
+            if let Some(host) = crate::model::Attribute::Host.value(row) {
+                if !hosts.contains(&host) {
+                    hosts.push(host);
+                }
+            }
+        }
+        hosts.sort();
+        hosts
+    }
+
+    /// The host of the selected row: a value's host, or the host a group
+    /// belongs to when all its values share one.
+    pub fn selected_host(&self) -> Option<String> {
+        let row = self.selected()?;
+        if row.is_secret() {
+            return crate::model::Attribute::Host.value(row);
+        }
+        let hosts = self
+            .rows
+            .iter()
+            .filter(|candidate| {
+                candidate.is_secret()
+                    && candidate.display_segments.starts_with(&row.display_segments)
+            })
+            .filter_map(|candidate| crate::model::Attribute::Host.value(candidate))
+            .collect::<std::collections::BTreeSet<_>>();
+        (hosts.len() == 1).then(|| hosts.into_iter().next().expect("one host"))
+    }
+
+    /// `D`: opens the host picker with the selected row's host preselected.
+    pub fn open_deploy_picker(&mut self) {
+        let hosts = self.deploy_hosts();
+        if hosts.is_empty() {
+            self.inform("the evaluated schema has no hosts to deploy");
+            return;
+        }
+        let selected = self
+            .selected_host()
+            .and_then(|host| hosts.iter().position(|candidate| *candidate == host))
+            .unwrap_or(0);
+        self.mode = Mode::DeployHost { selected };
+    }
+}

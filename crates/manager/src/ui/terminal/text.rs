@@ -18,6 +18,7 @@ pub(super) fn prompt(model: &Model) -> String {
             Mode::TreeOrder { .. } => "Space moves an attribute into/out of the tree. [ and ] reorder tree attributes.",
             Mode::Profiles { .. } => "Enter loads a profile; n creates one; s overwrites the selected profile; d deletes it.",
             Mode::Settings { .. } => "Settings last for this session only; they reset when nix-secrets restarts.",
+            Mode::DeployHost { .. } => "Deploy every value of a host: stored, generated on the target, derived, public information and target tasks. You then approve its host key and the deployment as for any deployment request.",
             _ => unreachable!(),
         };
         return format!("{header}\n\n{}", items.join("\n"));
@@ -70,7 +71,7 @@ pub(super) fn prompt(model: &Model) -> String {
                 "Whether the current value of {path} is committed to git could not be checked ({reason}), so it is treated as never committed. Overwriting it may lose the old value irrevocably. Overwrite?\n\nCtrl+Shift+Y: overwrite · n, Enter, Space or Esc: keep it"
             ),
         },
-        Mode::Settings { .. } => unreachable!("settings render as a selector"),
+        Mode::Settings { .. } | Mode::DeployHost { .. } => unreachable!("rendered as a selector"),
         Mode::GenerateChoice { .. } => "Generate p: password · w: passphrase · Esc: cancel".into(),
         Mode::KeypairConfirm { path, replacing } => format!(
             "Run the declared generator for {path}? It runs `nix run` locally; the private key is encrypted at once and the public key is stored in plain.{}\ny: generate · Esc: cancel",
@@ -97,9 +98,14 @@ pub(super) fn prompt(model: &Model) -> String {
                 format!(
                     "{failure} {host_key} Trust this host and inspect its deployment state? y/n"
                 )
-            } else if !request.missing.is_empty() {
+            } else if !request.deployable() {
+                let partial = if request.partial_possible() {
+                    " p: deploy everything else and skip these; the target keeps waiting for them ·"
+                } else {
+                    ""
+                };
                 format!(
-                    "{failure} Cannot deploy to {}: missing values that must be entered: {}. Nothing will be generated or written. n: dismiss",
+                    "{failure} Cannot deploy to {}: missing values that must be entered: {}. Nothing will be generated or written.{partial} n: dismiss",
                     request.target,
                     request
                         .missing
@@ -109,6 +115,30 @@ pub(super) fn prompt(model: &Model) -> String {
                         .join(", ")
                 )
             } else {
+                let skipped = if request.missing.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " PARTIAL: skips {} value{} whose source host is not deployed yet; the target keeps waiting for {}: [{}] · p: refuse instead ·",
+                        request.missing.len(),
+                        if request.missing.len() == 1 { "" } else { "s" },
+                        if request.missing.len() == 1 { "it" } else { "them" },
+                        request
+                            .missing
+                            .iter()
+                            .map(|(id, reason)| format!("{id} ({reason})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let kept = |items: &[String]| {
+                    items
+                        .iter()
+                        .filter(|id| !request.skippable.contains(id))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
                 let generate = if request.generate.is_empty() {
                     String::new()
                 } else {
@@ -137,10 +167,10 @@ pub(super) fn prompt(model: &Model) -> String {
                     )
                 };
                 format!(
-                    "{failure} Deploy to {}? create [{}], replace [{}], tasks [{}]{generate}, keys [{}] · y/n",
+                    "{failure}{skipped} Deploy to {}? create [{}], replace [{}], tasks [{}]{generate}, keys [{}] · y/n",
                     request.target,
-                    request.create.join(", "),
-                    request.replace.join(", "),
+                    kept(&request.create),
+                    kept(&request.replace),
                     request.tasks.iter().map(task_status).collect::<Vec<_>>().join(", "),
                     request.recipient_keys.join(", ")
                 )
@@ -255,6 +285,14 @@ pub(super) fn selector_items(model: &Model) -> Option<Vec<String>> {
                 })
                 .collect(),
         ),
+        Mode::DeployHost { selected } => Some(
+            model
+                .deploy_hosts()
+                .iter()
+                .enumerate()
+                .map(|(index, host)| format!("{} {host}", marker(*selected, index)))
+                .collect(),
+        ),
         Mode::Profiles { selected } => Some(
             std::iter::once(format!(
                 "{} Save current view as new profile",
@@ -287,7 +325,9 @@ pub(super) fn selector_selected(model: &Model) -> Option<usize> {
         Mode::FacetCategories { selected }
         | Mode::FacetValues { selected, .. }
         | Mode::TreeOrder { selected } => Some(*selected),
-        Mode::Profiles { selected } | Mode::Settings { selected } => Some(*selected),
+        Mode::Profiles { selected } | Mode::Settings { selected } | Mode::DeployHost { selected } => {
+            Some(*selected)
+        }
         Mode::FacetFirstChoice { .. } => Some(0),
         _ => None,
     }

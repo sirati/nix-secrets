@@ -9,6 +9,10 @@ pub struct ApprovalRequest {
     pub id: String,
     pub target: String,
     pub secrets: Vec<String>,
+    /// Deploy everything else and skip values whose source on another host
+    /// is unset, listing them, instead of refusing the whole deployment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_partial: bool,
 }
 
 impl ApprovalRequest {
@@ -52,7 +56,12 @@ pub enum Decision {
 pub enum ApprovalStatus {
     Pending,
     Claimed { lease_id: u64, expires_in_ms: u64 },
-    Resolved { decision: Decision },
+    Resolved {
+        decision: Decision,
+        /// What the frontend did: the deployment summary or why it refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     Cancelled,
 }
 

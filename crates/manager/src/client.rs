@@ -198,7 +198,40 @@ impl BackendClient {
         }
     }
 
-    pub fn resolve(&mut self, request_id: String, lease_id: u64, approved: bool) -> io::Result<()> {
+    /// Asks the backend to queue a deployment of every deployable value of
+    /// `target` for the registered frontends.
+    pub fn request_deployment(
+        &mut self,
+        target: &str,
+        allow_partial: bool,
+    ) -> io::Result<ApprovalRequest> {
+        match self.exchange(&Request::RequestDeployment {
+            target: target.to_owned(),
+            allow_partial,
+        })? {
+            Response::DeploymentRequested { request } => Ok(request),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn approval_status(&mut self, request_id: &str) -> io::Result<ApprovalStatus> {
+        match self.exchange(&Request::ApprovalStatus {
+            request_id: request_id.to_owned(),
+        })? {
+            Response::ApprovalState { state } => Ok(state),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn resolve(
+        &mut self,
+        request_id: String,
+        lease_id: u64,
+        approved: bool,
+        message: Option<String>,
+    ) -> io::Result<()> {
         let decision = if approved {
             Decision::Approved
         } else {
@@ -208,6 +241,7 @@ impl BackendClient {
             request_id,
             lease_id,
             decision,
+            message,
         })? {
             Response::ApprovalResolved => Ok(()),
             Response::Error { message } => Err(io::Error::other(message)),

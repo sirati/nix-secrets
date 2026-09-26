@@ -106,10 +106,15 @@ pub enum Completion {
         total: usize,
     },
     ApprovalDone(Option<ApprovalRequest>),
-    /// A deployment finished; lists values its target generated and stored.
+    /// A deployment finished; lists values its target generated and stored,
+    /// and those a partial deployment skipped.
     Deployed {
         generated: Vec<String>,
+        skipped: Vec<String>,
     },
+    /// The backend queued a deployment of this host; it arrives as an
+    /// approval.
+    DeploymentRequested(String),
     ApprovalLost(String),
     Failed(String),
     ProfileSaved {
@@ -169,6 +174,16 @@ pub trait SecretWriter {
     }
     fn approval(&mut self, _accepted: bool) -> Result<Option<ApprovalRequest>, String> {
         Ok(None)
+    }
+    /// Approves the open deployment and skips the values whose source on
+    /// another host is unset; see [`ApprovalRequest::skippable`].
+    fn approve_partial(&mut self) -> Result<Option<ApprovalRequest>, String> {
+        Err("partial deployment is unavailable".into())
+    }
+    /// Asks the backend to deploy every deployable value of `host`; the
+    /// request then arrives as an ordinary approval.
+    fn request_deployment(&mut self, _host: &str) -> Result<(), String> {
+        Err("deployment requests are unavailable".into())
     }
     fn delete(&mut self, _path: &str) -> Result<(), String> {
         Err("deletion unavailable".into())

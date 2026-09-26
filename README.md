@@ -425,6 +425,34 @@ values locally, and sends plaintext only inside the end-to-end SSH connection.
 Unknown SSH host keys require a separate approval before the target manifest
 is read. Editing or selecting one TUI item never initiates a deployment.
 
+The operator starts a deployment. Press `D` in the tree to pick a host (the
+host of the selected row is preselected), or run from the backend host:
+
+```text
+nix-secrets deploy [--repository PATH] [--backend-socket PATH] [--wait] [--allow-partial] HOST
+```
+
+Both ask the backend to queue one deployment request for every deployable
+value of `HOST` in the evaluated schema: stored values, values generated on
+the target, derived values, public information and target tasks. Operator-only
+values are never included. The connected TUI shows it like any deployment
+request: the host-key check, the values to create or replace, what the target
+generates or derives, and the refusal when values are missing. The
+deployment runs only after the operator approves. `nix-secrets deploy` finds
+the backend like `with-secrets`. It exits 0 once the request is queued; with
+`--wait` it waits for the operator and prints the result, exiting 1 on
+rejection. Without a TUI connected to the backend it fails with "open the
+nix-secrets TUI and retry".
+
+A derived value whose source is unset on another host normally refuses the
+whole deployment ("deploy X first"). When every missing value is of that
+kind, `p` in the dialog, or `--allow-partial` on the command line, which the
+dialog shows and `p` can undo, deploys everything else. The dialog marks the
+request PARTIAL and lists the skipped values, and the result names them again.
+A skipped value is not sent. The target keeps waiting for it, and its
+consumers stay stopped, until a later deployment after its source host was
+deployed. A value that must be entered is never skipped.
+
 The target validates the request again, stages the complete update, and then
 atomically publishes it below:
 

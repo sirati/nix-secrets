@@ -179,6 +179,7 @@ fn operator_keys_are_never_deployed() {
             id: "direct".into(),
             target: "host".into(),
             secrets: vec![IDENTIFIER.into()],
+            allow_partial: false,
         })
         .unwrap();
     let error = loop {

@@ -59,7 +59,8 @@ pub(super) fn click(
             Mode::FacetCategories { selected }
             | Mode::FacetValues { selected, .. }
             | Mode::Profiles { selected }
-            | Mode::Settings { selected } => {
+            | Mode::Settings { selected }
+            | Mode::DeployHost { selected } => {
                 *selected = index;
                 reduce(model, UiEvent::Enter, writer)
             }

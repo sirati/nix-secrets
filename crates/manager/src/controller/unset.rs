@@ -24,9 +24,34 @@ pub(crate) struct UnsetPlan {
     /// Derived values the target frames itself, because their source is
     /// unset, on the same host, and generated in this deployment.
     pub derived_on_target: Vec<(String, String)>,
+    /// Derived values in `missing` whose unset source is on another host.
+    /// Only these may be skipped by a partial deployment; the target keeps
+    /// waiting for them until their source host is deployed.
+    pub skippable: Vec<String>,
 }
 
 impl UnsetPlan {
+    /// Whether a partial deployment can proceed: something is missing and
+    /// every missing value waits for another host.
+    pub fn partial_possible(&self) -> bool {
+        !self.missing.is_empty()
+            && self
+                .missing
+                .iter()
+                .all(|(identifier, _)| self.skippable.contains(identifier))
+    }
+
+    /// The refusal of a deployment that may skip `skippable` values, if
+    /// `allow_partial`. Values that cannot wait for another host are always
+    /// refused.
+    pub fn refusal_for(&self, allow_partial: bool) -> Option<String> {
+        if allow_partial && self.partial_possible() {
+            None
+        } else {
+            self.refusal()
+        }
+    }
+
     /// Also refuses a derived value whose source is unset: its source must be
     /// set, or deployed to its own host first when that host generates it.
     pub fn refusal(&self) -> Option<String> {
@@ -45,8 +70,10 @@ impl UnsetPlan {
 
 /// Classifies the leaves of `identifiers` that are absent from the store.
 /// Unset stored values are generated when their format is known; a target
-/// task whose operator input is unset is always missing. Public information
-/// and target-local keys need no stored value.
+/// task whose operator input is unset is always missing, and so is public
+/// information whose shared value is unset (`set` names public information
+/// by its identifier when its shared value is stored). Target-local keys need
+/// no stored value.
 pub(crate) fn plan_unset(
     schema: &Schema,
     identifiers: &[String],
@@ -84,7 +111,12 @@ pub(crate) fn plan_unset(
                 continue;
             }
         };
+        // `set` names public information whose shared value is stored.
         if matches!(spec.kind, SecretKind::PublicInfo) {
+            plan.missing.push((
+                identifier.clone(),
+                "public information is unset; enter it first".to_owned(),
+            ));
             continue;
         }
         match deployment_generator(&spec) {
@@ -106,6 +138,9 @@ pub(crate) fn plan_unset(
             plan.derived_on_target.push((identifier, source));
         } else {
             let reason = source_first(schema, &source);
+            if source.split('.').next() != identifier.split('.').next() {
+                plan.skippable.push(identifier.clone());
+            }
             plan.missing.push((identifier, reason));
         }
     }

@@ -38,6 +38,8 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         }
         (Mode::Browse, UiEvent::Character('T')) => model.mode = Mode::TreeOrder { selected: 0 },
         (Mode::Browse, UiEvent::Character('C')) => commit::open(model, writer),
+        (Mode::Browse, UiEvent::Character('D')) => model.open_deploy_picker(),
+        (Mode::DeployHost { selected }, event) => deploy_host::reduce(model, writer, selected, event),
         (mode @ Mode::Commit { .. }, event) => commit::reduce(model, writer, mode, event),
         (Mode::Browse, UiEvent::Character('S')) => model.mode = Mode::Profiles { selected: 0 },
         (

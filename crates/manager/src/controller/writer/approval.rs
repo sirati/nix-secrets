@@ -28,17 +28,12 @@ impl Controller {
         else {
             return Ok(None);
         };
-        let set = self
-            .client
-            .list()
-            .map_err(|error| error.to_string())?
-            .into_keys()
-            .collect::<BTreeSet<_>>();
+        let set = self.plan_set(&request.secrets)?;
         let mut details = match self.approval_details(&request, None, &set) {
             Ok(details) => details,
             Err(error) => {
                 self.client
-                    .resolve(request.id, lease_id, false)
+                    .resolve(request.id, lease_id, false, Some(error.clone()))
                     .map_err(|resolve| resolve.to_string())?;
                 return Err(error);
             }
@@ -47,7 +42,12 @@ impl Controller {
             Some(host) => host,
             None => {
                 self.client
-                    .resolve(request.id, lease_id, false)
+                    .resolve(
+                        request.id,
+                        lease_id,
+                        false,
+                        Some("target host is absent from schema".into()),
+                    )
                     .map_err(|e| e.to_string())?;
                 return Err("target host is absent from schema".into());
             }
@@ -62,7 +62,7 @@ impl Controller {
             Ok(expected) => expected,
             Err(error) => {
                 self.client
-                    .resolve(request.id, lease_id, false)
+                    .resolve(request.id, lease_id, false, Some(error.clone()))
                     .map_err(|e| e.to_string())?;
                 return Err(error);
             }
@@ -71,7 +71,7 @@ impl Controller {
             Ok(preflight) => preflight,
             Err(error) => {
                 self.client
-                    .resolve(request.id, lease_id, false)
+                    .resolve(request.id, lease_id, false, Some(error.clone()))
                     .map_err(|e| e.to_string())?;
                 return Err(error);
             }
@@ -86,13 +86,19 @@ impl Controller {
             identity: host_key.identity,
             prepared: None,
             target_approved: known,
+            last_error: None,
             renewed_at: Instant::now(),
         });
         if known {
             if let Err(error) = self.prepare_active() {
                 let active = self.active.take().expect("active approval exists");
                 self.client
-                    .resolve(active.request.id, active.lease_id, false)
+                    .resolve(
+                        active.request.id,
+                        active.lease_id,
+                        false,
+                        Some(error.clone()),
+                    )
                     .map_err(|resolve| resolve.to_string())?;
                 return Err(error);
             }
@@ -106,7 +112,11 @@ impl Controller {
         Ok(Some(details))
     }
 
-    pub(super) fn approval_inner(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
+    pub(super) fn approval_inner(
+        &mut self,
+        accepted: bool,
+        allow_partial: bool,
+    ) -> Result<Option<UiApproval>, String> {
         if accepted {
             if !self
                 .active
@@ -123,21 +133,16 @@ impl Controller {
                     .as_ref()
                     .map(PreparedDeployment::state)
                     .cloned();
-                let set = self
-                    .client
-                    .list()
-                    .map_err(|error| error.to_string())?
-                    .into_keys()
-                    .collect::<BTreeSet<_>>();
+                let set = self.plan_set(&request.secrets)?;
                 return self
                     .approval_details(&request, state.as_ref(), &set)
                     .map(Some);
             }
-            let (id, lease_id) = self
-                .active
-                .as_ref()
-                .map(|active| (active.request.id.clone(), active.lease_id))
-                .expect("active approval exists");
+            // The dialog shows the requester's choice and the operator may
+            // change it; what they approved is what is deployed.
+            let active = self.active.as_mut().expect("active approval exists");
+            active.request.allow_partial = allow_partial;
+            let (id, lease_id) = (active.request.id.clone(), active.lease_id);
             if let Err(error) = self.client.renew_for(id, lease_id, 900_000) {
                 self.active.take();
                 return Err(format!("approval lease was lost: {error}"));
@@ -146,12 +151,21 @@ impl Controller {
                 .as_mut()
                 .expect("approval remains active")
                 .renewed_at = Instant::now();
-            self.deploy_active()?;
+            if let Err(error) = self.deploy_active() {
+                if let Some(active) = self.active.as_mut() {
+                    active.last_error = Some(error.clone());
+                }
+                return Err(error);
+            }
             return Ok(None);
         }
         let active = self.active.take().ok_or("no claimed approval request")?;
+        let reason = match active.last_error {
+            Some(error) => format!("rejected by the operator after: {error}"),
+            None => "rejected by the operator".to_owned(),
+        };
         self.client
-            .resolve(active.request.id, active.lease_id, false)
+            .resolve(active.request.id, active.lease_id, false, Some(reason))
             .map_err(|error| error.to_string())?;
         Ok(None)
     }

@@ -88,6 +88,7 @@ fn socket_frontends_receive_and_atomically_claim_an_approval() {
         id: "socket-request".to_owned(),
         target: "target.example".to_owned(),
         secrets: vec!["host.services.mail.service.password".to_owned()],
+        allow_partial: false,
     };
     let mut submitter = UnixStream::connect(&socket).unwrap();
     assert!(matches!(
@@ -181,6 +182,7 @@ fn subscriber_receives_changes_without_polling() {
         id: "push-request".into(),
         target: "host".into(),
         secrets: vec![common::path().to_string()],
+        allow_partial: false,
     };
     assert!(matches!(
         call(&mut writer, Request::SubmitApproval { request: approval }),
@@ -217,6 +219,7 @@ fn socket_lease_renewal_rejects_an_expired_lease() {
         id: "renew-socket".to_owned(),
         target: "target.example".to_owned(),
         secrets: vec!["host.services.mail.service.password".to_owned()],
+        allow_partial: false,
     };
     let _ = call(&mut submitter, Request::SubmitApproval { request });
     let lease_id = match call(
@@ -251,5 +254,81 @@ fn socket_lease_renewal_rejects_an_expired_lease() {
             }
         ),
         Response::Error { .. }
+    ));
+}
+
+#[test]
+fn a_deployment_request_reaches_the_registered_frontend() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("deploy.sock");
+    let backend = match Backend::bind(
+        &socket,
+        common::schema(),
+        SecretStore::new(directory.path().join("nix-secrets.toml")),
+    ) {
+        Ok(backend) => backend,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("cannot bind test backend: {error}"),
+    };
+    thread::spawn(move || backend.serve().unwrap());
+    let mut requester = UnixStream::connect(&socket).unwrap();
+    // Nobody could answer yet.
+    let deploy = || Request::RequestDeployment {
+        target: "host".to_owned(),
+        allow_partial: true,
+    };
+    assert!(matches!(
+        call(&mut requester, deploy()),
+        Response::Error { message } if message.contains("open the nix-secrets TUI and retry")
+    ));
+    let mut frontend = UnixStream::connect(&socket).unwrap();
+    assert!(matches!(
+        call(&mut frontend, Request::RegisterFrontend),
+        Response::FrontendRegistered
+    ));
+    assert!(matches!(
+        call(&mut requester, Request::RequestDeployment {
+            target: "absent".to_owned(),
+            allow_partial: false,
+        }),
+        Response::Error { message } if message.contains("not a host")
+    ));
+    let Response::DeploymentRequested { request } = call(&mut requester, deploy()) else {
+        panic!("deployment was not queued");
+    };
+    assert_eq!(request.target, "host");
+    assert_eq!(request.secrets, [common::path().to_string()]);
+    assert!(request.allow_partial);
+    let Response::Approvals { requests } = call(&mut frontend, Request::PollApprovals) else {
+        panic!("frontend cannot poll");
+    };
+    assert_eq!(requests, std::slice::from_ref(&request));
+    let Response::ApprovalClaimed { lease_id, .. } = call(
+        &mut frontend,
+        Request::ClaimApproval {
+            request_id: request.id.clone(),
+            lease_ms: 30_000,
+        },
+    ) else {
+        panic!("frontend cannot claim");
+    };
+    assert!(matches!(
+        call(&mut frontend, Request::ResolveApproval {
+            request_id: request.id.clone(),
+            lease_id,
+            decision: nix_secrets_core::Decision::Approved,
+            message: Some("deployed host".to_owned()),
+        }),
+        Response::ApprovalResolved
+    ));
+    // The requester reads the frontend's summary.
+    assert!(matches!(
+        call(&mut requester, Request::ApprovalStatus { request_id: request.id }),
+        Response::ApprovalState {
+            state: nix_secrets_core::ApprovalStatus::Resolved {
+                decision: nix_secrets_core::Decision::Approved,
+                message: Some(message),
+            }
+        } if message == "deployed host"
     ));
 }

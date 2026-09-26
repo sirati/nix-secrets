@@ -204,6 +204,29 @@ Path components come from the validated manifest. Absolute components,
 `..`, symlink traversal, hard-link substitution, device nodes, and unexpected
 owners are rejected.
 
+## Operator-initiated deployment
+
+`RequestDeployment { target, allow_partial }` asks the backend to queue a
+deployment of every deployable leaf of `target` in its evaluated schema: every
+stored leaf, public information and derived leaves included, and every
+generated-secret task; operator-only leaves are left out. The backend picks a
+random request id, submits the `ApprovalRequest { id, target, secrets,
+allow_partial }` to the approval broker, publishes `ApprovalRequested`, and
+answers `DeploymentRequested { request }`. Without a registered frontend it
+answers an error naming the TUI instead, since nobody could claim the request.
+Registered TUIs claim it like any approval, so the deployment flow above
+applies unchanged. The requester follows it with `ApprovalStatus`.
+`ResolveApproval` carries an optional `message`, which the frontend fills with
+the deployment summary or the reason for refusing. `Resolved` reports it to
+the requester.
+
+`allow_partial` is the requester's proposal and the operator can toggle it in
+the dialog. With it, a deployment whose only missing values are derived values
+with an unset source on another host leaves those values out of the target
+selection, so the target keeps waiting for them. The summary lists them as
+skipped. Any other missing value still refuses the whole deployment. Adding
+these requests raised the backend compatibility version to 11.
+
 ## Values generated at deployment
 
 Deployment protocol 2 lets the target generate stored values that are unset

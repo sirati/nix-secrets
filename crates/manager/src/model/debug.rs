@@ -43,6 +43,9 @@ impl fmt::Debug for Mode {
             Self::Settings { selected } => {
                 formatter.debug_tuple("Settings").field(selected).finish()
             }
+            Self::DeployHost { selected } => {
+                formatter.debug_tuple("DeployHost").field(selected).finish()
+            }
             Self::Search { query } => formatter.debug_tuple("Search").field(query).finish(),
             Self::DeleteConfirm { path, commit } => formatter
                 .debug_struct("DeleteConfirm")
