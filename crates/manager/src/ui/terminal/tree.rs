@@ -12,7 +12,8 @@ pub(super) fn render_tree(
         .enumerate()
         .into_iter()
         .map(|(index, visible)| {
-            let mut item = item(&model.rows[visible.index], visible.depth, &visible.label);
+            let row = &model.rows[visible.index];
+            let mut item = item(row, visible.depth, &visible.label, model.is_collapsed(row));
             if model.hover == Some(MouseTarget::Tree(index)) {
                 item = item.style(Style::default().bg(Color::Rgb(70, 75, 85)));
             }
@@ -39,10 +40,12 @@ pub(super) fn render_tree(
     }
 }
 
-fn item(row: &Row, depth: usize, name: &str) -> ListItem<'static> {
+fn item(row: &Row, depth: usize, name: &str, collapsed: bool) -> ListItem<'static> {
     let indent = "  ".repeat(depth);
     if !row.is_secret() {
-        return ListItem::new(format!("{indent}{name}/"));
+        // ▸ marks a collapsed group, ▾ an expanded one.
+        let marker = if collapsed { "▸" } else { "▾" };
+        return ListItem::new(format!("{indent}{marker} {name}/"));
     }
     let (status, color) = if row.is_set {
         ("set", Color::Green)

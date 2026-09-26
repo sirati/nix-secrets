@@ -409,3 +409,63 @@ fn deployment_prompt_lists_generated_and_missing_values() {
     let notice = crate::ui::drive::deployed_notice(&["host.services.a.pw".into()]);
     assert!(notice.contains("generated") && notice.contains("host.services.a.pw"));
 }
+
+#[test]
+fn uncommitted_delete_renders_the_loss_warning_with_its_buttons() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::DeleteConfirm {
+        path: "h.services.s.key".into(),
+        commit: nix_secrets_core::CommitState::Uncommitted,
+    };
+    let mut hits = HitMap::default();
+    terminal.draw(|frame| hits = render(frame, &model)).unwrap();
+    let screen = (0..30)
+        .map(|y| line(&terminal, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("never committed to git"), "{screen}");
+    assert!(screen.contains("Ctrl+Shift+Y Yes, delete"), "{screen}");
+    for target in [MouseTarget::ConfirmLoss, MouseTarget::RevealCurrent] {
+        assert!(hits.regions.iter().any(|(_, hit)| *hit == target));
+    }
+}
+
+#[test]
+fn groups_show_a_collapse_marker() {
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    let mut row = crate::tree::Row {
+        depth: 0,
+        name: "group".into(),
+        display_segments: vec!["group".into()],
+        path: None,
+        is_set: false,
+        is_task: false,
+        can_generate: false,
+        can_copy_public: false,
+        output_is_set: None,
+        description: None,
+        category: crate::tree::RowCategory::Branch,
+        human_facing: false,
+        external_input_required: false,
+        required_for_install: false,
+        identity: None,
+        presentation: None,
+    };
+    let mut value = row.clone();
+    value.depth = 1;
+    value.name = "value".into();
+    value.display_segments = vec!["group".into(), "value".into()];
+    value.path = Some("h.services.s.value".into());
+    value.external_input_required = true;
+    value.category = crate::tree::RowCategory::Password;
+    row.external_input_required = false;
+    let mut model = Model::new(vec![row, value]);
+    let screen = draw(&mut terminal, &model);
+    assert!(screen.contains("▾ group/"), "{screen}");
+    assert!(screen.contains("value"), "{screen}");
+    model.collapsed.insert(vec!["group".into()]);
+    let screen = draw(&mut terminal, &model);
+    assert!(screen.contains("▸ group/"), "{screen}");
+    assert!(!screen.contains("value"), "{screen}");
+}

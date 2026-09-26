@@ -308,6 +308,7 @@ fn bulk_generation_only_requests_unset_passwords() {
     ));
 }
 
+mod collapse_tests;
 mod generation_tests;
 mod navigation_tests;
 
@@ -501,6 +502,65 @@ fn committed_overwrite_keeps_the_plain_confirmation() {
     ));
     reduce(&mut model, UiEvent::Character('y'), &mut writer);
     assert_eq!(writer.writes, [b"new"]);
+}
+
+#[test]
+fn deleting_an_uncommitted_value_shows_the_loss_warning() {
+    use nix_secrets_core::CommitState;
+    for commit in [
+        CommitState::Uncommitted,
+        CommitState::Unknown {
+            reason: "not a git repository".into(),
+        },
+    ] {
+        let mut model = model(true);
+        let mut writer = writer();
+        writer.commit = Some(commit.clone());
+        for cancel in [
+            UiEvent::Enter,
+            UiEvent::Character(' '),
+            UiEvent::Character('n'),
+            UiEvent::Escape,
+        ] {
+            reduce(&mut model, UiEvent::Character('d'), &mut writer);
+            assert!(
+                matches!(&model.mode, Mode::DeleteConfirm { commit: shown, .. } if *shown == commit)
+            );
+            reduce(&mut model, UiEvent::Character('y'), &mut writer);
+            assert!(
+                matches!(model.mode, Mode::DeleteConfirm { .. }),
+                "plain y does not confirm"
+            );
+            reduce(&mut model, cancel, &mut writer);
+            assert!(matches!(model.mode, Mode::Browse), "No is the default");
+            assert!(writer.deletions.is_empty());
+        }
+        // Ctrl+R reveals the value over the warning and returns to it.
+        reduce(&mut model, UiEvent::Character('d'), &mut writer);
+        reduce(&mut model, UiEvent::RevealCurrent, &mut writer);
+        assert!(matches!(model.mode, Mode::Reveal { .. }));
+        reduce(&mut model, UiEvent::Escape, &mut writer);
+        assert!(matches!(model.mode, Mode::DeleteConfirm { .. }));
+        reduce(&mut model, UiEvent::ConfirmLoss, &mut writer);
+        assert_eq!(writer.deletions, ["h.services.s.key"]);
+    }
+}
+
+#[test]
+fn deleting_a_committed_value_keeps_the_plain_confirmation() {
+    let mut model = model(true);
+    let mut writer = writer();
+    writer.commit = Some(nix_secrets_core::CommitState::Committed);
+    reduce(&mut model, UiEvent::Character('d'), &mut writer);
+    assert!(matches!(
+        model.mode,
+        Mode::DeleteConfirm {
+            commit: nix_secrets_core::CommitState::Committed,
+            ..
+        }
+    ));
+    reduce(&mut model, UiEvent::Character('y'), &mut writer);
+    assert_eq!(writer.deletions, ["h.services.s.key"]);
 }
 
 #[test]

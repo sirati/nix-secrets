@@ -76,6 +76,16 @@ window appears. `wl-paste` is not used because on compositors without a
 data-control protocol, such as GNOME, it maps a window for every read. It
 works even when the terminal refuses to paste; held keys read once, and one
 trailing newline is dropped.
+Space collapses or expands the selected group, and a click on a group
+selects and toggles it; `-` collapses all groups and `+` expands them. A
+collapsed group shows `▸`, an expanded one `▾`. A collapse that hides the
+selected row moves the selection to the collapsed group. Groups are keyed by
+their path of attribute values, so collapsed groups survive refreshes, value
+changes, filters, and tree reorders that keep the same path. The state lasts
+for the session and is not stored in profiles, which hold only filters and
+tree order. While a search is active, every group holding a match is shown
+expanded; groups folded during a search stay folded until the query changes,
+and clearing the search restores the earlier state.
 Clicking an unset input value selects it and opens its entry field. While a
 search is active, the status line counts matches and those hidden by filters.
 Attributes that do not apply to a value, such as the user of a system
@@ -92,7 +102,9 @@ button confirms; n, Enter, Space and Esc keep the value. `O` opens session
 settings, which reset on restart and are never written to the repository. With
 "Autosave unset on paste" on, toggled by Tab or a click in the entry field, a
 one-line paste into an unset value saves it at once.
-Press `d` to delete a selected value after confirmation, `r` to reveal it,
+Press `d` to delete a selected value after confirmation; a value that is not
+committed in HEAD, or whose state git cannot tell, gets the same loss warning
+and keys as replacing it, including Ctrl+R to reveal it. Press `r` to reveal it,
 `c` to copy it, or `p` to copy the public half of a stored OpenSSH private key
 without decrypting. Dialogs appear over the tree. A success notice closes on the
 next key or click, which then performs its usual action; above a confirmation

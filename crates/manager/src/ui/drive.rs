@@ -145,9 +145,10 @@ fn apply_completion(model: &mut Model, completion: Completion) {
                         underneath: None,
                     }
                 }
-                // Requested from an entry or replace dialog for the same value:
+                // Requested from an entry, replace or delete dialog for the same value:
                 // show it over that dialog, which closing the reveal restores.
-                dialog @ (Mode::Edit { .. } | Mode::Replace { .. })
+                dialog
+                @ (Mode::Edit { .. } | Mode::Replace { .. } | Mode::DeleteConfirm { .. })
                     if dialog_path(&dialog) == Some(path.as_str()) =>
                 {
                     model.mode = Mode::Reveal {
@@ -260,7 +261,9 @@ pub(crate) fn apply_completion_for_tests(model: &mut Model, completion: Completi
 
 fn dialog_path(mode: &Mode) -> Option<&str> {
     match mode {
-        Mode::Edit { path, .. } | Mode::Replace { path, .. } => Some(path),
+        Mode::Edit { path, .. } | Mode::Replace { path, .. } | Mode::DeleteConfirm { path, .. } => {
+            Some(path)
+        }
         _ => None,
     }
 }

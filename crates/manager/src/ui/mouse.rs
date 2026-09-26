@@ -21,9 +21,13 @@ pub(super) fn click(
             if index >= model.visible_rows().len() {
                 return Action::Continue;
             }
-            // A click selects the row. On an unset value that needs operator
-            // input it also opens entry, so a list can be filled click by click.
+            // A click selects the row. On a group it also folds or unfolds it.
+            // On an unset value that needs operator input it also opens entry,
+            // so a list can be filled click by click.
             model.selected = index;
+            if model.toggle_selected_group() {
+                return Action::Continue;
+            }
             if model
                 .selected()
                 .is_some_and(|row| row.is_secret() && !row.is_set && row.external_input_required)

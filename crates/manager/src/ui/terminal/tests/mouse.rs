@@ -207,6 +207,7 @@ fn mouse_hits_match_rendered_controls_and_modal_takes_priority() {
     );
     model.mode = Mode::DeleteConfirm {
         path: "h.services.s.key".into(),
+        commit: nix_secrets_core::CommitState::Committed,
     };
     terminal.draw(|frame| hits = render(frame, &model)).unwrap();
     assert!(

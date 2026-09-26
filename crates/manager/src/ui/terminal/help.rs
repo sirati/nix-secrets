@@ -1,6 +1,12 @@
 pub(super) fn help_text() -> &'static str {
     r"NAVIGATE
 ↑ / ↓  Move between visible items
+Space  Collapse or expand the selected group (▾ expanded, ▸ collapsed)
+-  Collapse all groups · +  Expand all groups
+   Collapsed groups are kept for this session across refreshes, filters and
+   tree reorders; profiles do not store them. While searching, every group
+   holding a match is expanded, and folds made then last until the search
+   changes; clearing the search restores the earlier folds
 /  Search names, identifiers, and explanations
    While searching, the status line counts matches and those hidden by filters
 P  Show all attributes of the selected value
@@ -27,7 +33,8 @@ Tree attributes remain filterable.
 
 EDIT
 Enter  Edit selected value; Enter again saves
-Click  Select a row; a click on an unset input value also opens its entry
+Click  Select a row; a click on a group also collapses or expands it, and a
+       click on an unset input value also opens its entry
 Paste  Set from clipboard; replacement asks first
 Tab    In the entry field: toggle 'Autosave unset on paste'. When on, pasting
        one line into an unset value saves it at once. Clicking the checkbox or its
@@ -39,7 +46,8 @@ G  Generate all missing passwords; keeps existing values
 r  Reveal selected value
 c  Copy the selected value
 p  Copy the public half of an OpenSSH private key or an operator key
-d  Delete selected value after confirmation
+d  Delete selected value after confirmation; a value never committed to git
+   gets the same loss warning as replacing it
 Replacing a set value asks after you enter the new one and press Enter.
 Ctrl+R  In the entry field or that question: reveal the current stored value;
         closing the reveal returns to the dialog with your typed value

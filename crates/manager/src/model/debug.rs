@@ -44,9 +44,11 @@ impl fmt::Debug for Mode {
                 formatter.debug_tuple("Settings").field(selected).finish()
             }
             Self::Search { query } => formatter.debug_tuple("Search").field(query).finish(),
-            Self::DeleteConfirm { path } => {
-                formatter.debug_tuple("DeleteConfirm").field(path).finish()
-            }
+            Self::DeleteConfirm { path, commit } => formatter
+                .debug_struct("DeleteConfirm")
+                .field("path", path)
+                .field("commit", commit)
+                .finish(),
             Self::Reveal { path, .. } => formatter
                 .debug_struct("Reveal")
                 .field("path", path)

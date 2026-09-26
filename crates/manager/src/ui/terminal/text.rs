@@ -37,7 +37,17 @@ pub(super) fn prompt(model: &Model) -> String {
         Mode::ProfileSave { name } => format!("Name: {name} · Enter saves current view · Esc cancels"),
         Mode::ProfileOverwrite { name } => format!("Replace view profile {name} with current layout? y/n"),
         Mode::ProfileDelete { name } => format!("Delete view profile {name}? y/n"),
-        Mode::DeleteConfirm { path } => format!("Delete {path} from encrypted store? y/n"),
+        Mode::DeleteConfirm { path, commit } => match commit {
+            nix_secrets_core::CommitState::Committed | nix_secrets_core::CommitState::Unset => {
+                format!("Delete {path} from encrypted store? y/n")
+            }
+            nix_secrets_core::CommitState::Uncommitted => format!(
+                "The current value of {path} was never committed to git. Deleting it will lose the value irrevocably. Delete?\n\nCtrl+Shift+Y: delete · n, Enter, Space or Esc: keep it"
+            ),
+            nix_secrets_core::CommitState::Unknown { reason } => format!(
+                "Whether the current value of {path} is committed to git could not be checked ({reason}), so it is treated as never committed. Deleting it may lose the value irrevocably. Delete?\n\nCtrl+Shift+Y: delete · n, Enter, Space or Esc: keep it"
+            ),
+        },
         Mode::Reveal { .. } => "Esc: hide".into(),
         Mode::Edit { value, .. } => format!(
             "value: {}  (Enter saves, Esc cancels)\n\n{} {AUTOSAVE_LABEL} · Tab or click toggles",

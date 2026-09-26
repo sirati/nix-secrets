@@ -4,6 +4,7 @@ use zeroize::Zeroizing;
 
 mod attributes;
 mod catalog;
+mod collapse;
 mod dialogs;
 mod profiles;
 mod visibility;
@@ -134,6 +135,9 @@ pub enum Mode {
     },
     DeleteConfirm {
         path: String,
+        /// Whether the value being deleted is committed in git; if not, the
+        /// dialog is the loss warning of [`Mode::Replace`].
+        commit: nix_secrets_core::CommitState,
     },
     Reveal {
         path: String,
@@ -216,6 +220,10 @@ pub struct Model {
     /// The slow background operation in progress, shown as an overlay.
     pub activity: Option<Activity>,
     pub settings: Settings,
+    /// Collapsed groups by their path of attribute values; see `collapse`.
+    pub collapsed: std::collections::BTreeSet<Vec<String>>,
+    /// Groups folded during a search, with the query they belong to.
+    pub search_collapsed: (String, std::collections::BTreeSet<Vec<String>>),
 }
 
 pub struct VisibleRow {
@@ -256,19 +264,19 @@ impl ViewFilter {
 
 impl Model {
     pub fn update_rows(&mut self, rows: Vec<Row>) {
-        let selected_path = self.selected().and_then(|row| row.path.clone());
+        let identity = self.selection_identity();
+        let was_value = identity
+            .as_ref()
+            .is_some_and(|identity| identity.is_value());
         self.rows = rows;
         self.rebuild_tree();
-        if let Some(path) = selected_path {
-            self.selected = self
-                .visible_rows()
-                .iter()
-                .position(|index| self.rows[*index].path.as_deref() == Some(path.as_str()))
-                .unwrap_or(0);
-        } else {
-            self.selected = self
-                .selected
-                .min(self.visible_rows().len().saturating_sub(1));
+        if !self.restore_selection(identity) {
+            self.selected = if was_value {
+                0
+            } else {
+                self.selected
+                    .min(self.visible_rows().len().saturating_sub(1))
+            };
         }
     }
     pub fn new(rows: Vec<Row>) -> Self {
@@ -293,6 +301,8 @@ impl Model {
             active_profile: None,
             activity: None,
             settings: Settings::default(),
+            collapsed: Default::default(),
+            search_collapsed: Default::default(),
         };
         if structured {
             model.rebuild_tree();
