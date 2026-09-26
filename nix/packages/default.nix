@@ -4,6 +4,7 @@
   git,
   age,
   openssh,
+  util-linux,
 }:
 
 rustPlatform.buildRustPackage {
@@ -18,6 +19,8 @@ rustPlatform.buildRustPackage {
     git
     age
     openssh
+    # `script` gives the pipe-secret test a real terminal to refuse.
+    util-linux
   ];
 
   cargoBuildFlags = [

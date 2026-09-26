@@ -12,17 +12,91 @@ use std::process::Output;
 use std::time::Duration;
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("nix-secrets: {error}");
-        std::process::exit(1);
+    let mut arguments = env::args_os().skip(1).peekable();
+    let result = if arguments
+        .next_if(|argument| argument == "pipe-secret")
+        .is_some()
+    {
+        pipe_secret(arguments.collect())
+    } else {
+        run(arguments.collect()).map(|()| 0)
+    };
+    match result {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("nix-secrets: {error}");
+            std::process::exit(1);
+        }
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// Decrypts one value locally and hands it to a command's stdin, or to a
+/// non-terminal stdout. Nothing except the value is written to stdout.
+fn pipe_secret(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_manager::pipe_secret::{deliver, parse, Sink};
+    use std::io::IsTerminal;
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or("HOME is not set")?;
-    let invocation = cli::parse(env::args_os().skip(1), &home)?;
+    let invocation = parse(arguments, env::current_dir()?)?;
+    let (stream, schema) = match (&invocation.backend_socket, &invocation.schema_file) {
+        (Some(socket), Some(schema)) => (
+            nix_secrets_manager::socket::connect_verified(socket)?,
+            Schema::from_json(&fs::read_to_string(schema)?)?,
+        ),
+        _ => {
+            let repository = fs::canonicalize(&invocation.repository)?;
+            let socket_directory = runtime_directory(&home).join("nix-secrets");
+            fs::create_dir_all(&socket_directory)?;
+            let socket = socket_directory.join(startup::socket_name(&repository));
+            let connection = startup::connect_or_start(
+                &socket,
+                &command::backend(&repository, &socket),
+                &mut startup::ProcessLauncher::persistent(),
+                Duration::from_secs(20),
+            )?;
+            // A persistent backend outlives this command, like the TUI's.
+            let stream = connection.stream;
+            (stream, evaluate(&[], &repository)?)
+        }
+    };
+    let provider = one_password_scope(
+        invocation
+            .identity
+            .map(AgeCommandProvider::identity_file)
+            .unwrap_or_default(),
+        invocation.shared_session,
+    );
+    let mut controller = Controller::new(BackendClient::new(stream), schema, provider, Vec::new())?;
+    let value = controller.reveal_secret(&invocation.identifier)?;
+    let status = match &invocation.command {
+        Some(command) => deliver(&value, Sink::Command(command))?,
+        None => {
+            let stdout = io::stdout();
+            let is_terminal = stdout.is_terminal();
+            deliver(
+                &value,
+                Sink::Stdout {
+                    output: &mut stdout.lock(),
+                    is_terminal,
+                },
+            )?
+        }
+    };
+    Ok(match status {
+        None => 0,
+        Some(status) => status.code().unwrap_or_else(|| {
+            use std::os::unix::process::ExitStatusExt;
+            128 + status.signal().unwrap_or(0)
+        }),
+    })
+}
+
+fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set")?;
+    let invocation = cli::parse(arguments, &home)?;
     progress("Connecting...")?;
     let repository = if invocation.is_local() {
         invocation.repository.clone()

@@ -42,7 +42,12 @@ pub struct Controller {
     background_error: Option<String>,
     /// Values the last deployment generated on its target and stored.
     last_generated: Vec<String>,
+    /// Runs operator keypair generators; tests replace it.
+    keypair_runner: KeypairRunner,
 }
+
+pub type KeypairRunner =
+    fn(&nix_secrets_core::KeypairGenerator) -> Result<crate::keypair::Keypair, String>;
 
 enum BackgroundUpdate {
     Rows(Vec<Row>),
@@ -54,6 +59,12 @@ enum BackgroundUpdate {
 impl Controller {
     pub fn uses_one_password(&self) -> bool {
         self.provider.uses_one_password()
+    }
+
+    /// Replaces the program that runs keypair generators, for tests.
+    pub fn with_keypair_runner(mut self, runner: KeypairRunner) -> Self {
+        self.keypair_runner = runner;
+        self
     }
 
     /// Values the last deployment generated on its target, for the notice.
@@ -82,6 +93,7 @@ impl Controller {
             approvals_ready: false,
             background_error: None,
             last_generated: Vec::new(),
+            keypair_runner: crate::keypair::generate,
         })
     }
 
@@ -153,6 +165,11 @@ impl Controller {
                             create.push(identifier.clone());
                         }
                     }
+                }
+                LeafSpec::Operator(_) => {
+                    return Err(format!(
+                        "{identifier} is operator-only and is never deployed"
+                    ))
                 }
                 LeafSpec::Generated(spec) => {
                     if spec.generated_secret.secret_type
@@ -293,6 +310,11 @@ impl Controller {
                     version_id: STANDARD.encode(&stored.version_id),
                     contents_base64: STANDARD.encode(&value),
                 }),
+                LeafSpec::Operator(_) => {
+                    return Err(format!(
+                        "{identifier} is operator-only and is never deployed"
+                    ))
+                }
                 LeafSpec::Generated(_) => {
                     let contribution = crate::task::fresh_contribution()
                         .map_err(|error| format!("OS randomness failed: {error}"))?;
@@ -340,6 +362,7 @@ impl Controller {
 mod background;
 mod generate;
 mod metadata;
+mod operator;
 mod public_info;
 mod registration;
 mod ssh_validation;

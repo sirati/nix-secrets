@@ -166,6 +166,14 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         (choice @ Mode::GenerateChoice { .. }, event) => {
             return generated::choose(model, writer, choice, event)
         }
+        (Mode::KeypairConfirm { path, .. }, UiEvent::Character('y')) => {
+            match writer.generate_keypair(&path) {
+                Ok(()) => model.inform(format!("generated keypair for {path}")),
+                Err(message) => fail_unless_queued(model, message),
+            }
+        }
+        (Mode::KeypairConfirm { .. }, UiEvent::Escape) => {}
+        (confirm @ Mode::KeypairConfirm { .. }, _) => model.mode = confirm,
         (Mode::Browse, UiEvent::Character('d')) => match model.selected().cloned() {
             Some(row) if row.is_secret() && row.is_set => {
                 model.mode = Mode::DeleteConfirm {

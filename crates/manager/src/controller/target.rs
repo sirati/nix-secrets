@@ -10,6 +10,11 @@ pub(super) fn expected_target(
     for identifier in &request.secrets {
         let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
         match schema.leaf(&path).map_err(|error| error.to_string())? {
+            LeafSpec::Operator(_) => {
+                return Err(format!(
+                    "{identifier} is operator-only and is never deployed"
+                ))
+            }
             LeafSpec::Stored(spec) => secrets.push(ExpectedSecret {
                 identifier: identifier.clone(),
                 generator: super::unset::expected_generator(&spec),

@@ -198,6 +198,29 @@ let
     else
       generator;
 
+  # A command run on the operator's machine: nix run <installable> -- <args>.
+  # It writes the private key to stdout and the public key to fd 3.
+  validateKeypairGenerator =
+    generator:
+    let
+      extra = builtins.filter (name: !(builtins.elem name [ "installable" "args" ])) (attrNames generator);
+      args = generator.args or [ ];
+    in
+    if !isAttrs generator then
+      throw "generator must be an attribute set"
+    else if extra != [ ] then
+      throw "generator has unknown fields: ${lib.concatStringsSep ", " extra}"
+    else if
+      !(builtins.isString (generator.installable or null))
+      || generator.installable == ""
+      || lib.hasPrefix "-" generator.installable
+    then
+      throw "generator.installable must be a flake installable"
+    else if !(builtins.isList args && builtins.all builtins.isString args && builtins.length args <= 64) then
+      throw "generator.args must be a list of at most 64 strings"
+    else
+      generator // { inherit args; };
+
   validateGeneratedSecret =
     serviceName: generated:
     let
@@ -293,5 +316,6 @@ in
     validateConsumerConstraints
     validateGeneratedSecret
     validateValueGenerator
+    validateKeypairGenerator
     ;
 }

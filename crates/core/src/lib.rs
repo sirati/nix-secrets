@@ -17,9 +17,9 @@ pub use profiles::{
 };
 pub use schema::{
     ConsumerConstraints, DeployGenerator, Destination, GeneratedSecret, GeneratedSecretSpec,
-    GeneratedSecretType, LeafSpec, NotGeneratable, RandomEncoding, Schema, SchemaError,
-    SchemaLoadError, SecretKind, SecretPath, SecretSpec, StorageBoxBootstrap, ValueGenerator,
-    ValueType,
+    GeneratedSecretType, KeypairGenerator, LeafSpec, NotGeneratable, OperatorSpec, RandomEncoding,
+    Schema, SchemaError, SchemaLoadError, SecretKind, SecretPath, SecretSpec, StorageBoxBootstrap,
+    ValueGenerator, ValueType,
 };
 pub use store::{
     CommitState, EncryptedSecret, GeneratedPublicKey, PublicInfoRecord, SecretStore, StoreError,

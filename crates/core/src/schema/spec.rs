@@ -46,4 +46,24 @@ pub struct GeneratedSecretSpec {
 pub enum LeafSpec {
     Stored(SecretSpec),
     Generated(GeneratedSecretSpec),
+    Operator(super::OperatorSpec),
+}
+
+impl LeafSpec {
+    /// Encryption recipients as (identifier, SSH public key) pairs.
+    pub fn recipients(&self) -> (&[String], &[String]) {
+        match self {
+            Self::Stored(spec) => (&spec.recipient_ids, &spec.recipient_public_keys),
+            Self::Generated(spec) => (&spec.recipient_ids, &spec.recipient_public_keys),
+            Self::Operator(spec) => (&spec.recipient_ids, &spec.recipient_public_keys),
+        }
+    }
+
+    pub fn recipient_names(&self) -> &[String] {
+        match self {
+            Self::Stored(spec) => &spec.recipient_names,
+            Self::Generated(spec) => &spec.recipient_names,
+            Self::Operator(spec) => &spec.recipient_names,
+        }
+    }
 }

@@ -39,6 +39,10 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
             Err(error) => Completion::Failed(error),
         },
         Command::BulkGenerate { .. } => unreachable!("bulk execution emits progress"),
+        Command::GenerateKeypair(path) => match controller.generate_keypair(&path) {
+            Ok(()) => Completion::KeypairGenerated(path),
+            Err(error) => Completion::Failed(error),
+        },
         Command::Approval(accepted) => match controller.approval(accepted) {
             Ok(None) if accepted => Completion::Deployed {
                 generated: controller.take_generated(),

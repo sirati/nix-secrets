@@ -28,6 +28,8 @@ pub enum RowCategory {
     Password,
     Key,
     PublicInfo,
+    /// Operator-only: stored for the operator, never deployed.
+    Operator,
     Other,
 }
 
@@ -219,6 +221,35 @@ fn visit(
             })
         }
         SecretNode::Generated(_) => {}
+        SecretNode::Operator(leaf) => output.push(Row {
+            depth: depth.saturating_sub(1),
+            name: leaf
+                .identity
+                .as_ref()
+                .map(|identity| identity.name.clone())
+                .unwrap_or_else(|| path.rsplit('.').next().unwrap_or(path).to_owned()),
+            display_segments: child_path(
+                display_path,
+                leaf.identity
+                    .as_ref()
+                    .map(|identity| identity.name.as_str())
+                    .unwrap_or_else(|| path.rsplit('.').next().unwrap_or(path)),
+            ),
+            path: Some(path.to_owned()),
+            is_set: set.contains(path),
+            is_task: false,
+            // `g` runs the declared keypair generator.
+            can_generate: leaf.generator.is_some(),
+            // `p` copies the generated public key.
+            can_copy_public: leaf.generator.is_some(),
+            output_is_set: None,
+            description: leaf.description.clone(),
+            category: RowCategory::Operator,
+            human_facing: leaf.human_facing,
+            external_input_required: false,
+            identity: leaf.identity.clone(),
+            presentation: leaf.presentation.clone(),
+        }),
         SecretNode::Branch(children) => {
             visit_children(children, path, depth, display_path, set, public_ids, output);
         }

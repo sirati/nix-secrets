@@ -34,11 +34,11 @@ Tab    In the entry field: toggle 'Autosave unset on paste'. When on, pasting
        label toggles it
 Ctrl+V Read the clipboard directly over X11 or Xwayland, without opening a
        window; works when the terminal's own paste fails
-g  Generate password or passphrase for one field
+g  Generate password or passphrase; on an operator key, run its generator
 G  Generate all missing passwords; keeps existing values
 r  Reveal selected value
 c  Copy the selected value
-p  Copy the public half of a stored OpenSSH private key
+p  Copy the public half of an OpenSSH private key or an operator key
 d  Delete selected value after confirmation
 Replacing a set value asks after you enter the new one and press Enter.
 Ctrl+R  In the entry field or that question: reveal the current stored value;

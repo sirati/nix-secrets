@@ -58,6 +58,12 @@ pub(super) fn validate_named_recipients(
             &leaf.recipient_public_keys,
             registry,
         ),
+        SecretNode::Operator(leaf) => check_recipient_names(
+            host,
+            &leaf.recipient_names,
+            &leaf.recipient_public_keys,
+            registry,
+        ),
     }
 }
 

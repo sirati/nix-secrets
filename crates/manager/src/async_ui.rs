@@ -26,6 +26,7 @@ enum Command {
         paths: Vec<String>,
         kind: GenerateKind,
     },
+    GenerateKeypair(String),
     Approval(bool),
     SaveProfile {
         name: String,
@@ -293,6 +294,11 @@ impl SecretWriter for AsyncWriter {
         Err(OPERATION_QUEUED.into())
     }
 
+    fn generate_keypair(&mut self, path: &str) -> Result<(), String> {
+        self.queue(Command::GenerateKeypair(path.into()))?;
+        Err(OPERATION_QUEUED.into())
+    }
+
     fn generate_missing(&mut self, paths: Vec<String>, kind: GenerateKind) -> Result<(), String> {
         self.queue(Command::BulkGenerate { paths, kind })
     }
@@ -350,6 +356,7 @@ fn describe(command: &Command, one_password: bool) -> Option<crate::model::Activ
         Command::Write { path, .. } => (format!("Encrypting and saving {path}"), true),
         Command::Delete(path) => (format!("Deleting {path}"), false),
         Command::Generate { path, .. } => (format!("Generating {path}"), false),
+        Command::GenerateKeypair(path) => (format!("Running the generator for {path}"), false),
         Command::BulkGenerate { paths, .. } => (
             format!("Generating {} missing passwords", paths.len()),
             false,

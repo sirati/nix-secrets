@@ -102,6 +102,11 @@
               secretsLib = self.lib;
             };
             pkgs.runCommand "value-generator-test" { } "touch $out";
+          operator-leaf =
+            assert import ./nix/tests/operator-leaf.nix {
+              secretsLib = self.lib;
+            };
+            pkgs.runCommand "operator-leaf-test" { } "touch $out";
           real-age = pkgs.callPackage ./nix/checks/real-age.nix { };
           inherit (self.packages.${system}) secrets-ready-waiter;
           secrets-ready-waiter-vm = import ./nix/tests/secrets-ready-waiter.nix {

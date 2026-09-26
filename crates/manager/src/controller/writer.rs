@@ -42,8 +42,26 @@ impl SecretWriter for Controller {
         }
         self.rows().map(Some).map_err(|error| error.to_string())
     }
+    fn generate_keypair(&mut self, path: &str) -> Result<(), String> {
+        Controller::generate_keypair(self, path)
+    }
+
     fn copy_public(&mut self, path: &str) -> Result<(), String> {
         let parsed = SecretPath::parse(path).map_err(|error| error.to_string())?;
+        if let LeafSpec::Operator(_) = self
+            .schema
+            .leaf(&parsed)
+            .map_err(|error| error.to_string())?
+        {
+            // Printable keys are copied as text, binary ones as base64.
+            let public = self.operator_public_key(&parsed)?;
+            return match std::str::from_utf8(&public) {
+                Ok(text) if !text.chars().any(|c| c.is_control() && c != '\n') => {
+                    self.copy(text.trim_end().as_bytes())
+                }
+                _ => self.copy(STANDARD.encode(&public).as_bytes()),
+            };
+        }
         let LeafSpec::Stored(spec) = self
             .schema
             .leaf(&parsed)
@@ -73,7 +91,7 @@ impl SecretWriter for Controller {
         }
         if !matches!(
             self.schema.leaf(&path).map_err(|error| error.to_string())?,
-            LeafSpec::Stored(_) | LeafSpec::Generated(_)
+            LeafSpec::Stored(_) | LeafSpec::Generated(_) | LeafSpec::Operator(_)
         ) {
             return Err("not a stored secret".into());
         }
@@ -122,6 +140,9 @@ impl SecretWriter for Controller {
                 spec.consumer_constraints,
                 spec.external_input_required,
             ),
+            LeafSpec::Operator(_) => {
+                return Err("operator keys are generated with their declared generator".into())
+            }
         };
         if external_input_required {
             return Err("this value must be supplied from the external system".into());
@@ -172,6 +193,7 @@ impl SecretWriter for Controller {
         let (value_type, constraints) = match &spec {
             LeafSpec::Stored(spec) => (spec.value_type, spec.consumer_constraints.as_ref()),
             LeafSpec::Generated(spec) => (spec.value_type, spec.consumer_constraints.as_ref()),
+            LeafSpec::Operator(_) => (None, None),
         };
         if let Err(error) = validate_password_value(value_type, constraints, &value) {
             return Err((error, value));
@@ -183,10 +205,7 @@ impl SecretWriter for Controller {
                 return Err((error, value));
             }
         }
-        let (recipient_ids, recipient_public_keys) = match &spec {
-            LeafSpec::Stored(spec) => (&spec.recipient_ids, &spec.recipient_public_keys),
-            LeafSpec::Generated(spec) => (&spec.recipient_ids, &spec.recipient_public_keys),
-        };
+        let (recipient_ids, recipient_public_keys) = spec.recipients();
         let recipients = recipient_ids
             .iter()
             .zip(recipient_public_keys)

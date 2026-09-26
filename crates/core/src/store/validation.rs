@@ -42,6 +42,14 @@ pub(super) fn validate_public_metadata(
         LeafSpec::Generated(spec) => {
             spec.generated_secret.output.content_type.as_deref() == Some("openssh-private-key")
         }
+        LeafSpec::Operator(spec) => {
+            // The generated public half, base64 of the generator's fd 3 bytes.
+            return match public_key {
+                None => Ok(()),
+                Some(key) if spec.generator.is_some() && valid_operator_public_key(key) => Ok(()),
+                Some(_) => Err(StoreError::InvalidPublicKey),
+            };
+        }
     };
     if public_key
         .is_some_and(|key| !private_key || !crate::schema::validation::valid_ssh_public_key(key))
@@ -49,6 +57,16 @@ pub(super) fn validate_public_metadata(
         return Err(StoreError::InvalidPublicKey);
     }
     Ok(())
+}
+
+/// Largest public key an operator generator may return (ML-DSA-87 is 2592).
+pub const MAX_OPERATOR_PUBLIC_KEY_BYTES: usize = 64 * 1024;
+
+fn valid_operator_public_key(key: &str) -> bool {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(key)
+        .is_ok_and(|bytes| !bytes.is_empty() && bytes.len() <= MAX_OPERATOR_PUBLIC_KEY_BYTES)
 }
 
 pub(super) fn validate_record(record: &EncryptedSecret) -> Result<(), StoreError> {

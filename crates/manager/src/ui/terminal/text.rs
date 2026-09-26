@@ -57,6 +57,10 @@ pub(super) fn prompt(model: &Model) -> String {
         },
         Mode::Settings { .. } => unreachable!("settings render as a selector"),
         Mode::GenerateChoice { .. } => "Generate p: password · w: passphrase · Esc: cancel".into(),
+        Mode::KeypairConfirm { path, replacing } => format!(
+            "Run the declared generator for {path}? It runs `nix run` locally; the private key is encrypted at once and the public key is stored in plain.{}\ny: generate · Esc: cancel",
+            if *replacing { " The current key will be REPLACED." } else { "" }
+        ),
         Mode::BulkGenerateConfirm { paths } => format!("Generate all {} missing password values? Existing values will be kept.\np: passwords · w: passphrases · Esc: cancel", paths.len()),
         Mode::BulkProgress { total, done } => format!("Generated {done} of {total} missing passwords.\nEsc: hide progress; generation continues"),
         Mode::GeneratedPreview {
@@ -302,6 +306,7 @@ pub(super) fn selected_text(model: &Model, width: u16) -> String {
             crate::tree::RowCategory::Key if row.can_copy_public => "private key",
             crate::tree::RowCategory::Key => "key",
             crate::tree::RowCategory::PublicInfo => "public info",
+            crate::tree::RowCategory::Operator => "operator key, never deployed",
             crate::tree::RowCategory::Other => "value",
         }
     };

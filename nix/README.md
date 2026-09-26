@@ -100,6 +100,11 @@ on the target during deployment unless they set `externalInputRequired = true`
 or `generateOnDeploy = false`. See "Values generated at deployment" in the top
 level README for the `valueGenerator` format.
 
+`kind = "operator"` declares an operator-only value with an optional
+`generator = { installable; args; }`; it is never deployed. `lib.operatorPublicKey
+STORE IDENTIFIER` returns its stored public key as base64, or null. See
+"Operator-only secrets" in the top level README.
+
 Only consumer compatibility limits belong in `consumerConstraints`. For example,
 if a program rejects values longer than 64 characters, declare
 `consumerConstraints.cannotHandleLongerThan = 64;`. The optional fields are

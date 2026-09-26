@@ -34,6 +34,30 @@ by the backend from that account's home directory. It is not expanded by a
 remote shell. The launcher uses a fixed remote command and protocol; it never
 constructs a shell command from these arguments.
 
+### Using a secret in another program
+
+```text
+nix-secrets pipe-secret [OPTIONS] IDENTIFIER -- COMMAND [ARGUMENT ...]
+nix-secrets pipe-secret [OPTIONS] IDENTIFIER
+```
+
+`pipe-secret` decrypts one stored value through the normal provider, including
+the one-shot 1Password launcher, and hands it on without writing it to disk.
+With `-- COMMAND` it runs the command with the value on its stdin and exits
+with the command's status. Without it, the value is written to stdout for a
+pipeline; stdout must not be a terminal, and nothing else is ever written to
+stdout. The repository defaults to the working directory; `--repository PATH`,
+`--secret-identity PATH` and `--1password-shared-session` work as for the TUI.
+
+```console
+$ nix-secrets pipe-secret host.services.nmbl.generation-key -- \
+    nmbl-sign sign --key-stdin --domain generation image.efi
+$ nix-secrets pipe-secret host.services.nmbl.generation-key | nmbl-sign sign --key-stdin …
+```
+
+The second form is what a `keyCommand = [ "nix-secrets" "pipe-secret" "<id>" ]`
+option runs.
+
 ## Declared secret tree
 
 The program evaluates the repository and consumes this shape:
@@ -94,6 +118,66 @@ The declaration can name SSH encryption recipients once and select them by
 name for the whole tree, a subtree, or a leaf. Recipient rotations retain
 earlier key identities in the TOML registry so existing ciphertext remains
 decryptable. Transport host keys authenticate connections separately.
+
+### Operator-only secrets
+
+A leaf with `kind = "operator"` is stored encrypted for its recipients like any
+other secret, but it has no destination. It never enters a host manifest, a
+deployment request, a readiness waiter, or deployment's missing-value checks.
+Use it for keys only the operator uses, such as image or closure signing keys.
+Set, reveal, paste and delete work as for other values. The TUI shows it as an
+operator key, in the Keys view.
+
+An operator leaf may declare a keypair generator. nix-secrets stays
+independent of any key tool: the consumer names a flake installable and its
+arguments, and the TUI's `g` runs it on the operator's machine only when asked:
+
+```nix
+services.nixSecrets.services.nmbl.secrets.generation-key = {
+  kind = "operator";
+  description = "NMBL boot generation signing key";
+  generator = {
+    installable = "github:sirati/siratis-nmbl-bootloader?dir=sirati-nmbl/nmbl-init-rs#nmbl-sign";
+    args = [ "keygen" "--alg" "ml-dsa-65" "--stdio" ];
+  };
+};
+```
+
+The generator contract:
+
+- it is run as `nix run INSTALLABLE -- ARGS…` with an empty stdin; `args`
+  are public schema data and must not contain secrets;
+- it writes the private key, byte for byte as it should be stored, to stdout
+  (at most 1 MiB);
+- it writes the public key, byte for byte, to file descriptor 3 (at most
+  64 KiB);
+- it writes neither to disk and exits 0; stderr is shown only on failure.
+
+The test suite checks this contract with a scripted generator. Set
+`NIX_SECRETS_NMBL_SIGN=/path/to/nmbl-sign` when running `cargo test` to also
+generate an ML-DSA-65 key with NMBL, sign through `pipe-secret` and
+`nmbl-sign sign --key-stdin`, and verify with the stored public key.
+
+nix-secrets reads both pipes concurrently, encrypts the private key to the
+leaf's recipients, and stores the public key in plain, base64-encoded, as
+`public_key` beside the ciphertext in `nix-secrets.toml`. `p` copies it: as
+text when it is printable, otherwise as base64. The consumer can reference it
+from Nix without decrypting anything:
+
+```nix
+let
+  # Base64 of the generator's fd 3 output, or null while the key is unset.
+  encoded = nix-secrets.lib.operatorPublicKey ./nix-secrets.toml
+    "server-hetzner2.services.nmbl.generation-key";
+in
+{
+  # A binary key, such as NMBL's raw ML-DSA public key, is decoded in a build
+  # step; nothing secret is involved.
+  boot.nmbl.signing.publicKeys = lib.optional (encoded != null) (
+    pkgs.runCommand "nmbl-generation-key.pub" { } "echo ${encoded} | base64 -d > $out"
+  );
+}
+```
 
 ## Backend
 

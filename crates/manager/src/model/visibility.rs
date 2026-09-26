@@ -27,7 +27,9 @@ impl Model {
             let category = match self.filter {
                 ViewFilter::Required => row.external_input_required,
                 ViewFilter::All => true,
-                ViewFilter::Keys => row.category == RowCategory::Key,
+                ViewFilter::Keys => {
+                    matches!(row.category, RowCategory::Key | RowCategory::Operator)
+                }
                 ViewFilter::Passwords => row.category == RowCategory::Password,
                 ViewFilter::PublicInfo => row.category == RowCategory::PublicInfo,
             };

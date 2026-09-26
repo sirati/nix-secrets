@@ -96,6 +96,14 @@ pkgs.testers.runNixOSTest {
           };
         };
       };
+      # Operator-only: must never reach the host.
+      services.signing.secrets.generation-key = {
+        kind = "operator";
+        generator = {
+          installable = "github:sirati/siratis-nmbl-bootloader?dir=sirati-nmbl/nmbl-init-rs#nmbl-sign";
+          args = [ "keygen" "--alg" "ml-dsa-65" "--stdio" ];
+        };
+      };
       services.keys.secrets.local-key.generatedSecret = {
         type = "local-ssh-key";
         output = {
@@ -387,6 +395,8 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("sshd.service")
     machine.wait_for_unit("nix-secrets-deployer.socket")
     machine.succeed("systemctl show ${publicDefaultUnit} -p Result --value | grep '^success$'")
+    machine.fail("grep -q generation-key /etc/nix-secrets/manifest.json")
+    machine.fail("systemctl cat secrets-ready-waiter-signing.service")
     machine.succeed("runuser -u nobody -- cat /persistent/public-info/storage-box/known-hosts | grep '\\[box.example\\]:23 ssh-ed25519 '")
     assert "secrets-ready-waiter-backup.service" not in machine.succeed("systemctl list-unit-files 'secrets-ready-waiter-*.service' --no-legend")
     old_public = machine.succeed("cat /persistent/public-info/storage-box/known-hosts")

@@ -84,9 +84,11 @@ let
   };
   evaluatedHost = evaluated.${cfg.hostName};
   serviceGroups = builtins.removeAttrs evaluatedHost [ "metadata" ];
-  leaves = lib.concatMap (
-    services: lib.concatMap secretsLib.collectLeaves (builtins.attrValues services)
-  ) (builtins.attrValues serviceGroups);
+  leaves = builtins.filter (leaf: !(secretsLib.isOperatorLeaf leaf)) (
+    lib.concatMap (
+      services: lib.concatMap secretsLib.collectLeaves (builtins.attrValues services)
+    ) (builtins.attrValues serviceGroups)
+  );
   destinationPaths = map (
     leaf:
     if leaf.kind or null == "generated" then leaf.generatedSecret.output.path else leaf.destination.path
@@ -99,7 +101,7 @@ let
         node = tree.${name};
         identifier = "${prefix}.${name}";
       in
-      if node ? destination || node ? generatedSecret then
+      if secretsLib.isLeaf node then
         lib.optional ((node.kind or "secret") == "public-info" && (node.installDefaultIfMissing or false)) {
           inherit identifier;
           leaf = node;
@@ -233,8 +235,17 @@ in
       }
     ];
     services.nixSecrets.evaluated = evaluated;
+    # Operator-only leaves never reach the host.
     system.build.nixSecretsManifest = pkgs.writeText "nix-secrets-${cfg.hostName}.json" (
-      builtins.toJSON evaluated
+      builtins.toJSON (
+        builtins.mapAttrs (
+          _: host:
+          builtins.mapAttrs (
+            group: services:
+            if group == "metadata" then services else secretsLib.withoutOperatorLeaves services
+          ) host
+        ) evaluated
+      )
     );
     environment.etc."nix-secrets/manifest.json".source = config.system.build.nixSecretsManifest;
     systemd.services = lib.listToAttrs (map defaultUnit publicDefaults);

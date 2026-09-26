@@ -29,7 +29,9 @@ let
   entryData =
     entry:
     let
-      leaves = builtins.filter (leaf: leaf.kind != "public-info") (secretsLib.collectLeaves entry.tree);
+      leaves = builtins.filter (leaf: leaf.kind != "public-info" && leaf.kind != "operator") (
+        secretsLib.collectLeaves entry.tree
+      );
       destinations = map (
         leaf: if leaf.kind == "generated" then leaf.generatedSecret.output else leaf.destination
       ) leaves;

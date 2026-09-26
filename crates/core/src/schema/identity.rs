@@ -77,6 +77,12 @@ fn collect(
             path,
             index,
         )?,
+        SecretNode::Operator(leaf) => insert(
+            leaf.identity.as_ref(),
+            leaf.presentation.as_ref(),
+            path,
+            index,
+        )?,
     }
     Ok(())
 }

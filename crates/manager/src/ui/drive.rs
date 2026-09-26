@@ -161,6 +161,12 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             }
         }
         Completion::Copied(message) => model.inform(message),
+        Completion::KeypairGenerated(path) => {
+            set_row(model, &path, true);
+            model.inform(format!(
+                "Generated keypair for {path}. p copies its public key."
+            ));
+        }
         Completion::Failed(message) => model.fail(message),
         Completion::Generated {
             path,

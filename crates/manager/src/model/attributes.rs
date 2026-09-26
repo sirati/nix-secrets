@@ -170,6 +170,7 @@ impl Attribute {
                         RowCategory::Password => "passphrase",
                         RowCategory::Key => "key",
                         RowCategory::PublicInfo => "public-key",
+                        RowCategory::Operator => "operator-key",
                         RowCategory::Other | RowCategory::Branch => "value",
                     }
                     .into()
