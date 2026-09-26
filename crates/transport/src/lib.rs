@@ -8,11 +8,12 @@ mod protocol;
 mod receiver;
 
 pub use deployment::{
-    read_wire_json, serve_deployment, write_wire_json, DeployEntry, DeploymentBatch,
+    read_wire_json, serve_deployment, write_wire_json, AppliedOutput, DeployEntry, DeploymentBatch,
     DeploymentClient, DeploymentError, DeploymentResult, DeploymentSelection, Destination,
-    ExpectedSecret, ExpectedTarget, ExpectedTask, PreparedDeployment, PublicInfoAttestation,
-    StorageBoxBootstrap, TargetSecret, TargetState, TargetTask, TaskEntry, LOCAL_SSH_KEY,
-    STORAGE_BOX_SSH_KEY,
+    ExpectedSecret, ExpectedTarget, ExpectedTask, GenerateEntry, GeneratedRecord,
+    PreparedDeployment, PublicInfoAttestation, StorageBoxBootstrap, TargetSecret, TargetState,
+    TargetTask, TaskEntry, DEPLOYMENT_PROTOCOL_VERSION, LEGACY_DEPLOYMENT_PROTOCOL_VERSION,
+    LOCAL_SSH_KEY, STORAGE_BOX_SSH_KEY,
 };
 pub use hostkey::{
     Decision, HostIdentity, HostKeyDecision, HostKeyError, HostKeyPreflight, HostKeyStatus,

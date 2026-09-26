@@ -19,6 +19,7 @@ fn target_secret(identifier: &str) -> TargetSecret {
         destination: destination(),
         public_info: None,
         current_version_id: None,
+        generator: None,
     }
 }
 fn task(identifier: &str, version: Option<&str>) -> TargetTask {
@@ -42,7 +43,7 @@ fn task(identifier: &str, version: Option<&str>) -> TargetTask {
 }
 fn state(secret_ids: &[&str], tasks: Vec<TargetTask>) -> TargetState {
     TargetState {
-        protocol_version: 1,
+        protocol_version: DEPLOYMENT_PROTOCOL_VERSION,
         hostname: "host".into(),
         secrets: secret_ids.iter().map(|id| target_secret(id)).collect(),
         tasks,
@@ -58,6 +59,7 @@ fn expected(secret_ids: &[&str], tasks: &[TargetTask]) -> ExpectedTarget {
                 recipient_ids: vec!["key".into()],
                 destination: destination(),
                 public_info: None,
+                generator: None,
             })
             .collect(),
         tasks: tasks
@@ -97,20 +99,22 @@ fn task_contribution_is_exactly_32_bytes() {
     let target = state(&[], vec![task(id, None)]);
     for invalid in [vec![0; 31], vec![0; 33]] {
         let batch = DeploymentBatch {
-            version: 1,
+            version: DEPLOYMENT_PROTOCOL_VERSION,
             requested_identifiers: vec![],
             entries: vec![],
             requested_tasks: vec![id.into()],
             tasks: vec![task_entry(id, "v1", &invalid)],
+            generate: vec![],
         };
         assert!(validate_batch(&batch, &target).is_err());
     }
     let valid = DeploymentBatch {
-        version: 1,
+        version: DEPLOYMENT_PROTOCOL_VERSION,
         requested_identifiers: vec![],
         entries: vec![],
         requested_tasks: vec![id.into()],
         tasks: vec![task_entry(id, "v1", &[7; 32])],
+        generate: vec![],
     };
     assert!(validate_batch(&valid, &target).is_ok());
 }
@@ -127,11 +131,12 @@ fn local_key_task_requires_no_bootstrap_password() {
     let mut entry = task_entry(id, "local-generated-v1", &[7; 32]);
     entry.password_base64.clear();
     let mut batch = DeploymentBatch {
-        version: 1,
+        version: DEPLOYMENT_PROTOCOL_VERSION,
         requested_identifiers: vec![],
         entries: vec![],
         requested_tasks: vec![id.into()],
         tasks: vec![entry],
+        generate: vec![],
     };
     assert!(validate_batch(&batch, &target).is_ok());
     batch.tasks[0].password_base64 = STANDARD.encode(b"forbidden");
@@ -143,11 +148,12 @@ fn retry_of_current_version_is_accepted_but_selection_cannot_be_substituted() {
     let id = "host.services.backup.bootstrap";
     let target = state(&[], vec![task(id, Some("v1"))]);
     let retry = DeploymentBatch {
-        version: 1,
+        version: DEPLOYMENT_PROTOCOL_VERSION,
         requested_identifiers: vec![],
         entries: vec![],
         requested_tasks: vec![id.into()],
         tasks: vec![task_entry(id, "v1", &[9; 32])],
+        generate: vec![],
     };
     assert!(validate_batch(&retry, &target).is_ok());
     let mut substituted = retry;
@@ -180,18 +186,22 @@ fn server_sends_selected_task_then_applies_exact_batch() {
         task_identifiers: vec![id.into()],
     };
     let batch = DeploymentBatch {
-        version: 1,
+        version: DEPLOYMENT_PROTOCOL_VERSION,
         requested_identifiers: vec![],
         entries: vec![],
         requested_tasks: vec![id.into()],
         tasks: vec![task_entry(id, "v1", &[3; 32])],
+        generate: vec![],
     };
     let mut input = Vec::new();
     write_wire_json(&mut input, &selection).unwrap();
     write_wire_json(&mut input, &batch).unwrap();
     let mut output = Vec::new();
     serve_deployment(input.as_slice(), &mut output, target.clone(), |_| {
-        Ok((BTreeMap::from([(id.into(), "v1".into())]), BTreeMap::new()))
+        Ok(AppliedOutput {
+            versions: BTreeMap::from([(id.into(), "v1".into())]),
+            ..Default::default()
+        })
     })
     .unwrap();
     let mut cursor = output.as_slice();
@@ -199,5 +209,140 @@ fn server_sends_selected_task_then_applies_exact_batch() {
     assert!(matches!(
         read_wire_json::<DeploymentResult>(&mut cursor).unwrap(),
         DeploymentResult::Applied { .. }
+    ));
+}
+
+fn generatable(identifier: &str) -> TargetSecret {
+    let mut secret = target_secret(identifier);
+    secret.generator = Some(r#"{"kind":"password"}"#.into());
+    secret
+}
+
+fn generation_batch(entries: Vec<DeployEntry>, generate: &[&str]) -> DeploymentBatch {
+    DeploymentBatch {
+        version: DEPLOYMENT_PROTOCOL_VERSION,
+        requested_identifiers: entries
+            .iter()
+            .map(|item| item.identifier.clone())
+            .chain(generate.iter().map(|id| id.to_string()))
+            .collect(),
+        entries,
+        requested_tasks: vec![],
+        tasks: vec![],
+        generate: generate
+            .iter()
+            .map(|id| GenerateEntry {
+                identifier: (*id).into(),
+                client_contribution_base64: STANDARD.encode([1_u8; 32]),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn generation_is_limited_to_values_the_target_declares_generatable() {
+    let fixed = "host.services.mail.fixed";
+    let generated = "host.services.mail.generated";
+    let target = TargetState {
+        protocol_version: DEPLOYMENT_PROTOCOL_VERSION,
+        hostname: "host".into(),
+        secrets: vec![target_secret(fixed), generatable(generated)],
+        tasks: vec![],
+    };
+    let supplied = DeployEntry {
+        identifier: fixed.into(),
+        version_id: "v1".into(),
+        contents_base64: STANDARD.encode(b"x"),
+    };
+    assert!(validate_batch(
+        &generation_batch(vec![supplied.clone()], &[generated]),
+        &target
+    )
+    .is_ok());
+    // A value without a target generator must be supplied.
+    assert!(validate_batch(&generation_batch(vec![], &[fixed, generated]), &target).is_err());
+    // A value cannot be both supplied and generated.
+    let mut both = supplied.clone();
+    both.identifier = generated.into();
+    assert!(validate_batch(&generation_batch(vec![both], &[generated]), &target).is_err());
+    // Protocol 1 targets cannot generate.
+    let mut legacy = target.clone();
+    legacy.protocol_version = LEGACY_DEPLOYMENT_PROTOCOL_VERSION;
+    let mut batch = generation_batch(vec![supplied], &[generated]);
+    batch.version = LEGACY_DEPLOYMENT_PROTOCOL_VERSION;
+    assert!(validate_batch(&batch, &legacy).is_err());
+}
+
+#[test]
+fn generator_descriptions_must_agree_before_generation() {
+    let id = "host.services.mail.generated";
+    let target = TargetState {
+        protocol_version: DEPLOYMENT_PROTOCOL_VERSION,
+        hostname: "host".into(),
+        secrets: vec![generatable(id)],
+        tasks: vec![],
+    };
+    let ids = [id.to_string()];
+    let mut expected = expected(&[id], &[]);
+    // Set values still deploy whatever the target would generate.
+    assert!(validate_target(&target, &expected).is_ok());
+    assert!(verify_generators(&target, &expected, &ids).is_err());
+    expected.secrets[0].generator = Some(r#"{"kind":"password","constraints":{}}"#.into());
+    assert!(verify_generators(&target, &expected, &ids).is_err());
+    expected.secrets[0].generator = Some(r#"{"kind":"password"}"#.into());
+    assert!(verify_generators(&target, &expected, &ids).is_ok());
+    let mut older = target;
+    older.secrets[0].generator = None;
+    assert!(validate_target(&older, &expected).is_ok());
+    assert!(verify_generators(&older, &expected, &ids).is_err());
+}
+
+#[test]
+fn server_rejects_an_apply_that_omits_generated_records() {
+    let id = "host.services.mail.generated";
+    let target = TargetState {
+        protocol_version: DEPLOYMENT_PROTOCOL_VERSION,
+        hostname: "host".into(),
+        secrets: vec![generatable(id)],
+        tasks: vec![],
+    };
+    let run = |records: BTreeMap<String, GeneratedRecord>| {
+        let mut input = Vec::new();
+        write_wire_json(
+            &mut input,
+            &DeploymentSelection {
+                identifiers: vec![id.into()],
+                task_identifiers: vec![],
+            },
+        )
+        .unwrap();
+        write_wire_json(&mut input, &generation_batch(vec![], &[id])).unwrap();
+        let mut output = Vec::new();
+        serve_deployment(input.as_slice(), &mut output, target.clone(), |batch| {
+            assert_eq!(batch.generate.len(), 1);
+            Ok(AppliedOutput {
+                generated_records: records,
+                ..Default::default()
+            })
+        })
+        .unwrap();
+        let mut cursor = output.as_slice();
+        read_wire_json::<TargetState>(&mut cursor).unwrap();
+        read_wire_json::<DeploymentResult>(&mut cursor).unwrap()
+    };
+    assert!(matches!(
+        run(BTreeMap::new()),
+        DeploymentResult::Rejected { .. }
+    ));
+    let record = GeneratedRecord {
+        format_version: 1,
+        version_id_base64: STANDARD.encode([0_u8; 16]),
+        recipient_ids: vec!["key".into()],
+        age_ciphertext_base64: STANDARD.encode(b"age"),
+        adopted: false,
+    };
+    assert!(matches!(
+        run(BTreeMap::from([(id.to_string(), record)])),
+        DeploymentResult::Applied { generated_records, .. } if generated_records.len() == 1
     ));
 }

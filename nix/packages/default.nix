@@ -1,4 +1,10 @@
-{ lib, rustPlatform, git }:
+{
+  lib,
+  rustPlatform,
+  git,
+  age,
+  openssh,
+}:
 
 rustPlatform.buildRustPackage {
   pname = "nix-secrets";
@@ -6,8 +12,13 @@ rustPlatform.buildRustPackage {
   src = ../..;
   cargoLock.lockFile = ../../Cargo.lock;
   strictDeps = true;
-  # The store tests compare records with a real git HEAD.
-  nativeCheckInputs = [ git ];
+  # The store tests compare records with a real git HEAD; deploy-time
+  # generation tests encrypt with real age to a freshly generated SSH key.
+  nativeCheckInputs = [
+    git
+    age
+    openssh
+  ];
 
   cargoBuildFlags = [
     "-p" "nix-secrets-backend"

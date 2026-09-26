@@ -203,6 +203,56 @@ write followed by a decrypt-and-compare read-back so two operators cannot
 silently overwrite each other's key inventory.
 Audit events include the receiving SSH account and key names.
 
+### Values generated at deployment
+
+A deployment never stops on the first unset value. When a requested value is
+unset in `nix-secrets.toml`, the target generates it itself, installs it, and
+returns only an age ciphertext for its recipients. The TUI verifies the
+recipients without decrypting and stores the record through the normal
+conditional write. The approval dialog lists these values as "will generate N
+values on the target", and a notice lists them after deployment. Values that
+already exist are never regenerated.
+
+A leaf is generated when it is unset and:
+
+- has `valueType = "password"`: a 32-character password, or the length and
+  alphabet its `consumerConstraints` allow; or
+- declares `valueGenerator`, which fixes the exact bytes:
+
+```nix
+# prefix + encode(<bytes> random bytes) + suffix, byte for byte.
+valueGenerator = {
+  kind = "random-bytes";
+  bytes = 32;               # 16 through 1024
+  encoding = "base64";      # "base64" (padded), "base64url" (unpadded), or "hex"
+  prefix = "";              # optional literal text, at most 1024 bytes
+  suffix = "";              # optional literal text, e.g. "\n"
+};
+```
+
+For example, a Knot TSIG key file:
+
+```nix
+valueGenerator = {
+  kind = "random-bytes"; bytes = 32; encoding = "base64";
+  prefix = "key:\n  - id: dns-transfer\n    algorithm: hmac-sha256\n    secret: ";
+  suffix = "\n";
+};
+```
+
+A leaf is never generated when it is public information, has
+`externalInputRequired = true`, or sets `generateOnDeploy = false`. Set the
+latter for a value that must equal another leaf's value, such as a key shared
+by two hosts: each host would otherwise generate its own. A `valueType = "key"`
+leaf without `valueGenerator` is never generated, since its format is unknown.
+If any requested value cannot be generated, the deployment is refused before
+anything is generated or written, with one message listing every such value:
+"Missing values that must be entered: …".
+
+Generation needs a target running deployment protocol 2, which also must have
+been built from the same `valueGenerator` and constraints the TUI evaluates.
+An older target still receives values that are already set.
+
 See [PROTOCOL.md](PROTOCOL.md) for message flow and
 [THREAT-MODEL.md](THREAT-MODEL.md) for the security boundary.
 

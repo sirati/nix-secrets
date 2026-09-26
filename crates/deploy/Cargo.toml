@@ -7,7 +7,9 @@ license = "MIT"
 [dependencies]
 base64 = "0.22"
 nix = { version = "0.29", features = ["fs", "user"] }
+getrandom = "0.4.2"
 nix-secrets-core = { path = "../core" }
+nix-secrets-crypto = { path = "../crypto" }
 nix-secrets-storagebox-bootstrap = { path = "../storagebox-bootstrap" }
 nix-secrets-transport = { path = "../transport" }
 serde = { version = "1", features = ["derive"] }

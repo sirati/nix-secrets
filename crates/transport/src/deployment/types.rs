@@ -39,6 +39,10 @@ pub struct TargetSecret {
     #[serde(default)]
     pub public_info: Option<PublicInfoAttestation>,
     pub current_version_id: Option<String>,
+    /// Canonical JSON of the generator the target would use for this value
+    /// when asked to generate it. Absent when the value must be supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -69,6 +73,7 @@ pub struct ExpectedSecret {
     pub recipient_ids: Vec<String>,
     pub destination: Destination,
     pub public_info: Option<PublicInfoAttestation>,
+    pub generator: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -120,16 +125,41 @@ pub struct TaskEntry {
     pub client_contribution_base64: String,
 }
 
+/// Asks the target to generate an unset value locally, or to adopt the value
+/// it already has installed, and to return only its ciphertext.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub struct GenerateEntry {
+    pub identifier: String,
+    pub client_contribution_base64: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub struct DeploymentBatch {
     pub version: u16,
+    /// Identifiers of both supplied `entries` and target-generated values.
     pub requested_identifiers: Vec<String>,
     pub entries: Vec<DeployEntry>,
     #[serde(default)]
     pub requested_tasks: Vec<String>,
     #[serde(default)]
     pub tasks: Vec<TaskEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generate: Vec<GenerateEntry>,
+}
+
+/// An age-encrypted value generated on the target. The plaintext never
+/// leaves the target; this record is stored verbatim in the operator store.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedRecord {
+    pub format_version: u16,
+    pub version_id_base64: String,
+    pub recipient_ids: Vec<String>,
+    pub age_ciphertext_base64: String,
+    /// The target already had this value installed and re-encrypted it.
+    pub adopted: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -139,10 +169,20 @@ pub enum DeploymentResult {
         versions: BTreeMap<String, String>,
         #[serde(default)]
         generated_public_keys: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        generated_records: BTreeMap<String, GeneratedRecord>,
     },
     Rejected {
         message: String,
     },
+}
+
+/// What a target reports after applying a batch.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AppliedOutput {
+    pub versions: BTreeMap<String, String>,
+    pub generated_public_keys: BTreeMap<String, String>,
+    pub generated_records: BTreeMap<String, GeneratedRecord>,
 }
 
 #[derive(Debug)]

@@ -12,6 +12,7 @@ pub(super) fn expected_target(
         match schema.leaf(&path).map_err(|error| error.to_string())? {
             LeafSpec::Stored(spec) => secrets.push(ExpectedSecret {
                 identifier: identifier.clone(),
+                generator: super::unset::expected_generator(&spec),
                 recipient_ids: spec.recipient_ids,
                 destination: destination(spec.destination, spec.consumer_units),
                 public_info: spec
@@ -109,6 +110,7 @@ mod tests {
             destination: destination.clone(),
             public_info: None,
             current_version_id: version.map(str::to_owned),
+            generator: None,
         };
         let state = TargetState {
             protocol_version: 1,

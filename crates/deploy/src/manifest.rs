@@ -79,7 +79,7 @@ pub fn load_target_state(
         .tasks
         .sort_unstable_by(|a, b| a.identifier.cmp(&b.identifier));
     Ok(TargetState {
-        protocol_version: 1,
+        protocol_version: nix_secrets_transport::DEPLOYMENT_PROTOCOL_VERSION,
         hostname: hostname.into(),
         secrets: leaves.secrets,
         tasks: leaves.tasks,
@@ -129,6 +129,10 @@ fn flatten_target(
                     }
                 }),
                 current_version_id: versions.get(&identifier).cloned(),
+                generator: leaf
+                    .deployment_generator()
+                    .ok()
+                    .map(|generator| generator.fingerprint()),
             });
         }
         SecretNode::Generated(leaf) => {
@@ -181,7 +185,7 @@ fn validate_manifest(
     hostname: &str,
     batch: &DeploymentBatch,
 ) -> Result<ResolvedBatch, DeployError> {
-    if batch.version != 1 {
+    if !matches!(batch.version, 1 | 2) {
         return Err(DeployError::Invalid(
             "unsupported deployment version".into(),
         ));

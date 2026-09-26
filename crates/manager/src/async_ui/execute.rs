@@ -40,6 +40,9 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
         },
         Command::BulkGenerate { .. } => unreachable!("bulk execution emits progress"),
         Command::Approval(accepted) => match controller.approval(accepted) {
+            Ok(None) if accepted => Completion::Deployed {
+                generated: controller.take_generated(),
+            },
             Ok(next) => Completion::ApprovalDone(next),
             Err(error) => Completion::Failed(error),
         },

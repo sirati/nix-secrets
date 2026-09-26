@@ -78,9 +78,34 @@ pub(super) fn prompt(model: &Model) -> String {
                 format!(
                     "{failure} {host_key} Trust this host and inspect its deployment state? y/n"
                 )
-            } else {
+            } else if !request.missing.is_empty() {
                 format!(
-                    "{failure} Deploy to {}? create [{}], replace [{}], tasks [{}], keys [{}] · y/n",
+                    "{failure} Cannot deploy to {}: missing values that must be entered: {}. Nothing will be generated or written. n: dismiss",
+                    request.target,
+                    request
+                        .missing
+                        .iter()
+                        .map(|(id, reason)| format!("{id} ({reason})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                let generate = if request.generate.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", will generate {} values on the target: [{}]",
+                        request.generate.len(),
+                        request
+                            .generate
+                            .iter()
+                            .map(|(id, kind)| format!("{id} ({kind})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                format!(
+                    "{failure} Deploy to {}? create [{}], replace [{}], tasks [{}]{generate}, keys [{}] · y/n",
                     request.target,
                     request.create.join(", "),
                     request.replace.join(", "),

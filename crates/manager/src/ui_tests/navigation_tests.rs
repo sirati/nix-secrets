@@ -30,6 +30,8 @@ fn lost_lease_drops_the_modal_and_reports_expiry() {
         recipient_keys: vec![],
         host_key: None,
         tasks: vec![],
+        generate: vec![],
+        missing: vec![],
     });
     drive(&mut frontend, &mut writer, &mut model).unwrap();
     assert!(matches!(model.mode, Mode::Browse));
@@ -56,6 +58,8 @@ fn task_provider_failure_keeps_approval_for_retry() {
             output_is_set: Some(false),
             requires_input: true,
         }],
+        generate: vec![],
+        missing: vec![],
     };
     model.mode = Mode::Approval(request);
     writer.approval_error = true;

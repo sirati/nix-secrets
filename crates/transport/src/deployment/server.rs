@@ -1,7 +1,6 @@
 use super::validation::{require_same_set, select_state, validate_batch, validate_server_state};
 use super::*;
 use serde::{de::DeserializeOwned, Serialize};
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use zeroize::Zeroizing;
 
@@ -14,16 +13,17 @@ pub fn serve_deployment<R, W, F>(
 where
     R: Read,
     W: Write,
-    F: FnOnce(
-        DeploymentBatch,
-    ) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), String>,
+    F: FnOnce(DeploymentBatch) -> Result<AppliedOutput, String>,
 {
     validate_server_state(&state)?;
     let selection: DeploymentSelection = read_wire_json(&mut input)?;
     let selected_state = select_state(&state, &selection)?;
     write_wire_json(&mut output, &selected_state)?;
     let batch: DeploymentBatch = read_wire_json(&mut input)?;
-    if batch.version != DEPLOYMENT_PROTOCOL_VERSION {
+    if !matches!(
+        batch.version,
+        LEGACY_DEPLOYMENT_PROTOCOL_VERSION | DEPLOYMENT_PROTOCOL_VERSION
+    ) {
         return Err(DeploymentError::Invalid(
             "unsupported deployment batch version",
         ));
@@ -38,11 +38,30 @@ where
         &batch.requested_tasks,
         "batch task subset differs from selection",
     )?;
-    validate_batch(&batch, &selected_state)?;
+    // A version 1 client sends version 1 batches, which carry no generation.
+    let mut batch_state = selected_state.clone();
+    batch_state.protocol_version = batch.version;
+    validate_batch(&batch, &batch_state)?;
+    let generate = batch
+        .generate
+        .iter()
+        .map(|item| item.identifier.clone())
+        .collect::<Vec<_>>();
     let result = match apply(batch) {
-        Ok((versions, generated_public_keys)) => DeploymentResult::Applied {
-            versions,
-            generated_public_keys,
+        Ok(output)
+            if output.generated_records.len() != generate.len()
+                || generate
+                    .iter()
+                    .any(|id| !output.generated_records.contains_key(id)) =>
+        {
+            DeploymentResult::Rejected {
+                message: "target did not return exactly the generated records".into(),
+            }
+        }
+        Ok(output) => DeploymentResult::Applied {
+            versions: output.versions,
+            generated_public_keys: output.generated_public_keys,
+            generated_records: output.generated_records,
         },
         Err(message) => DeploymentResult::Rejected { message },
     };

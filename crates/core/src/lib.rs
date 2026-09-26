@@ -4,6 +4,7 @@ pub mod approval;
 pub mod approval_types;
 pub mod backend;
 pub mod framing;
+pub mod generator;
 pub mod profiles;
 pub mod schema;
 pub mod store;
@@ -15,9 +16,10 @@ pub use profiles::{
     ProfileFacet, ProfileFacetMode, ProfileSnapshot, ProfileStore, ProfileViewFilter, ViewProfile,
 };
 pub use schema::{
-    ConsumerConstraints, Destination, GeneratedSecret, GeneratedSecretSpec, GeneratedSecretType,
-    LeafSpec, Schema, SchemaError, SchemaLoadError, SecretKind, SecretPath, SecretSpec,
-    StorageBoxBootstrap, ValueType,
+    ConsumerConstraints, DeployGenerator, Destination, GeneratedSecret, GeneratedSecretSpec,
+    GeneratedSecretType, LeafSpec, NotGeneratable, RandomEncoding, Schema, SchemaError,
+    SchemaLoadError, SecretKind, SecretPath, SecretSpec, StorageBoxBootstrap, ValueGenerator,
+    ValueType,
 };
 pub use store::{
     CommitState, EncryptedSecret, GeneratedPublicKey, PublicInfoRecord, SecretStore, StoreError,

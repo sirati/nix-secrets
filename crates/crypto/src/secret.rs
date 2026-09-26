@@ -4,7 +4,7 @@ use crate::{CryptoError, EncryptedSecret, record::FORMAT_VERSION};
 
 const INNER_TAG: &[u8; 8] = b"NIXSECRT";
 const INNER_VERSION: u8 = 1;
-const VERSION_ID_SIZE: usize = 16;
+pub const VERSION_ID_SIZE: usize = 16;
 const MAX_IDENTIFIER_SIZE: usize = 4096;
 const INNER_FIXED_SIZE: usize = INNER_TAG.len() + 1 + 2 + VERSION_ID_SIZE;
 pub const MAX_SECRET_SIZE: usize = 16 * 1024 * 1024;
@@ -29,13 +29,25 @@ pub fn encrypt_secret(
     recipients: &[Recipient<'_>],
     provider: &impl CryptoProvider,
 ) -> Result<EncryptedSecret, CryptoError> {
+    let mut version_id = [0_u8; VERSION_ID_SIZE];
+    getrandom::fill(&mut version_id).map_err(|_| CryptoError::Randomness)?;
+    encrypt_secret_with_version(identifier, version_id, plaintext, recipients, provider)
+}
+
+/// Encrypts under a caller-chosen version identifier, for example to keep a
+/// value's installed version when a target re-encrypts it.
+pub fn encrypt_secret_with_version(
+    identifier: &str,
+    version_id: [u8; VERSION_ID_SIZE],
+    plaintext: &[u8],
+    recipients: &[Recipient<'_>],
+    provider: &impl CryptoProvider,
+) -> Result<EncryptedSecret, CryptoError> {
     validate_identifier(identifier)?;
     validate_recipients(recipients)?;
     if plaintext.len() > MAX_SECRET_SIZE {
         return Err(CryptoError::SecretTooLarge);
     }
-    let mut version_id = [0_u8; VERSION_ID_SIZE];
-    getrandom::fill(&mut version_id).map_err(|_| CryptoError::Randomness)?;
     let inner = encode_inner(identifier, &version_id, plaintext);
     let keys: Vec<_> = recipients
         .iter()

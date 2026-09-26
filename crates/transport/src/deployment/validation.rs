@@ -65,12 +65,17 @@ pub(super) fn validate_target(
     state: &TargetState,
     expected: &ExpectedTarget,
 ) -> Result<(), DeploymentError> {
-    if state.protocol_version != DEPLOYMENT_PROTOCOL_VERSION {
+    if !matches!(
+        state.protocol_version,
+        LEGACY_DEPLOYMENT_PROTOCOL_VERSION | DEPLOYMENT_PROTOCOL_VERSION
+    ) {
         return Err(DeploymentError::Invalid("unsupported deployment protocol"));
     }
     if state.hostname != expected.hostname {
         return Err(DeploymentError::Invalid("target hostname mismatch"));
     }
+    // Generator descriptions are compared only for values being generated,
+    // see `verify_generators`, so an older target still receives set values.
     if map_target_secrets(&state.secrets)? != map_expected_secrets(&expected.secrets)? {
         return Err(DeploymentError::Invalid("target secret schema mismatch"));
     }
@@ -192,18 +197,70 @@ pub(super) fn validate_batch(
     batch: &DeploymentBatch,
     state: &TargetState,
 ) -> Result<(), DeploymentError> {
-    validate_entries(&batch.entries, &batch.requested_identifiers, &state.secrets)?;
+    if batch.version > state.protocol_version || batch.version < LEGACY_DEPLOYMENT_PROTOCOL_VERSION
+    {
+        return Err(DeploymentError::Invalid(
+            "batch version is not supported by the target",
+        ));
+    }
+    if batch.version == LEGACY_DEPLOYMENT_PROTOCOL_VERSION && !batch.generate.is_empty() {
+        return Err(DeploymentError::Invalid(
+            "deployment protocol 1 cannot generate values",
+        ));
+    }
+    validate_entries(batch, &state.secrets)?;
     validate_tasks(&batch.tasks, &batch.requested_tasks, &state.tasks)
 }
 
 fn validate_entries(
-    entries: &[DeployEntry],
-    requested: &[String],
+    batch: &DeploymentBatch,
     available: &[TargetSecret],
 ) -> Result<(), DeploymentError> {
+    let entries = &batch.entries;
+    let supplied = unique_identifiers(
+        &entries
+            .iter()
+            .map(|item| item.identifier.clone())
+            .collect::<Vec<_>>(),
+        "duplicate supplied identifier",
+    )?
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    for item in &batch.generate {
+        if supplied.contains(&item.identifier) {
+            return Err(DeploymentError::Invalid(
+                "a value is both supplied and generated",
+            ));
+        }
+        let target = available
+            .iter()
+            .find(|secret| secret.identifier == item.identifier)
+            .ok_or(DeploymentError::Invalid(
+                "generated identifier is absent from target schema",
+            ))?;
+        if target.generator.is_none() || target.public_info.is_some() {
+            return Err(DeploymentError::Invalid(
+                "target cannot generate this value",
+            ));
+        }
+        let contribution = Zeroizing::new(
+            STANDARD
+                .decode(&item.client_contribution_base64)
+                .map_err(|_| DeploymentError::Invalid("invalid client contribution encoding"))?,
+        );
+        if contribution.len() != 32 {
+            return Err(DeploymentError::Invalid(
+                "client contribution must be exactly 32 bytes",
+            ));
+        }
+    }
     validate_supplied(
-        requested,
-        entries.iter().map(|item| &item.identifier),
+        &batch.requested_identifiers,
+        entries
+            .iter()
+            .map(|item| &item.identifier)
+            .chain(batch.generate.iter().map(|item| &item.identifier)),
         available.iter().map(|item| &item.identifier),
     )?;
     if entries
@@ -316,4 +373,37 @@ fn validate_identifier(value: &str) -> Result<(), DeploymentError> {
     } else {
         Ok(())
     }
+}
+
+/// Checks that the target would generate each requested value exactly as the
+/// operator's schema describes it.
+pub(super) fn verify_generators(
+    state: &TargetState,
+    expected: &ExpectedTarget,
+    identifiers: &[String],
+) -> Result<(), DeploymentError> {
+    for identifier in identifiers {
+        let want = expected
+            .secrets
+            .iter()
+            .find(|item| &item.identifier == identifier)
+            .and_then(|item| item.generator.as_ref())
+            .ok_or(DeploymentError::Invalid(
+                "operator schema cannot generate a requested value",
+            ))?;
+        let have = state
+            .secrets
+            .iter()
+            .find(|item| &item.identifier == identifier)
+            .and_then(|item| item.generator.as_ref())
+            .ok_or(DeploymentError::Invalid(
+                "target cannot generate a requested value; rebuild it with this schema",
+            ))?;
+        if want != have {
+            return Err(DeploymentError::Invalid(
+                "target would generate a value in another format; rebuild it with this schema",
+            ));
+        }
+    }
+    Ok(())
 }

@@ -97,6 +97,11 @@
               secretsLib = self.lib;
             };
             pkgs.runCommand "consumer-constraints-test" { } "touch $out";
+          value-generator =
+            assert import ./nix/tests/value-generator.nix {
+              secretsLib = self.lib;
+            };
+            pkgs.runCommand "value-generator-test" { } "touch $out";
           real-age = pkgs.callPackage ./nix/checks/real-age.nix { };
           inherit (self.packages.${system}) secrets-ready-waiter;
           secrets-ready-waiter-vm = import ./nix/tests/secrets-ready-waiter.nix {
