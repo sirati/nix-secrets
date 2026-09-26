@@ -333,6 +333,39 @@ If any requested value cannot be generated, the deployment is refused before
 anything is generated or written, with one message listing every such value:
 "Missing values that must be entered: …".
 
+### Values derived from another value
+
+Some values must contain another secret, possibly one deployed to another
+host: a Knot TSIG key file wraps the same secret a mail server reads raw, and
+a PostgreSQL standby needs the primary's replication password. Declare the
+dependent leaf with `derivedFrom`:
+
+```nix
+# ns1: the Knot key file for the secret server-hetzner2's Stalwart reads raw.
+update-key = {
+  valueType = "key";
+  destination = { … };
+  derivedFrom = {
+    identifier = "server-hetzner2.services.stalwart.dns-update-key";
+    prefix = "key:\n  - id: stalwart-dns\n    algorithm: hmac-sha256\n    secret: ";
+    suffix = "\n";
+  };
+};
+```
+
+The deployed bytes are `prefix + <source value> + suffix`. A derived value is
+never stored, entered or generated. At deployment the TUI decrypts the source
+locally, as it does for every value it deploys, frames it, and sends it inside
+the SSH connection like any other value. It therefore always matches its
+source; changing the source, or the framing, changes the derived value's
+version, so the next deployment of the dependent host replaces it.
+
+The source must be a stored, non-derived secret. If it is unset, the
+deployment is refused with the others that must be set first, for example
+"… (derived from unset server-hetzner2.services.stalwart.dns-update-key; deploy
+server-hetzner2 first, which generates it)". The derived host's own target
+never sees the source identifier's value except inside the framed file.
+
 Generation needs a target running deployment protocol 2, which also must have
 been built from the same `valueGenerator` and constraints the TUI evaluates.
 An older target still receives values that are already set.

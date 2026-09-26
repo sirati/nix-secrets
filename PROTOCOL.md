@@ -231,6 +231,17 @@ target adopts the installed value instead of generating a different one. If
 someone entered the value in the store meanwhile, the conditional write keeps
 that value, the frontend reports it, and the next deployment installs it.
 
+## Derived values
+
+A stored leaf with `derivedFrom = { identifier; prefix; suffix; }` is never
+stored or generated. The frontend decrypts the named source, which may belong
+to another host, and deploys `prefix + source + suffix` as an ordinary entry.
+Its version is `d-` and 32 hex digits of SHA-256 over the length-prefixed
+source version, source identifier, prefix and suffix. It changes exactly when
+the source value or the framing changes. An unset source refuses the
+deployment before connecting, naming the source and, when the source is
+generatable, the host whose deployment generates it.
+
 ## Operator-only values
 
 A `kind = "operator"` leaf has recipients but no destination. The Nix module

@@ -221,6 +221,32 @@ let
     else
       generator // { inherit args; };
 
+  # Deployed as prefix + <value of identifier> + suffix; never stored itself.
+  validateDerivedFrom =
+    derived:
+    let
+      extra = builtins.filter (name: !(builtins.elem name [ "identifier" "prefix" "suffix" ])) (
+        attrNames derived
+      );
+      affixOk =
+        name:
+        !(derived ? ${name})
+        || (builtins.isString derived.${name} && builtins.stringLength derived.${name} <= 1024);
+    in
+    if !isAttrs derived then
+      throw "derivedFrom must be an attribute set"
+    else if extra != [ ] then
+      throw "derivedFrom has unknown fields: ${lib.concatStringsSep ", " extra}"
+    else if
+      !(builtins.isString (derived.identifier or null))
+      || builtins.match "[A-Za-z0-9_-]+\\.(services|user-[A-Za-z0-9_-]+-services)(\\.[A-Za-z0-9_-]+){2,}" derived.identifier == null
+    then
+      throw "derivedFrom.identifier must be a canonical secret identifier"
+    else if !(affixOk "prefix" && affixOk "suffix") then
+      throw "derivedFrom prefix and suffix must be strings of at most 1024 bytes"
+    else
+      derived;
+
   validateGeneratedSecret =
     serviceName: generated:
     let
@@ -317,5 +343,6 @@ in
     validateGeneratedSecret
     validateValueGenerator
     validateKeypairGenerator
+    validateDerivedFrom
     ;
 }

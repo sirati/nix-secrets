@@ -19,9 +19,13 @@ pub(crate) struct UnsetPlan {
     pub generate: Vec<(String, String)>,
     /// Identifier and reason of each value that must be entered first.
     pub missing: Vec<(String, String)>,
+    /// Derived values and their sources, deployed from the source's value.
+    pub derived: Vec<(String, String)>,
 }
 
 impl UnsetPlan {
+    /// Also refuses a derived value whose source is unset: its source must be
+    /// set, or deployed to its own host first when that host generates it.
     pub fn refusal(&self) -> Option<String> {
         (!self.missing.is_empty()).then(|| {
             format!(
@@ -47,10 +51,22 @@ pub(crate) fn plan_unset(
 ) -> Result<UnsetPlan, String> {
     let mut plan = UnsetPlan::default();
     for identifier in identifiers {
+        let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
+        if let Ok(LeafSpec::Stored(spec)) = schema.leaf(&path) {
+            if let Some(derived) = &spec.derived_from {
+                let source = &derived.identifier;
+                if set.contains(source) {
+                    plan.derived.push((identifier.clone(), source.clone()));
+                } else {
+                    plan.missing
+                        .push((identifier.clone(), source_first(schema, source)));
+                }
+                continue;
+            }
+        }
         if set.contains(identifier) {
             continue;
         }
-        let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
         let spec = match schema.leaf(&path).map_err(|error| error.to_string())? {
             LeafSpec::Stored(spec) => spec,
             // Rejected with a clear message when the request is inspected.
@@ -76,6 +92,22 @@ pub(crate) fn plan_unset(
         }
     }
     Ok(plan)
+}
+
+/// Why a derived value's unset source blocks it, and what to do.
+fn source_first(schema: &Schema, source: &str) -> String {
+    let generatable = SecretPath::parse(source)
+        .ok()
+        .and_then(|path| schema.leaf(&path).ok())
+        .is_some_and(
+            |leaf| matches!(leaf, LeafSpec::Stored(spec) if deployment_generator(&spec).is_ok()),
+        );
+    let host = source.split('.').next().unwrap_or(source);
+    if generatable {
+        format!("derived from unset {source}; deploy {host} first, which generates it")
+    } else {
+        format!("derived from unset {source}; enter {source} first")
+    }
 }
 
 /// The generator fingerprint the target must report for a stored leaf.
@@ -144,6 +176,42 @@ pub(crate) fn record_envelope(
 }
 
 impl Controller {
+    /// Decrypts a derived value's source and frames it. The version names the
+    /// source version and the framing, so the target replaces the derived
+    /// value exactly when either changes.
+    pub(super) fn derived_entry(
+        &self,
+        identifier: &str,
+        source: &str,
+        entries: &BTreeMap<String, nix_secrets_core::EncryptedSecret>,
+    ) -> Result<DeployEntry, String> {
+        let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
+        let LeafSpec::Stored(spec) = self.schema.leaf(&path).map_err(|error| error.to_string())?
+        else {
+            return Err(format!("{identifier} is not a stored value"));
+        };
+        let derived = spec
+            .derived_from
+            .ok_or_else(|| format!("{identifier} is not derived"))?;
+        let stored = entries
+            .get(source)
+            .ok_or_else(|| format!("{identifier}: its source {source} became unset"))?;
+        let record = EncryptedSecret {
+            format_version: stored.format_version,
+            version_id: stored.version_id.clone(),
+            recipient_ids: stored.recipient_ids.clone(),
+            age_ciphertext: stored.age_ciphertext.clone(),
+        };
+        let value =
+            decrypt_secret(source, &record, &self.provider).map_err(|error| error.to_string())?;
+        let framed = derived.frame(&value);
+        Ok(DeployEntry {
+            identifier: identifier.to_owned(),
+            version_id: derived_version(&stored.version_id, &derived),
+            contents_base64: STANDARD.encode(framed.as_slice()),
+        })
+    }
+
     /// Stores target-generated records only where the value is still unset.
     /// A value entered meanwhile is kept; the next deployment then replaces
     /// the target's copy with it.
@@ -191,6 +259,33 @@ impl Controller {
             Err(format!("Deployed, but {}", problems.join(" Also, ")))
         }
     }
+}
+
+/// `d-` + hex of SHA-256 over the source version and the framing: stable
+/// while both are, and never equal to a stored value's base64 version.
+pub(crate) fn derived_version(
+    source_version: &[u8],
+    derived: &nix_secrets_core::DerivedFrom,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in [
+        source_version,
+        derived.identifier.as_bytes(),
+        derived.prefix.as_bytes(),
+        derived.suffix.as_bytes(),
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    let digest = hasher.finalize();
+    format!(
+        "d-{}",
+        digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
 }
 
 #[cfg(test)]

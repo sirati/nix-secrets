@@ -373,6 +373,7 @@ fn deployment_prompt_lists_generated_and_missing_values() {
             tasks: vec![],
             generate,
             missing,
+            derived: vec![("host.services.a.knot".into(), "other.services.b.raw".into())],
         };
     let mut model = Model::new(vec![]);
     model.mode = Mode::Approval(request(
@@ -391,6 +392,10 @@ fn deployment_prompt_lists_generated_and_missing_values() {
         "{prompt}"
     );
     assert!(prompt.contains("host.services.a.key (32 random bytes, base64)"));
+    assert!(
+        prompt.contains("derived [host.services.a.knot from other.services.b.raw]"),
+        "{prompt}"
+    );
     model.mode = Mode::Approval(request(
         vec![("host.services.a.pw".into(), "password".into())],
         vec![

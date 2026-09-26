@@ -218,6 +218,8 @@ pub enum NotGeneratable {
     PublicInfo,
     /// Neither a password nor a declared `valueGenerator`.
     UnknownFormat,
+    /// Deployed from another secret's value; see `derivedFrom`.
+    Derived,
 }
 
 impl NotGeneratable {
@@ -227,12 +229,16 @@ impl NotGeneratable {
             Self::OptedOut => "generateOnDeploy = false",
             Self::PublicInfo => "public information",
             Self::UnknownFormat => "no valueGenerator",
+            Self::Derived => "derived from another value",
         }
     }
 }
 
 /// The generator a target may use for this stored leaf when it is unset.
 pub fn deployment_generator(spec: &SecretSpec) -> Result<DeployGenerator, NotGeneratable> {
+    if spec.derived_from.is_some() {
+        return Err(NotGeneratable::Derived);
+    }
     decide(
         &spec.kind,
         spec.external_input_required,
@@ -246,6 +252,9 @@ pub fn deployment_generator(spec: &SecretSpec) -> Result<DeployGenerator, NotGen
 impl super::SecretLeaf {
     /// [`deployment_generator`] for a manifest node.
     pub fn deployment_generator(&self) -> Result<DeployGenerator, NotGeneratable> {
+        if self.derived_from.is_some() {
+            return Err(NotGeneratable::Derived);
+        }
         decide(
             &self.kind,
             self.external_input_required,

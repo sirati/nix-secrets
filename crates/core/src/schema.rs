@@ -11,7 +11,9 @@ pub use spec::{GeneratedSecretSpec, LeafSpec, SecretSpec};
 mod path;
 mod registry;
 use registry::{missing, synthetic_path, validate_named_recipients, validate_shared_public_specs};
+pub mod derived;
 pub mod operator;
+pub use derived::DerivedFrom;
 pub(crate) mod validation;
 mod value;
 pub use operator::{KeypairGenerator, OperatorKind, OperatorLeaf, OperatorSpec};
@@ -107,6 +109,9 @@ pub struct SecretLeaf {
     pub value_generator: Option<ValueGenerator>,
     #[serde(rename = "generateOnDeploy", default = "default_true")]
     pub generate_on_deploy: bool,
+    /// Deployed as `prefix + <source value> + suffix`; never stored itself.
+    #[serde(rename = "derivedFrom", default)]
+    pub derived_from: Option<DerivedFrom>,
 }
 
 fn default_true() -> bool {
@@ -148,6 +153,7 @@ impl Schema {
 
     pub fn validate(&self) -> Result<(), SchemaError> {
         self.identity_index()?;
+        self.validate_derived()?;
         let mut public_specs = BTreeMap::<String, (String, u16)>::new();
         for (host_name, host) in &self.0 {
             validate_component(host_name)?;
@@ -274,6 +280,7 @@ impl Schema {
                 consumer_constraints: leaf.consumer_constraints.clone(),
                 value_generator: leaf.value_generator.clone(),
                 generate_on_deploy: leaf.generate_on_deploy,
+                derived_from: leaf.derived_from.clone(),
             })),
             SecretNode::Operator(leaf) => Ok(LeafSpec::Operator(OperatorSpec {
                 path: path.clone(),

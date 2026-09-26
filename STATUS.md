@@ -28,6 +28,8 @@ The repository implements the local editing and target deployment path in
   deployment, with ciphertext-only return, header recipient checks, retry
   adoption of installed values, and a single list of values that must be
   entered.
+- Derived values (`derivedFrom`) deployed as a framed copy of another stored
+  secret, also across hosts, with a clear order when the source is unset.
 - Operator-only leaves that are never deployed, keypair generation through a
   consumer-declared installable (private key on stdout, public key on fd 3),
   and `pipe-secret` to hand one value to another program's stdin.

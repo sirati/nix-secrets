@@ -23,6 +23,7 @@ pub struct SecretSpec {
     pub consumer_constraints: Option<ConsumerConstraints>,
     pub value_generator: Option<ValueGenerator>,
     pub generate_on_deploy: bool,
+    pub derived_from: Option<super::DerivedFrom>,
 }
 
 #[derive(Clone, Debug)]

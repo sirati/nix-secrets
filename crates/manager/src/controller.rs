@@ -203,6 +203,7 @@ impl Controller {
             tasks,
             generate: plan.generate,
             missing: plan.missing,
+            derived: plan.derived,
         })
     }
 
@@ -245,8 +246,17 @@ impl Controller {
         let generate_entries = unset::generate_entries(&plan)?;
         let mut deploy_entries = Vec::new();
         let mut task_entries = Vec::new();
+        let derived = plan
+            .derived
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeMap<_, _>>();
         for identifier in &identifiers {
             if generating.contains(identifier.as_str()) {
+                continue;
+            }
+            if let Some(source) = derived.get(identifier) {
+                deploy_entries.push(self.derived_entry(identifier, source, &entries)?);
                 continue;
             }
             let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;

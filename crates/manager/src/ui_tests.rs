@@ -186,6 +186,7 @@ fn approval_is_explicit_and_testable() {
         tasks: vec![],
         generate: vec![],
         missing: vec![],
+        derived: vec![],
     };
     reduce(&mut model, UiEvent::Approval(request), &mut writer);
     assert_eq!(
@@ -230,6 +231,7 @@ fn task_approval_exposes_input_and_target_output_status() {
         }],
         generate: vec![],
         missing: vec![],
+        derived: vec![],
     };
     assert_eq!(
         reduce(&mut model, UiEvent::Approval(request), &mut writer),

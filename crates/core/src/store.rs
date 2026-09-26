@@ -96,6 +96,8 @@ pub enum StoreError {
     InvalidPublicInfo,
     #[error("secret version changed during update")]
     VersionConflict,
+    #[error("this value is derived from another secret and is never stored")]
+    Derived,
 }
 
 impl SecretStore {
@@ -158,6 +160,9 @@ impl SecretStore {
         let leaf = schema.leaf(path)?;
         if matches!(&leaf, LeafSpec::Stored(spec) if matches!(spec.kind, SecretKind::PublicInfo)) {
             return Err(StoreError::InvalidPublicInfo);
+        }
+        if matches!(&leaf, LeafSpec::Stored(spec) if spec.derived_from.is_some()) {
+            return Err(StoreError::Derived);
         }
         let recipients = leaf.recipients().0;
         if recipients != envelope.recipient_ids.as_slice() {

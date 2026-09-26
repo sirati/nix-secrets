@@ -36,7 +36,8 @@ pub(super) fn validate_tree(
                     validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
                     validate_destination(&path, service, &leaf.destination)?;
                     validate_value(&path, leaf.value_type, leaf.consumer_constraints.as_ref())?;
-                    validate_value_generator(&path, leaf)
+                    validate_value_generator(&path, leaf)?;
+                    validate_derived_leaf(&path, leaf)
                 }
                 SecretKind::PublicInfo => {
                     if !leaf.recipient_public_keys.is_empty()
@@ -45,6 +46,7 @@ pub(super) fn validate_tree(
                         || leaf.value_type.is_some()
                         || leaf.consumer_constraints.is_some()
                         || leaf.value_generator.is_some()
+                        || leaf.derived_from.is_some()
                     {
                         return Err(invalid(
                             &path,
@@ -446,4 +448,17 @@ fn validate_value_generator(
         ));
     }
     generator.validate_definition().map_err(fail)
+}
+
+fn validate_derived_leaf(path: &SecretPath, leaf: &super::SecretLeaf) -> Result<(), SchemaError> {
+    let Some(derived) = &leaf.derived_from else {
+        return Ok(());
+    };
+    let fail = |message: String| SchemaError::InvalidValueDefinition(path.clone(), message);
+    if leaf.value_generator.is_some() || leaf.external_input_required {
+        return Err(fail(
+            "derivedFrom excludes valueGenerator and externalInputRequired".into(),
+        ));
+    }
+    derived.validate_definition().map(|_| ()).map_err(fail)
 }

@@ -52,6 +52,7 @@ A target deployer requests one server's values.
 Unset passwords and values with a declared valueGenerator are generated on
 the target; the request lists them, and a notice names them afterwards.
 Other unset values block the request and are listed together.
+Values derived from another secret are deployed from its current value.
 y  Approve the verified target and displayed changes
 n / Esc  Reject the request
 

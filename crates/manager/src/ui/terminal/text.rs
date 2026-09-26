@@ -108,6 +108,19 @@ pub(super) fn prompt(model: &Model) -> String {
                             .join(", ")
                     )
                 };
+                let generate = if request.derived.is_empty() {
+                    generate
+                } else {
+                    format!(
+                        "{generate}, derived [{}]",
+                        request
+                            .derived
+                            .iter()
+                            .map(|(id, source)| format!("{id} from {source}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
                 format!(
                     "{failure} Deploy to {}? create [{}], replace [{}], tasks [{}]{generate}, keys [{}] · y/n",
                     request.target,

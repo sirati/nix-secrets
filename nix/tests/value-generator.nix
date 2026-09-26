@@ -32,4 +32,16 @@ assert fails { valueType = "key"; valueGenerator = tsig // { extra = 1; }; };
 assert fails { valueType = "password"; valueGenerator = tsig; };
 assert fails { valueType = "key"; externalInputRequired = true; valueGenerator = tsig; };
 assert fails { generateOnDeploy = "no"; };
+assert
+  (normalize {
+    valueType = "key";
+    derivedFrom = {
+      identifier = "server-hetzner2.services.stalwart.dns-update-key";
+      prefix = "key:\n  - id: stalwart-dns\n    algorithm: hmac-sha256\n    secret: ";
+      suffix = "\n";
+    };
+  }).derivedFrom.identifier == "server-hetzner2.services.stalwart.dns-update-key";
+assert fails { derivedFrom.identifier = "not an identifier"; };
+assert fails { derivedFrom = { identifier = "h.services.a.b"; extra = 1; }; };
+assert fails { derivedFrom.identifier = "h.services.a.b"; valueGenerator = tsig; valueType = "key"; };
 true
