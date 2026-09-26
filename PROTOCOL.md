@@ -138,6 +138,23 @@ The privileged target validates the exact known-hosts host, port, Ed25519 key,
 destination, ownership, and mode before publishing a world-readable file in
 `/persistent/public-info`. These values do not enter secret readiness gates.
 
+## Commits
+
+`CommitSummary` returns the diff stat and status of `nix-secrets.toml` and
+`nix-secrets-profiles.toml`, the other staged paths, the message of `HEAD`,
+and whether `commit.gpgsign` is set. `Commit { options, forward_agent }`
+stages and commits only those two files and refuses while other paths are
+staged. With `forward_agent`, the backend serves a temporary agent socket
+(0600, in a 0700 directory under `$XDG_RUNTIME_DIR`, same-UID peers only) to
+`git -c gpg.ssh.program=ssh-keygen` and forwards each agent message to the
+frontend as `AgentRequest { message }`. The frontend answers with
+`AgentReply { message }` from its own agent. Both sides pass only
+`REQUEST_IDENTITIES` and `SIGN_REQUEST` over an SSHSIG blob in the `git`
+namespace; anything else gets `SSH_AGENT_FAILURE`. The exchange ends with
+`Committed { result }` or `Error { message }` carrying git's stderr. Agent
+messages are limited to 256 KiB. Adding these requests raised the backend
+compatibility version to 9.
+
 ## Deployment transport
 
 The frontend constructs a direct SSH session to the final target. Intermediate

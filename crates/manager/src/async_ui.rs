@@ -33,6 +33,8 @@ enum Command {
         profile: ViewProfile,
         revision: u64,
     },
+    CommitSummary,
+    Commit(nix_secrets_core::git::CommitOptions),
     DeleteProfile {
         name: String,
         revision: u64,
@@ -206,6 +208,17 @@ impl SecretWriter for AsyncWriter {
         self.queue(Command::DeleteProfile { name, revision })?;
         Err(OPERATION_QUEUED.into())
     }
+    fn commit_summary(&mut self) -> Result<nix_secrets_core::git::CommitSummary, String> {
+        self.queue(Command::CommitSummary)?;
+        Err(OPERATION_QUEUED.into())
+    }
+    fn commit(
+        &mut self,
+        options: nix_secrets_core::git::CommitOptions,
+    ) -> Result<nix_secrets_core::git::CommitResult, String> {
+        self.queue(Command::Commit(options))?;
+        Err(OPERATION_QUEUED.into())
+    }
     fn poll_completion(&mut self) -> Option<Completion> {
         self.pump();
         if self.completions.is_empty() {
@@ -361,10 +374,19 @@ fn describe(command: &Command, one_password: bool) -> Option<crate::model::Activ
             format!("Generating {} missing passwords", paths.len()),
             false,
         ),
+        Command::Commit(options) => (
+            if options.amend {
+                "Amending the last commit; sign it if your agent asks".into()
+            } else {
+                "Committing; sign it if your agent asks".into()
+            },
+            false,
+        ),
         Command::CopyPublic(_)
         | Command::CopyValue(_)
         | Command::SaveProfile { .. }
-        | Command::DeleteProfile { .. } => return None,
+        | Command::DeleteProfile { .. }
+        | Command::CommitSummary => return None,
     };
     Some(activity(label, decrypts && one_password))
 }

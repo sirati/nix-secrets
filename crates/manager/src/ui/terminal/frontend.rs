@@ -55,6 +55,24 @@ impl Frontend for CrosstermFrontend {
             .map(|_| ())
     }
 
+    fn edit(&mut self, text: &str) -> Result<String, String> {
+        // The editor gets the real terminal: leave raw mode and the alternate
+        // screen, and come back afterwards whatever the editor did.
+        self.restore().map_err(|error| error.to_string())?;
+        let edited = crate::editor::edit_with(&crate::editor::command(), text);
+        let resumed = enable_raw_mode().and_then(|()| {
+            execute!(
+                self.terminal.backend_mut(),
+                EnterAlternateScreen,
+                event::EnableBracketedPaste,
+                event::EnableMouseCapture
+            )
+        });
+        let _ = self.terminal.clear();
+        resumed.map_err(|error| format!("cannot restore the terminal: {error}"))?;
+        edited
+    }
+
     fn read(&mut self, timeout: std::time::Duration) -> io::Result<UiEvent> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
@@ -110,6 +128,21 @@ impl Frontend for CrosstermFrontend {
                         if !repeat {
                             return Ok(UiEvent::PasteRequest);
                         }
+                    }
+                    KeyCode::Char('s' | 'S')
+                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                    {
+                        return Ok(UiEvent::Submit)
+                    }
+                    KeyCode::Char('o' | 'O')
+                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                    {
+                        return Ok(UiEvent::ToggleSignoff)
+                    }
+                    KeyCode::Char('e' | 'E')
+                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                    {
+                        return Ok(UiEvent::OpenEditor)
                     }
                     KeyCode::Char(_) if key.modifiers.contains(event::KeyModifiers::CONTROL) => {}
                     KeyCode::Char(character) => return Ok(UiEvent::Character(character)),

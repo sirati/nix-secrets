@@ -62,7 +62,7 @@ fn starts_new_backend_without_replacing_older_protocol_socket() {
     let repository = path();
     let versioned = repository.with_file_name(socket_name(&repository));
     let legacy =
-        repository.with_file_name(socket_name(&repository).replace("backend-v8-", "backend-"));
+        repository.with_file_name(socket_name(&repository).replace("backend-v9-", "backend-"));
     let old_listener = UnixListener::bind(&legacy).unwrap();
     let mut launcher = FakeLauncher {
         path: versioned.clone(),

@@ -4,6 +4,9 @@ use width::{ellipsize, shorten};
 
 /// The label of the autosave checkbox in the entry field.
 pub(super) const AUTOSAVE_LABEL: &str = "Autosave unset on paste (disable in settings/restart)";
+/// The checkbox labels of the commit dialog.
+pub(super) const AMEND_LABEL: &str = "Amend the last commit (Tab)";
+pub(super) const SIGNOFF_LABEL: &str = "Signoff: add Signed-off-by (Ctrl+O)";
 
 pub(super) fn prompt(model: &Model) -> String {
     if let Some(items) = selector_items(model) {
@@ -33,6 +36,7 @@ pub(super) fn prompt(model: &Model) -> String {
             } else { "No selection".into() }
         }
         Mode::Help { .. } => "All actions are described above. Use ↑↓ to scroll.".into(),
+        Mode::Commit { draft, summary, .. } => commit_body(draft, summary),
         Mode::Search { query } => format!("Search: {query} · Enter: keep filter · Esc: clear"),
         Mode::ProfileSave { name } => format!("Name: {name} · Enter saves current view · Esc cancels"),
         Mode::ProfileOverwrite { name } => format!("Replace view profile {name} with current layout? y/n"),
@@ -365,4 +369,49 @@ pub(super) fn selected_text(model: &Model, width: u16) -> String {
         last.push_str(&ellipsize(&explanation, budget));
     }
     lines.join("\n")
+}
+
+fn commit_body(
+    draft: &crate::model::CommitDraft,
+    summary: &nix_secrets_core::git::CommitSummary,
+) -> String {
+    let check = |on: bool| if on { "☑" } else { "□" };
+    let message = if draft.message.is_empty() {
+        "(type the message; Enter adds a line)".to_owned()
+    } else {
+        format!("{}▏", draft.message)
+    };
+    let mut text = format!(
+        "Message:\n{message}\n\n{} {AMEND_LABEL}\n{} {SIGNOFF_LABEL}\n\n",
+        check(draft.amend),
+        check(draft.signoff),
+    );
+    text.push_str(
+        "Only nix-secrets.toml and nix-secrets-profiles.toml are staged and committed.\n",
+    );
+    if summary.changed.is_empty() {
+        text.push_str("They have no changes");
+        text.push_str(if draft.amend {
+            "; amending changes only the message.\n"
+        } else {
+            ".\n"
+        });
+    } else {
+        text.push_str(&format!("{}\n", summary.diff_stat));
+    }
+    if !summary.foreign_staged.is_empty() {
+        text.push_str(&format!(
+            "\nOther changes are staged ({}). Committing is refused until they are unstaged.\n",
+            summary.foreign_staged.join(", ")
+        ));
+    }
+    if summary.signs {
+        text.push_str(
+            "\nThe commit is signed with your local ssh-agent, relayed for this commit only.\n",
+        );
+    }
+    text.push_str(
+        "\nCtrl+S commits · Ctrl+E opens $VISUAL/$EDITOR · Esc keeps the draft and closes",
+    );
+    text
 }

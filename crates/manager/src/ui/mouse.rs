@@ -36,6 +36,14 @@ pub(super) fn click(
             }
             Action::Continue
         }
+        MouseTarget::CommitAmend
+        | MouseTarget::CommitSignoff
+        | MouseTarget::CommitEditor
+        | MouseTarget::CommitSubmit
+            if matches!(model.mode, Mode::Commit { .. }) =>
+        {
+            commit::click(model, target, writer)
+        }
         MouseTarget::ConfirmLoss => reduce(model, UiEvent::ConfirmLoss, writer),
         MouseTarget::AutosaveToggle => reduce(model, UiEvent::Tab, writer),
         MouseTarget::RevealCurrent => reduce(model, UiEvent::RevealCurrent, writer),

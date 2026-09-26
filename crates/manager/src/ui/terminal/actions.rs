@@ -40,6 +40,7 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                     letter("/ Search", '/'),
                     key("Enter Edit", Shortcut::Enter).enabled(editable),
                     letter("G Missing", 'G').enabled(missing),
+                    letter("C Git Commit", 'C'),
                 ]
             } else {
                 vec![
@@ -59,6 +60,7 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                     letter("c Copy", 'c').enabled(set),
                     letter("p Public", 'p')
                         .enabled(selected.is_some_and(|row| row.can_copy_public && row.is_set)),
+                    letter("C Git Commit", 'C'),
                 ]
             }
         }
@@ -127,6 +129,11 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
             Button::new("Ctrl+Shift+Y Yes, overwrite", MouseTarget::ConfirmLoss),
             key("Enter No", Shortcut::Enter),
             Button::new("Ctrl+R Reveal current", MouseTarget::RevealCurrent),
+        ],
+        Mode::Commit { .. } => vec![
+            Button::new("Ctrl+S Commit", MouseTarget::CommitSubmit),
+            Button::new("Ctrl+E Open in editor", MouseTarget::CommitEditor),
+            key("Esc Cancel", Shortcut::Escape),
         ],
         Mode::Reveal { .. } => vec![key("Esc Hide", Shortcut::Escape), letter("c Copy", 'c')],
         Mode::Edit { path, .. } => {

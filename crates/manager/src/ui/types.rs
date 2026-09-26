@@ -26,6 +26,14 @@ pub enum MouseTarget {
     Notice,
     /// The progress overlay of a running operation; clicks on it do nothing.
     Busy,
+    /// The Amend checkbox of the commit dialog.
+    CommitAmend,
+    /// The Signoff checkbox of the commit dialog.
+    CommitSignoff,
+    /// Opens the commit message in the local editor.
+    CommitEditor,
+    /// Commits.
+    CommitSubmit,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -44,6 +52,14 @@ pub enum UiEvent {
     ConfirmLoss,
     /// Ctrl+R in an entry or replace dialog: reveal the stored value.
     RevealCurrent,
+    /// Ctrl+S in the commit dialog: commit.
+    Submit,
+    /// Ctrl+O in the commit dialog: toggle Signoff.
+    ToggleSignoff,
+    /// Ctrl+E in the commit dialog: edit the message in `$VISUAL`/`$EDITOR`.
+    OpenEditor,
+    /// The editor closed; carries the edited message, or why it failed.
+    Edited(Result<String, String>),
     Approval(ApprovalRequest),
     Refresh,
     Tick,
@@ -104,6 +120,10 @@ pub enum Completion {
         name: String,
         snapshot: ProfileSnapshot,
     },
+    CommitSummary(nix_secrets_core::git::CommitSummary),
+    Committed(nix_secrets_core::git::CommitResult),
+    /// A commit failed; carries git's full error output.
+    CommitFailed(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,6 +205,19 @@ pub trait SecretWriter {
             reason: "commit state unavailable".into(),
         }
     }
+    /// Asks for what a commit would contain; answered by
+    /// [`Completion::CommitSummary`] or directly.
+    fn commit_summary(&mut self) -> Result<nix_secrets_core::git::CommitSummary, String> {
+        Err("committing is unavailable".into())
+    }
+    /// Commits the managed files; answered by [`Completion::Committed`] or
+    /// [`Completion::CommitFailed`], or directly.
+    fn commit(
+        &mut self,
+        _options: nix_secrets_core::git::CommitOptions,
+    ) -> Result<nix_secrets_core::git::CommitResult, String> {
+        Err("committing is unavailable".into())
+    }
     /// The slow operation currently running in the background, if any.
     fn activity(&mut self) -> Option<crate::model::Activity> {
         None
@@ -194,4 +227,9 @@ pub trait SecretWriter {
 pub trait Frontend {
     fn draw(&mut self, model: &Model) -> io::Result<()>;
     fn read(&mut self, timeout: std::time::Duration) -> io::Result<UiEvent>;
+    /// Edits `text` in the local terminal editor, suspending the interface
+    /// while it runs.
+    fn edit(&mut self, _text: &str) -> Result<String, String> {
+        Err("no editor is available here".into())
+    }
 }

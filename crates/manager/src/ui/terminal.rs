@@ -330,7 +330,7 @@ fn draw_dialog(
         // A checkbox line is clickable across its whole rendered width, label
         // included. Its row is found by wrapping the text before it the way
         // the paragraph does.
-        if let Some((position, target)) = checkbox_line(model, &body) {
+        for (position, target) in checkbox_lines(model, &body) {
             let rows_of = |line: &str| {
                 Paragraph::new(line)
                     .wrap(Wrap { trim: false })
@@ -398,6 +398,7 @@ fn modal_title(mode: &Mode) -> &'static str {
         Mode::GeneratedPreview { .. } => "Generated value",
         Mode::ProviderFailure { .. } => "Provider error",
         Mode::Approval(_) => "Deployment request",
+        Mode::Commit { .. } => "Git Commit",
         _ => "Dialog",
     }
 }
@@ -405,13 +406,26 @@ fn modal_title(mode: &Mode) -> &'static str {
 #[cfg(test)]
 mod tests;
 
-/// The byte offset of a clickable checkbox line in a dialog body.
-fn checkbox_line(model: &Model, body: &str) -> Option<(usize, MouseTarget)> {
-    match model.mode {
-        Mode::Edit { .. } if model.message.is_none() => body
-            .find(text::AUTOSAVE_LABEL)
-            .and_then(|label| body[..label].rfind('\n').map(|start| start + 1))
-            .map(|start| (start, MouseTarget::AutosaveToggle)),
-        _ => None,
+/// The byte offsets of clickable checkbox lines in a dialog body.
+fn checkbox_lines(model: &Model, body: &str) -> Vec<(usize, MouseTarget)> {
+    if model.message.is_some() {
+        return Vec::new();
     }
+    let labels: &[(&str, MouseTarget)] = match model.mode {
+        Mode::Edit { .. } => &[(text::AUTOSAVE_LABEL, MouseTarget::AutosaveToggle)],
+        Mode::Commit { .. } => &[
+            (text::AMEND_LABEL, MouseTarget::CommitAmend),
+            (text::SIGNOFF_LABEL, MouseTarget::CommitSignoff),
+        ],
+        _ => &[],
+    };
+    labels
+        .iter()
+        .filter_map(|(label, target)| {
+            // The last occurrence: a typed message cannot shadow the label.
+            let label = body.rfind(label)?;
+            let start = body[..label].rfind('\n').map_or(0, |start| start + 1);
+            Some((start, *target))
+        })
+        .collect()
 }

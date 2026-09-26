@@ -84,7 +84,10 @@ fn notice_input(
             if model.message.is_none()
                 && matches!(
                     model.mode,
-                    Mode::Edit { .. } | Mode::Search { .. } | Mode::ProfileSave { .. }
+                    Mode::Edit { .. }
+                        | Mode::Search { .. }
+                        | Mode::ProfileSave { .. }
+                        | Mode::Commit { .. }
                 )
             {
                 return reduce(model, event, writer);

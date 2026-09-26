@@ -33,6 +33,7 @@ pub use reducer::reduce;
 mod approval;
 mod provider_failure;
 
+mod commit;
 mod edit;
 use edit::{submit, submit_entry, submit_if_edit, truncate_character};
 

@@ -59,6 +59,11 @@ impl fmt::Debug for Mode {
                 .field("path", path)
                 .field("value", &"<redacted>")
                 .finish(),
+            Self::Commit { draft, editing, .. } => formatter
+                .debug_struct("Commit")
+                .field("draft", draft)
+                .field("editing", editing)
+                .finish(),
             Self::Replace { path, commit, .. } => formatter
                 .debug_struct("Replace")
                 .field("path", path)

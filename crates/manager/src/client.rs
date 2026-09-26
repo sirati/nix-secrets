@@ -1,3 +1,4 @@
+mod commit;
 mod profiles;
 mod public_info;
 mod subscription;

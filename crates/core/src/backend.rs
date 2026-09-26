@@ -19,6 +19,7 @@ pub use feed::BackendEvent;
 use feed::Feed;
 mod protocol;
 pub use protocol::{Request, Response};
+mod commit;
 
 pub struct Backend {
     socket_path: PathBuf,
@@ -110,6 +111,17 @@ fn handle_client(
                 }
             }
         }
+        let request = match request {
+            Request::Commit {
+                options,
+                forward_agent,
+            } => {
+                let response = commit::commit(&mut stream, store, options, forward_agent)?;
+                write_json(&mut stream, &response)?;
+                continue;
+            }
+            request => request,
+        };
         let update = event_after_success(&request, schema);
         let response = match request {
             Request::Get { path } => store
@@ -273,7 +285,11 @@ fn handle_client(
                     .status(&request_id)
                     .map(|state| Response::ApprovalState { state })
             }),
-            Request::SubscribeChanges => unreachable!("handled above"),
+            Request::CommitSummary => commit::repository(store)
+                .and_then(|repository| repository.summary())
+                .map(|summary| Response::CommitSummary { summary }),
+            Request::AgentReply { .. } => Err("no signing request is pending".into()),
+            Request::SubscribeChanges | Request::Commit { .. } => unreachable!("handled above"),
         }
         .unwrap_or_else(|error| Response::Error {
             message: error.to_string(),

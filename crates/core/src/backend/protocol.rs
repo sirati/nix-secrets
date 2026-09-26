@@ -91,6 +91,19 @@ pub enum Request {
         name: String,
         expected_revision: u64,
     },
+    /// What a commit of the managed files would contain.
+    CommitSummary,
+    /// Commits the managed files. With `forward_agent`, the backend relays
+    /// the signing agent's requests as [`Response::AgentRequest`] frames on
+    /// this connection and waits for an [`Request::AgentReply`] to each.
+    Commit {
+        options: crate::git::CommitOptions,
+        forward_agent: bool,
+    },
+    /// The frontend agent's reply to an [`Response::AgentRequest`].
+    AgentReply {
+        message: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -144,5 +157,15 @@ pub enum Response {
     },
     CommitState {
         state: crate::CommitState,
+    },
+    CommitSummary {
+        summary: crate::git::CommitSummary,
+    },
+    /// An ssh-agent request from the commit's signing program.
+    AgentRequest {
+        message: Vec<u8>,
+    },
+    Committed {
+        result: crate::git::CommitResult,
     },
 }

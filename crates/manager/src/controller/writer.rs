@@ -159,6 +159,24 @@ impl SecretWriter for Controller {
     fn paste(&mut self) -> Result<Zeroizing<Vec<u8>>, String> {
         crate::clipboard::paste()
     }
+    fn commit_summary(&mut self) -> Result<nix_secrets_core::git::CommitSummary, String> {
+        self.client
+            .commit_summary()
+            .map_err(|error| error.to_string())
+    }
+    fn commit(
+        &mut self,
+        options: nix_secrets_core::git::CommitOptions,
+    ) -> Result<nix_secrets_core::git::CommitResult, String> {
+        // This frontend's agent signs, whether the backend runs here or on
+        // another host; without one, git signs as the backend would alone.
+        let agent = std::env::var_os("SSH_AUTH_SOCK")
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_absolute());
+        self.client
+            .commit(options, agent.as_deref())
+            .map_err(|error| error.to_string())?
+    }
     fn commit_state(&mut self, path: &str) -> nix_secrets_core::CommitState {
         let result = SecretPath::parse(path)
             .map_err(|error| error.to_string())
