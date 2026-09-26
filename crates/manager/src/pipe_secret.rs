@@ -6,8 +6,17 @@
 //! - `pipe-secret [OPTIONS] <identifier>` writes the value to stdout for a
 //!   pipeline and refuses when stdout is a terminal.
 //!
-//! The value exists only in this process's memory and in the pipe.
+//! Where the value comes from, in order:
+//! 1. `NIX_SECRETS_SESSION` is set (inside `with-secrets`): the session,
+//!    without a prompt. An identifier outside the approved batch is refused;
+//!    it never raises a new request.
+//! 2. Otherwise the attached TUI, as a request for this one value. Without
+//!    a TUI, it fails.
+//! 3. `--local`: decrypted in this process, as before secret requests.
+//!
+//! The value exists only in memory and in the pipe.
 
+use crate::with_secrets::{check_options, parse_option, Options};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -15,83 +24,54 @@ use std::process::{Command, ExitStatus, Stdio};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PipeInvocation {
-    /// Repository holding `nix-secrets.toml`; defaults to the working
-    /// directory, like the consumer flake's `nix run`.
-    pub repository: PathBuf,
-    pub identity: Option<PathBuf>,
-    pub shared_session: bool,
-    /// Connect to this backend socket instead of starting the repository's.
-    pub backend_socket: Option<PathBuf>,
-    /// Read the evaluated schema from this JSON file instead of `nix eval`.
-    pub schema_file: Option<PathBuf>,
+    pub options: Options,
     pub identifier: String,
     /// `None` writes the value to stdout.
     pub command: Option<Vec<OsString>>,
 }
 
-pub const USAGE: &str = "usage: nix-secrets pipe-secret [--repository PATH] [--secret-identity PATH] \
-[--1password-shared-session] [--backend-socket PATH --schema-file PATH] IDENTIFIER [-- COMMAND [ARGUMENT...]]";
+pub const USAGE: &str =
+    "usage: nix-secrets pipe-secret [--repository PATH] [--backend-socket PATH] \
+[--local [--secret-identity PATH] [--1password-shared-session] [--schema-file PATH]] \
+IDENTIFIER [-- COMMAND [ARGUMENT...]]";
 
 pub fn parse(
     arguments: impl IntoIterator<Item = OsString>,
     working_directory: PathBuf,
 ) -> Result<PipeInvocation, String> {
     let mut arguments = arguments.into_iter();
-    let mut repository = None;
-    let mut identity = None;
-    let mut shared_session = false;
-    let mut backend_socket = None;
-    let mut schema_file = None;
+    let mut options = Options {
+        repository: working_directory,
+        ..Options::default()
+    };
     let mut identifier = None;
     let mut command = None;
     while let Some(argument) = arguments.next() {
-        match argument.to_str() {
-            Some("--") => {
-                let rest = arguments.by_ref().collect::<Vec<_>>();
-                if rest.is_empty() {
-                    return Err("`--` must be followed by a command".into());
-                }
-                command = Some(rest);
-                break;
+        let Some(text) = argument.to_str().map(str::to_owned) else {
+            return Err(format!("unexpected argument {argument:?}; {USAGE}"));
+        };
+        if text == "--" {
+            let rest = arguments.by_ref().collect::<Vec<_>>();
+            if rest.is_empty() {
+                return Err("`--` must be followed by a command".into());
             }
-            Some("--repository") if identifier.is_none() => {
-                repository = Some(PathBuf::from(
-                    arguments.next().ok_or("--repository requires a path")?,
-                ));
-            }
-            Some("--secret-identity") if identifier.is_none() => {
-                identity = Some(PathBuf::from(
-                    arguments
-                        .next()
-                        .ok_or("--secret-identity requires a path")?,
-                ));
-            }
-            Some("--1password-shared-session") if identifier.is_none() => shared_session = true,
-            Some("--backend-socket") if identifier.is_none() => {
-                backend_socket = Some(PathBuf::from(
-                    arguments.next().ok_or("--backend-socket requires a path")?,
-                ));
-            }
-            Some("--schema-file") if identifier.is_none() => {
-                schema_file = Some(PathBuf::from(
-                    arguments.next().ok_or("--schema-file requires a path")?,
-                ));
-            }
-            Some(value) if identifier.is_none() && !value.starts_with('-') => {
-                identifier = Some(value.to_owned());
-            }
-            _ => return Err(format!("unexpected argument {argument:?}; {USAGE}")),
+            command = Some(rest);
+            break;
         }
+        if identifier.is_none() && parse_option(&text, &mut arguments, &mut options)? {
+            continue;
+        }
+        if identifier.is_some() || text.starts_with('-') {
+            return Err(format!("unexpected argument {argument:?}; {USAGE}"));
+        }
+        identifier = Some(text);
     }
-    if backend_socket.is_some() != schema_file.is_some() {
-        return Err("--backend-socket and --schema-file are used together".into());
+    check_options(&options)?;
+    if options.local && options.backend_socket.is_some() != options.schema_file.is_some() {
+        return Err("with --local, --backend-socket and --schema-file are used together".into());
     }
     Ok(PipeInvocation {
-        repository: repository.unwrap_or(working_directory),
-        identity,
-        shared_session,
-        backend_socket,
-        schema_file,
+        options,
         identifier: identifier.ok_or(USAGE)?,
         command,
     })
@@ -175,16 +155,21 @@ mod tests {
             "/cwd".into(),
         )
         .unwrap();
-        assert_eq!(wrapper.repository, PathBuf::from("/repo"));
+        assert_eq!(wrapper.options.repository, PathBuf::from("/repo"));
+        assert!(!wrapper.options.local);
         assert_eq!(wrapper.identifier, "host.services.a.key");
         assert_eq!(wrapper.command, Some(os(&["sign", "--key-stdin"])));
         let producer = parse(os(&["host.services.a.key"]), "/cwd".into()).unwrap();
-        assert_eq!(producer.repository, PathBuf::from("/cwd"));
+        assert_eq!(producer.options.repository, PathBuf::from("/cwd"));
         assert_eq!(producer.command, None);
         assert!(parse(os(&[]), "/".into()).is_err());
         assert!(parse(os(&["a", "b"]), "/".into()).is_err());
         assert!(parse(os(&["a", "--"]), "/".into()).is_err());
         assert!(parse(os(&["--unknown", "a"]), "/".into()).is_err());
+        // Local decryption options need --local.
+        assert!(parse(os(&["--secret-identity", "/k", "a"]), "/".into()).is_err());
+        let local = parse(os(&["--local", "--secret-identity", "/k", "a"]), "/".into()).unwrap();
+        assert!(local.options.local);
     }
 
     #[test]

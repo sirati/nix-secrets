@@ -115,3 +115,51 @@ fn shared_session_keeps_the_callers_session() {
     let own = fs::read_to_string("/proc/self/stat").unwrap();
     assert_eq!(session, stat_fields(&own).1, "no new session");
 }
+
+fn frame(values: &[&[u8]]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| {
+            (value.len() as u32)
+                .to_be_bytes()
+                .into_iter()
+                .chain(value.iter().copied())
+        })
+        .collect()
+}
+
+#[test]
+fn a_batch_authorizes_once_and_runs_the_program_per_input() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let op = FakeOp::new("exit 0");
+    let path = env::join_paths(
+        std::iter::once(op.0.clone())
+            .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
+    )
+    .unwrap();
+    let runs = op.0.join("runs");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nix-secrets-1password"))
+        .args(["--batch", "sh", "-c"])
+        .arg(format!("echo run >> '{}'; tr a-z A-Z", runs.display()))
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&frame(&[b"first", b"", b"third\0value"]))
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, frame(&[b"FIRST", b"", b"THIRD\0VALUE"]));
+    assert_eq!(
+        op.calls(),
+        "vault list --format=json\n",
+        "one authorization"
+    );
+    assert_eq!(fs::read_to_string(runs).unwrap().lines().count(), 3);
+}

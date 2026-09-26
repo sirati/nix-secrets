@@ -1,6 +1,7 @@
 //! Operator-only keys: generated through a declared generator, stored
 //! encrypted with a plain public key, never deployed, and handed to other
-//! programs only through `pipe-secret`.
+//! programs only through `pipe-secret` (here `--local`, which decrypts in
+//! its own process; see `secret_requests.rs` for requests to the TUI).
 
 use nix_secrets_core::{ApprovalRequest, Backend, Schema, SecretStore};
 use nix_secrets_crypto::AgeCommandProvider;
@@ -101,6 +102,7 @@ impl Fixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_nix-secrets"));
         command
             .arg("pipe-secret")
+            .arg("--local")
             .arg("--secret-identity")
             .arg(&self.identity)
             .arg("--backend-socket")
@@ -224,6 +226,7 @@ fn pipe_secret_producer_writes_only_the_value_and_refuses_a_terminal() {
     let command = [
         env!("CARGO_BIN_EXE_nix-secrets"),
         "pipe-secret",
+        "--local",
         "--secret-identity",
         fixture.identity.to_str().unwrap(),
         "--backend-socket",

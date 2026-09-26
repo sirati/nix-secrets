@@ -11,7 +11,7 @@ pub use error::{AgeFailure, CryptoError};
 pub use record::EncryptedSecret;
 pub use secret::{
     CryptoProvider, MAX_CIPHERTEXT_SIZE, MAX_SECRET_SIZE, Recipient, VERSION_ID_SIZE,
-    decrypt_secret, encrypt_secret, encrypt_secret_with_version,
+    decrypt_secret, decrypt_secrets, encrypt_secret, encrypt_secret_with_version,
 };
 
 mod header;

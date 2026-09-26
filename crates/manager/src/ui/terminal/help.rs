@@ -72,6 +72,17 @@ Values derived from another secret are deployed from its current value.
 y  Approve the verified target and displayed changes
 n / Esc  Reject the request
 
+SECRET REQUESTS
+A program on the backend host (nix-secrets with-secrets or pipe-secret)
+asks for values. A modal opens over any view, listing each value, its
+kind, description and recipient keys, the requesting program with its PID,
+command and directory, and a countdown. The dialog underneath is kept.
+Ctrl+Shift+Y or Yes  Decrypt all of them with one 1Password authorization
+                     and send them to that program
+n / Enter / Esc      Deny; the program gets nothing
+After 120 s the request is denied. A notice names the requester and
+whether the values were sent.
+
 WORKING
 A strip at the top names a running decryption or save and counts seconds.
 It may be waiting for a 1Password approval prompt. The rest of the screen

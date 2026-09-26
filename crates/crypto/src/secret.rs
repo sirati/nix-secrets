@@ -21,6 +21,43 @@ pub trait CryptoProvider {
     fn encrypt(&self, ssh_recipients: &[&str], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError>;
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError>;
+
+    /// Decrypts several ciphertexts, in order. Providers that ask for an
+    /// authorization override this to ask once for all of them.
+    fn decrypt_batch(&self, ciphertexts: &[&[u8]]) -> Result<Vec<Zeroizing<Vec<u8>>>, CryptoError> {
+        ciphertexts
+            .iter()
+            .map(|ciphertext| self.decrypt(ciphertext))
+            .collect()
+    }
+}
+
+/// Decrypts several records with one [`CryptoProvider::decrypt_batch`] call
+/// and checks each against its identifier and version like
+/// [`decrypt_secret`].
+pub fn decrypt_secrets(
+    records: &[(&str, &EncryptedSecret)],
+    provider: &impl CryptoProvider,
+) -> Result<Vec<Zeroizing<Vec<u8>>>, CryptoError> {
+    for (identifier, record) in records {
+        validate_identifier(identifier)?;
+        validate_record(record)?;
+    }
+    let ciphertexts = records
+        .iter()
+        .map(|(_, record)| record.age_ciphertext.as_slice())
+        .collect::<Vec<_>>();
+    let inner = provider.decrypt_batch(&ciphertexts).map_err(|error| {
+        error.during(|| {
+            let identifiers: Vec<_> = records.iter().map(|(identifier, _)| *identifier).collect();
+            format!("decrypting {}", identifiers.join(", "))
+        })
+    })?;
+    records
+        .iter()
+        .zip(inner.iter())
+        .map(|((identifier, record), inner)| decode_inner(identifier, &record.version_id, inner))
+        .collect()
 }
 
 pub fn encrypt_secret(

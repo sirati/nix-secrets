@@ -37,26 +37,69 @@ constructs a shell command from these arguments.
 ### Using a secret in another program
 
 ```text
+nix-secrets with-secrets [OPTIONS] IDENTIFIER... -- COMMAND [ARGUMENT ...]
 nix-secrets pipe-secret [OPTIONS] IDENTIFIER -- COMMAND [ARGUMENT ...]
 nix-secrets pipe-secret [OPTIONS] IDENTIFIER
 ```
 
-`pipe-secret` decrypts one stored value through the normal provider, including
-the one-shot 1Password launcher, and hands it on without writing it to disk.
+A program that runs on the backend host, for example an install script on the
+machine that holds the repository, asks the operator's open TUI for values.
+Decryption therefore happens where the operator and their 1Password are, not
+on the backend host.
+
+`with-secrets` connects to the running backend of the repository (found like
+the TUI finds it; `--repository PATH` defaults to the working directory,
+`--backend-socket PATH` names the socket directly) and asks for all listed
+values at once. The backend reads the requester's PID, executable, command
+line and working directory from `/proc` and forwards the request to the
+attached TUI. If several TUIs are attached, the one that attached last is
+asked. The TUI shows a modal over whatever is open, listing each value with
+its kind and description, the recipient keys it is encrypted to, where the
+private key comes from, the requesting program and its parent, and a
+countdown. Only Ctrl+Shift+Y or the Yes button sends; n, Enter and Esc deny,
+and after 120 seconds the request is denied. On approval the TUI decrypts the
+whole batch with one 1Password authorization and returns the values over its
+authenticated backend connection.
+
+The backend keeps the values only in memory and serves them on a private
+socket (0600, in a new 0700 directory under `$XDG_RUNTIME_DIR`), answering
+only same-user processes started by the `with-secrets` process. It runs
+`COMMAND` with `NIX_SECRETS_SESSION` set to that socket. When the command
+exits, the socket is removed, the values are erased, and `with-secrets` exits
+with the command's status. If no TUI is attached, or the operator denies,
+`COMMAND` does not run and `with-secrets` fails. Only one request may wait for
+the operator at a time.
+
+`pipe-secret` hands one value to another program without writing it to disk.
 With `-- COMMAND` it runs the command with the value on its stdin and exits
 with the command's status. Without it, the value is written to stdout for a
 pipeline; stdout must not be a terminal, and nothing else is ever written to
-stdout. The repository defaults to the working directory; `--repository PATH`,
-`--secret-identity PATH` and `--1password-shared-session` work as for the TUI.
+stdout. Its source is:
+
+1. inside `with-secrets` (`NIX_SECRETS_SESSION` set): the session, without a
+   prompt. A value that was not part of the approved request is refused; it
+   never raises a new prompt;
+2. otherwise the attached TUI, as a request for this one value;
+3. with `--local`: decrypted in this process, through the one-shot 1Password
+   launcher or `--secret-identity PATH`, as before secret requests existed.
+   `with-secrets --local` does the same for a batch, still with one
+   authorization, and serves the session itself. `--1password-shared-session`
+   and `--schema-file PATH` (with `--backend-socket`) apply only here.
+
+Without a TUI and without `--local`, both commands fail with "open the
+nix-secrets TUI and retry"; they never fall back to decrypting locally.
 
 ```console
+$ nix-secrets with-secrets host.services.nmbl.generation-key -- \
+    nmbl-install --target dns-vps
 $ nix-secrets pipe-secret host.services.nmbl.generation-key -- \
     nmbl-sign sign --key-stdin --domain generation image.efi
 $ nix-secrets pipe-secret host.services.nmbl.generation-key | nmbl-sign sign --key-stdin …
 ```
 
-The second form is what a `keyCommand = [ "nix-secrets" "pipe-secret" "<id>" ]`
-option runs.
+A `keyCommand = [ "nix-secrets" "pipe-secret" "<id>" ]` option that a program
+runs once per signature should be run under `with-secrets`: the operator then
+approves once, and every signature reads the value from the session.
 
 ## Declared secret tree
 

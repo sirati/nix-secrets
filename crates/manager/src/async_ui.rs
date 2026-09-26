@@ -64,12 +64,19 @@ pub struct AsyncWriter {
     /// Answers commit checks on their own connection, so they never wait
     /// behind the worker's queue.
     socket: Option<PathBuf>,
+    /// Secret requests from the backend host; see `operator_channel`.
+    channel: Option<Receiver<crate::operator_channel::ChannelEvent>>,
+    decisions: Option<Sender<crate::operator_channel::Decision>>,
+    secret_prompts: Vec<crate::operator_channel::SecretPrompt>,
+    /// Shown while an approved secret request decrypts.
+    secret_activity: Option<crate::model::Activity>,
 }
 
 impl AsyncWriter {
     pub fn spawn(mut controller: Controller, socket: PathBuf) -> Self {
         let one_password = controller.uses_one_password();
         let check_socket = socket.clone();
+        let (channel, decisions) = spawn_operator_channel(&controller, &socket);
         let (commands, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
         std::thread::spawn(move || {
@@ -142,10 +149,31 @@ impl AsyncWriter {
             activity: None,
             one_password,
             socket: Some(check_socket),
+            channel: Some(channel),
+            decisions: Some(decisions),
+            secret_prompts: vec![],
+            secret_activity: None,
         }
     }
 
     fn pump(&mut self) {
+        if let Some(channel) = &self.channel {
+            use crate::operator_channel::ChannelEvent;
+            while let Ok(event) = channel.try_recv() {
+                match event {
+                    ChannelEvent::Attached => {}
+                    ChannelEvent::Prompt(prompt) => self.secret_prompts.push(prompt),
+                    ChannelEvent::Finished { requester, result } => {
+                        self.secret_activity = None;
+                        self.completions
+                            .push(Completion::SecretRequestFinished { requester, result })
+                    }
+                    ChannelEvent::Lost(error) => self.completions.push(Completion::Failed(
+                        format!("Secret requests from the backend host can no longer reach this TUI: {error}"),
+                    )),
+                }
+            }
+        }
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Rows(rows) => self.rows = Some(rows),
@@ -345,10 +373,63 @@ impl SecretWriter for AsyncWriter {
         result.unwrap_or_else(|reason| CommitState::Unknown { reason })
     }
 
+    fn poll_secret_prompt(&mut self) -> Option<crate::operator_channel::SecretPrompt> {
+        self.pump();
+        (!self.secret_prompts.is_empty()).then(|| self.secret_prompts.remove(0))
+    }
+
+    fn answer_secret(&mut self, id: &str, approved: bool, count: usize) -> Result<(), String> {
+        self.decisions
+            .as_ref()
+            .ok_or("secret requests are unavailable")?
+            .send(crate::operator_channel::Decision {
+                id: id.to_owned(),
+                approved,
+            })
+            .map_err(|_| "the secret request channel stopped".to_string())?;
+        if approved {
+            self.secret_activity = Some(activity(
+                format!(
+                    "Decrypting {count} requested value{}",
+                    if count == 1 { "" } else { "s" }
+                ),
+                self.one_password,
+            ));
+        }
+        Ok(())
+    }
+
     fn activity(&mut self) -> Option<crate::model::Activity> {
         self.pump();
-        self.activity.clone()
+        self.activity
+            .clone()
+            .or_else(|| self.secret_activity.clone())
     }
+}
+
+/// Starts the operator channel on its own connection and thread.
+fn spawn_operator_channel(
+    controller: &Controller,
+    socket: &std::path::Path,
+) -> (
+    Receiver<crate::operator_channel::ChannelEvent>,
+    Sender<crate::operator_channel::Decision>,
+) {
+    use crate::operator_channel::{run, ChannelEvent};
+    let (schema, provider) = controller.schema_and_provider();
+    let identity = provider.identity_description();
+    let socket = socket.to_owned();
+    let (events, channel) = mpsc::channel();
+    let (decisions, incoming) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = run(&socket, &schema, &provider, &identity, &events, &incoming);
+        let message = match result {
+            Ok(()) => "the backend closed the operator channel".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        let _ = events.send(ChannelEvent::Lost(message));
+    });
+    (channel, decisions)
 }
 
 fn activity(label: String, waits_for_one_password: bool) -> crate::model::Activity {

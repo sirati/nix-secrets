@@ -312,6 +312,7 @@ mod collapse_tests;
 mod commit_tests;
 mod generation_tests;
 mod navigation_tests;
+mod secret_request_tests;
 
 #[test]
 fn bracketed_paste_fills_the_entry_dialog_even_after_a_success_notice() {

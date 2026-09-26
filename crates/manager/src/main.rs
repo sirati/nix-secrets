@@ -1,7 +1,8 @@
 use nix_secrets_core::Schema;
 use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_manager::{
-    async_ui::AsyncWriter, cli, client::BackendClient, command, controller::Controller, startup, ui,
+    async_ui::AsyncWriter, cli, client::BackendClient, command, controller::Controller, startup,
+    ui, with_secrets,
 };
 use std::env;
 use std::ffi::OsString;
@@ -18,6 +19,11 @@ fn main() {
         .is_some()
     {
         pipe_secret(arguments.collect())
+    } else if arguments
+        .next_if(|argument| argument == "with-secrets")
+        .is_some()
+    {
+        with_secrets(arguments.collect())
     } else {
         run(arguments.collect()).map(|()| 0)
     };
@@ -30,45 +36,37 @@ fn main() {
     }
 }
 
-/// Decrypts one value locally and hands it to a command's stdin, or to a
-/// non-terminal stdout. Nothing except the value is written to stdout.
+/// Hands one value to a command's stdin, or to a non-terminal stdout.
+/// Nothing except the value is written to stdout.
 fn pipe_secret(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_core::secret_request::SESSION_ENVIRONMENT;
     use nix_secrets_manager::pipe_secret::{deliver, parse, Sink};
     use std::io::IsTerminal;
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is not set")?;
     let invocation = parse(arguments, env::current_dir()?)?;
-    let (stream, schema) = match (&invocation.backend_socket, &invocation.schema_file) {
-        (Some(socket), Some(schema)) => (
-            nix_secrets_manager::socket::connect_verified(socket)?,
-            Schema::from_json(&fs::read_to_string(schema)?)?,
-        ),
+    let identifier = &invocation.identifier;
+    let value = match env::var_os(SESSION_ENVIRONMENT).filter(|value| !value.is_empty()) {
+        // Inside `with-secrets`: only the approved batch, never a new prompt.
+        Some(session) if !invocation.options.local => {
+            nix_secrets_core::secret_session::fetch(Path::new(&session), identifier)
+                .map_err(|error| format!("{identifier}: {error}"))?
+        }
+        _ if invocation.options.local => {
+            let mut values =
+                decrypt_locally(&invocation.options, std::slice::from_ref(identifier))?;
+            values
+                .remove(identifier)
+                .ok_or("the value was not decrypted")?
+        }
         _ => {
-            let repository = fs::canonicalize(&invocation.repository)?;
-            let socket_directory = runtime_directory(&home).join("nix-secrets");
-            fs::create_dir_all(&socket_directory)?;
-            let socket = socket_directory.join(startup::socket_name(&repository));
-            let connection = startup::connect_or_start(
-                &socket,
-                &command::backend(&repository, &socket),
-                &mut startup::ProcessLauncher::persistent(),
-                Duration::from_secs(20),
-            )?;
-            // A persistent backend outlives this command, like the TUI's.
-            let stream = connection.stream;
-            (stream, evaluate(&[], &repository)?)
+            let home = home()?;
+            let stream =
+                with_secrets::connect_backend(&invocation.options, &runtime_directory(&home))?;
+            let session = with_secrets::request(stream, std::slice::from_ref(identifier))?;
+            let value = nix_secrets_core::secret_session::fetch(&session.socket, identifier);
+            session.end()?;
+            value.map_err(|error| format!("{identifier}: {error}"))?
         }
     };
-    let provider = one_password_scope(
-        invocation
-            .identity
-            .map(AgeCommandProvider::identity_file)
-            .unwrap_or_default(),
-        invocation.shared_session,
-    );
-    let mut controller = Controller::new(BackendClient::new(stream), schema, provider, Vec::new())?;
-    let value = controller.reveal_secret(&invocation.identifier)?;
     let status = match &invocation.command {
         Some(command) => deliver(&value, Sink::Command(command))?,
         None => {
@@ -83,13 +81,101 @@ fn pipe_secret(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Erro
             )?
         }
     };
-    Ok(match status {
-        None => 0,
-        Some(status) => status.code().unwrap_or_else(|| {
-            use std::os::unix::process::ExitStatusExt;
-            128 + status.signal().unwrap_or(0)
-        }),
-    })
+    Ok(status.map_or(0, exit_code))
+}
+
+/// Asks the TUI for a batch of values (or decrypts them with `--local`),
+/// runs the command with `NIX_SECRETS_SESSION`, and ends the session when
+/// it exits. Returns the command's status.
+fn with_secrets(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_core::secret_request::SESSION_ENVIRONMENT;
+    let invocation = with_secrets::parse(arguments, env::current_dir()?)?;
+    let (program, arguments) = invocation
+        .command
+        .split_first()
+        .expect("parse requires a command");
+    let mut command = std::process::Command::new(program);
+    command.args(arguments);
+    if invocation.options.local {
+        let values = decrypt_locally(&invocation.options, &invocation.identifiers)?;
+        let session = nix_secrets_core::secret_session::SecretSession::bind(
+            &nix_secrets_core::private_socket::runtime_directory(),
+            values,
+            std::process::id(),
+        )?;
+        let mut child = command
+            .env(SESSION_ENVIRONMENT, session.path())
+            .spawn()
+            .map_err(|error| format!("cannot start {program:?}: {error}"))?;
+        let mut status = None;
+        session.serve_until(|| {
+            status = child.try_wait().ok().flatten();
+            status.is_some()
+        })?;
+        drop(session);
+        return Ok(exit_code(status.expect("served until the command exited")));
+    }
+    let home = home()?;
+    let stream = with_secrets::connect_backend(&invocation.options, &runtime_directory(&home))?;
+    let session = with_secrets::request(stream, &invocation.identifiers)?;
+    let status = command.env(SESSION_ENVIRONMENT, &session.socket).status();
+    let ended = session.end();
+    let status = status.map_err(|error| format!("cannot run {program:?}: {error}"))?;
+    ended?;
+    Ok(exit_code(status))
+}
+
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
+fn home() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Ok(env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set")?)
+}
+
+/// `--local`: decrypts the values in this process with one provider batch,
+/// so 1Password asks once.
+fn decrypt_locally(
+    options: &with_secrets::Options,
+    identifiers: &[String],
+) -> Result<nix_secrets_manager::secret_values::Values, Box<dyn std::error::Error>> {
+    let home = home()?;
+    let (stream, schema) = match (&options.backend_socket, &options.schema_file) {
+        (Some(socket), Some(schema)) => (
+            nix_secrets_manager::socket::connect_verified(socket)?,
+            Schema::from_json(&fs::read_to_string(schema)?)?,
+        ),
+        _ => {
+            let repository = fs::canonicalize(&options.repository)?;
+            let socket_directory = runtime_directory(&home).join("nix-secrets");
+            fs::create_dir_all(&socket_directory)?;
+            let socket = socket_directory.join(startup::socket_name(&repository));
+            let connection = startup::connect_or_start(
+                &socket,
+                &command::backend(&repository, &socket),
+                &mut startup::ProcessLauncher::persistent(),
+                Duration::from_secs(20),
+            )?;
+            // A persistent backend outlives this command, like the TUI's.
+            (connection.stream, evaluate(&[], &repository)?)
+        }
+    };
+    let provider = one_password_scope(
+        options
+            .identity
+            .clone()
+            .map(AgeCommandProvider::identity_file)
+            .unwrap_or_default(),
+        options.shared_session,
+    );
+    let mut client = BackendClient::new(stream);
+    let batch = nix_secrets_manager::secret_values::load(&mut client, &schema, identifiers)?;
+    Ok(batch.decrypt(&provider)?)
 }
 
 fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {

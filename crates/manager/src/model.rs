@@ -234,6 +234,11 @@ pub struct Model {
     pub collapsed: std::collections::BTreeSet<Vec<String>>,
     /// Groups folded during a search, with the query they belong to.
     pub search_collapsed: (String, std::collections::BTreeSet<Vec<String>>),
+    /// A secret request from the backend host, shown above everything else
+    /// until the operator answers or it times out. The dialog underneath is
+    /// kept as it was.
+    pub secret_prompt: Option<crate::operator_channel::SecretPrompt>,
+    pub secret_scroll: u16,
 }
 
 pub struct VisibleRow {
@@ -314,6 +319,8 @@ impl Model {
             commit_draft: CommitDraft::default(),
             collapsed: Default::default(),
             search_collapsed: Default::default(),
+            secret_prompt: None,
+            secret_scroll: 0,
         };
         if structured {
             model.rebuild_tree();
@@ -424,3 +431,6 @@ pub struct CommitDraft {
     pub amend: bool,
     pub signoff: bool,
 }
+
+/// A process from a secret request, for display.
+pub struct ProcessDisplay<'a>(pub &'a nix_secrets_core::secret_request::ProcessInfo);

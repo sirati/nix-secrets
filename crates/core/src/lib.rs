@@ -6,8 +6,11 @@ pub mod backend;
 pub mod framing;
 pub mod generator;
 pub mod git;
+pub mod private_socket;
 pub mod profiles;
 pub mod schema;
+pub mod secret_request;
+pub mod secret_session;
 pub mod store;
 
 pub use approval::{ApprovalBroker, BrokerError};
