@@ -32,3 +32,12 @@ path = "src/main.rs"
 [[bin]]
 name = "nix-secrets-1password"
 path = "src/bin/nix-secrets-1password.rs"
+
+# TEST-ONLY: a headless operator for VM tests; never part of a package.
+[[bin]]
+name = "nix-secrets-test-operator"
+path = "src/bin/nix-secrets-test-operator.rs"
+required-features = ["test-operator"]
+
+[features]
+test-operator = []

@@ -178,11 +178,15 @@ impl HostKeyVerifier {
         if !known.is_empty() && matching.is_empty() {
             return Err(HostKeyError::Changed);
         }
-        let (accepted, status) = if known.is_empty() {
+        let (mut accepted, status) = if known.is_empty() {
             (scanned, HostKeyStatus::Unknown)
         } else {
             (matching, HostKeyStatus::Known)
         };
+        // ssh-keyscan reports keys in no fixed order. Sorted, the identity the
+        // operator approved compares equal to a later scan of the same keys.
+        accepted.sort_by(|a, b| (&a.algorithm, &a.encoded).cmp(&(&b.algorithm, &b.encoded)));
+        accepted.dedup_by(|a, b| a.same_key(b));
         let identity = HostIdentity {
             host: host.into(),
             port,

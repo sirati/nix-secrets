@@ -117,6 +117,19 @@ impl Controller {
         accepted: bool,
         allow_partial: bool,
     ) -> Result<Option<UiApproval>, String> {
+        let result = self.answer_approval(accepted, allow_partial);
+        if let (Err(error), Some(active)) = (&result, self.active.as_mut()) {
+            // Reported to the requester if the operator then rejects.
+            active.last_error = Some(error.clone());
+        }
+        result
+    }
+
+    fn answer_approval(
+        &mut self,
+        accepted: bool,
+        allow_partial: bool,
+    ) -> Result<Option<UiApproval>, String> {
         if accepted {
             if !self
                 .active
@@ -151,12 +164,7 @@ impl Controller {
                 .as_mut()
                 .expect("approval remains active")
                 .renewed_at = Instant::now();
-            if let Err(error) = self.deploy_active() {
-                if let Some(active) = self.active.as_mut() {
-                    active.last_error = Some(error.clone());
-                }
-                return Err(error);
-            }
+            self.deploy_active()?;
             return Ok(None);
         }
         let active = self.active.take().ok_or("no claimed approval request")?;
