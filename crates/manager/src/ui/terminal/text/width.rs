@@ -18,7 +18,7 @@ pub(super) fn shorten(value: &str, max: usize) -> String {
     output
 }
 
-pub(super) fn ellipsize(value: &str, width: usize) -> String {
+pub(crate) fn ellipsize(value: &str, width: usize) -> String {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     if UnicodeWidthStr::width(value) <= width {
         return value.to_owned();

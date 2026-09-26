@@ -53,13 +53,28 @@ the TUI finds it; `--repository PATH` defaults to the working directory,
 values at once. The backend reads the requester's PID, executable, command
 line and working directory from `/proc` and forwards the request to the
 attached TUI. If several TUIs are attached, the one that attached last is
-asked. The TUI shows a modal over whatever is open, listing each value with
-its kind and description, the recipient keys it is encrypted to, where the
-private key comes from, the requesting program and its parent, and a
-countdown. Only Ctrl+Shift+Y or the Yes button sends; n, Enter and Esc deny,
-and after 120 seconds the request is denied. On approval the TUI decrypts the
-whole batch with one 1Password authorization and returns the values over its
-authenticated backend connection.
+asked. The TUI shows a modal over whatever is open: a table of the values
+and their kinds, the recipient and its short fingerprint, where the private
+key comes from, the requesting command, its directory and parent, and a
+countdown. `d` or the Details button shows full descriptions, fingerprints
+and command lines. Only Ctrl+Shift+Y or the Yes button sends; n, Enter and
+Esc deny, and after 120 seconds the request is denied. On approval the TUI
+decrypts the whole batch with one 1Password authorization and returns the
+values over its authenticated backend connection.
+
+When a request opens, the TUI rings the terminal bell, sends a desktop
+notification (OSC 777 for GNOME Console and other VTE terminals, OSC 9 for
+iTerm2, kitty, WezTerm, Windows Terminal and foot) and sets the window title
+to "⚠ nix-secrets: secret request" until the request closes, saving and
+restoring the previous title where the terminal keeps a title stack. The
+bell rings once more when 30 seconds are left. Unsupported sequences are
+ignored. For the bell to be noticed from another window, the terminal has to
+turn it into an urgency hint or a visual bell: GNOME Console and GNOME
+Terminal mark the window urgent by default; kitty needs
+`window_alert_on_bell yes` (the default), WezTerm a `visual_bell` or
+`audible_bell` setting. Inside tmux, the bell reaches the outer terminal with
+the default `bell-action any`, and the notifications need
+`set -g allow-passthrough on` (tmux 3.3 or later).
 
 The backend keeps the values only in memory and serves them on a private
 socket (0600, in a new 0700 directory under `$XDG_RUNTIME_DIR`), answering

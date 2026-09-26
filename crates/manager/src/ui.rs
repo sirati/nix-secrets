@@ -31,6 +31,7 @@ pub use drive::drive;
 mod reducer;
 pub use reducer::reduce;
 mod approval;
+mod attention;
 mod provider_failure;
 pub(crate) mod secret_request;
 

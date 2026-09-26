@@ -239,6 +239,9 @@ pub struct Model {
     /// kept as it was.
     pub secret_prompt: Option<crate::operator_channel::SecretPrompt>,
     pub secret_scroll: u16,
+    /// Whether the secret-request modal shows full commands, fingerprints
+    /// and descriptions instead of its summary.
+    pub secret_details: bool,
 }
 
 pub struct VisibleRow {
@@ -321,6 +324,7 @@ impl Model {
             search_collapsed: Default::default(),
             secret_prompt: None,
             secret_scroll: 0,
+            secret_details: false,
         };
         if structured {
             model.rebuild_tree();

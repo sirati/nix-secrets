@@ -15,6 +15,9 @@ pub(super) struct CrosstermFrontend {
     /// presses, so repeats within [`PASTE_REPEAT_GAP`] are dropped and holding
     /// Ctrl+V reads the clipboard once.
     last_paste: Option<std::time::Instant>,
+    /// The bell, notifications and title for a secret request.
+    attention: crate::ui::attention::Attention,
+    tmux: bool,
 }
 
 const PASTE_REPEAT_GAP: std::time::Duration = std::time::Duration::from_millis(400);
@@ -33,7 +36,28 @@ impl CrosstermFrontend {
             terminal: Terminal::new(CrosstermBackend::new(output))?,
             hits: HitMap::default(),
             last_paste: None,
+            attention: Default::default(),
+            tmux: crate::ui::attention::in_tmux(),
         })
+    }
+
+    /// Writes what [`crate::ui::attention::Attention`] asks for, if anything.
+    pub(super) fn signal(
+        &mut self,
+        prompt: Option<&crate::operator_channel::SecretPrompt>,
+    ) -> io::Result<()> {
+        use std::io::Write;
+        let remaining = prompt.map_or(std::time::Duration::MAX, |prompt| {
+            prompt
+                .deadline
+                .saturating_duration_since(std::time::Instant::now())
+        });
+        if let Some(bytes) = self.attention.update(prompt, remaining, self.tmux) {
+            let output = self.terminal.backend_mut();
+            output.write_all(&bytes)?;
+            output.flush()?;
+        }
+        Ok(())
     }
 
     pub(super) fn restore(&mut self) -> io::Result<()> {
@@ -51,8 +75,9 @@ impl CrosstermFrontend {
 impl Frontend for CrosstermFrontend {
     fn draw(&mut self, model: &Model) -> io::Result<()> {
         self.terminal
-            .draw(|frame| self.hits = render(frame, model))
-            .map(|_| ())
+            .draw(|frame| self.hits = render(frame, model))?;
+        // After the frame, so the bytes never land inside its escape sequences.
+        self.signal(model.secret_prompt.as_ref())
     }
 
     fn edit(&mut self, text: &str) -> Result<String, String> {

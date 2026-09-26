@@ -1,6 +1,7 @@
 mod width;
 use super::*;
-use width::{ellipsize, shorten};
+pub(crate) use width::ellipsize;
+use width::shorten;
 
 /// The label of the autosave checkbox in the entry field.
 pub(super) const AUTOSAVE_LABEL: &str = "Autosave unset on paste (disable in settings/restart)";
