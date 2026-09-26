@@ -129,6 +129,10 @@
             inherit pkgs;
             module = self.nixosModules.default;
           };
+          receiver-validation-vm = import ./nix/tests/receiver-validation.nix {
+            inherit pkgs;
+            module = self.nixosModules.default;
+          };
           storage-box-vm = import ./nix/tests/storage-box.nix {
             inherit pkgs;
             module = self.nixosModules.default;

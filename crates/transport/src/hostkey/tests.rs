@@ -71,3 +71,28 @@ fn unknown_key_requires_explicit_acceptance() {
         .verify_with("host", 22, &mut accept, &fake)
         .is_ok());
 }
+
+/// ssh-keyscan reports a host's keys in no fixed order. The identity an
+/// operator approves must equal the one scanned again before connecting,
+/// or an unknown host with several keys can never be deployed.
+#[test]
+fn the_identity_does_not_depend_on_scan_order() {
+    let scan = |order: &[&str]| Fake {
+        scan: order
+            .iter()
+            .map(|key| format!("host {key}\n"))
+            .collect::<String>()
+            .into_bytes(),
+        find: Vec::new(),
+    };
+    let keys = ["ssh-ed25519 AAAA", "ecdsa-sha2-nistp256 BBBB", "ssh-rsa CCCC"];
+    let first = verifier()
+        .preflight_with("host", 22, &scan(&keys))
+        .unwrap();
+    let reversed = verifier()
+        .preflight_with("host", 22, &scan(&[keys[2], keys[0], keys[1], keys[0]]))
+        .unwrap();
+    assert_eq!(first.identity, reversed.identity);
+    assert_eq!(first.identity.keys.len(), 3);
+    assert_eq!(first.known_host_lines, reversed.known_host_lines);
+}
