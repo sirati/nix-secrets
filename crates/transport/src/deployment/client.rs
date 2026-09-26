@@ -53,6 +53,7 @@ fn batch(
     entries: Vec<DeployEntry>,
     tasks: Vec<TaskEntry>,
     generate: Vec<GenerateEntry>,
+    derive: Vec<String>,
 ) -> DeploymentBatch {
     DeploymentBatch {
         version,
@@ -60,11 +61,13 @@ fn batch(
             .iter()
             .map(|item| item.identifier.clone())
             .chain(generate.iter().map(|item| item.identifier.clone()))
+            .chain(derive.iter().cloned())
             .collect(),
         requested_tasks: tasks.iter().map(|item| item.identifier.clone()).collect(),
         entries,
         tasks,
         generate,
+        derive,
     }
 }
 
@@ -99,7 +102,7 @@ impl PreparedDeployment {
         entries: Vec<DeployEntry>,
         tasks: Vec<TaskEntry>,
     ) -> Result<DeploymentResult, DeploymentError> {
-        self.deploy_with_generation(entries, tasks, Vec::new())
+        self.deploy_with_generation(entries, tasks, Vec::new(), Vec::new())
     }
 
     /// Whether the target can generate values (deployment protocol 2).
@@ -112,8 +115,9 @@ impl PreparedDeployment {
         entries: Vec<DeployEntry>,
         tasks: Vec<TaskEntry>,
         generate: Vec<GenerateEntry>,
+        derive: Vec<String>,
     ) -> Result<DeploymentResult, DeploymentError> {
-        if !generate.is_empty() && !self.supports_generation() {
+        if (!generate.is_empty() || !derive.is_empty()) && !self.supports_generation() {
             return Err(DeploymentError::Invalid(
                 "target runs deployment protocol 1 and cannot generate values; rebuild it first",
             ));
@@ -126,7 +130,15 @@ impl PreparedDeployment {
                 .map(|item| item.identifier.clone())
                 .collect::<Vec<_>>(),
         )?;
-        let batch = batch(self.state.protocol_version, entries, tasks, generate);
+        // `validate_target` already compared every leaf's derivation with the
+        // operator's schema, so the target frames exactly as declared.
+        let batch = batch(
+            self.state.protocol_version,
+            entries,
+            tasks,
+            generate,
+            derive,
+        );
         validate_batch(&batch, &self.state)?;
         send_transport_json(&mut self.session, &batch)?;
         let result: DeploymentResult = receive_transport_json(&mut self.session)?;
@@ -172,7 +184,13 @@ impl<'a> DeploymentClient<'a> {
             .state
             .as_ref()
             .ok_or(DeploymentError::Invalid("target state was not validated"))?;
-        let batch = batch(state.protocol_version, entries, tasks, Vec::new());
+        let batch = batch(
+            state.protocol_version,
+            entries,
+            tasks,
+            Vec::new(),
+            Vec::new(),
+        );
         validate_batch(&batch, state)?;
         send_transport_json(self.transport, &batch)?;
         reject_or_return(receive_transport_json(self.transport)?)

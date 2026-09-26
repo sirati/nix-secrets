@@ -43,6 +43,9 @@ pub struct TargetSecret {
     /// when asked to generate it. Absent when the value must be supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generator: Option<String>,
+    /// Canonical JSON of the leaf's `derivedFrom`, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -74,6 +77,7 @@ pub struct ExpectedSecret {
     pub destination: Destination,
     pub public_info: Option<PublicInfoAttestation>,
     pub generator: Option<String>,
+    pub derived: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -147,6 +151,10 @@ pub struct DeploymentBatch {
     pub tasks: Vec<TaskEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generate: Vec<GenerateEntry>,
+    /// Derived values the target frames itself from a source it generates
+    /// or adopts in this same batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derive: Vec<String>,
 }
 
 /// An age-encrypted value generated on the target. The plaintext never

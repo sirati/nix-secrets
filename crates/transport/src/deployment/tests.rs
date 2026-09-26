@@ -20,6 +20,7 @@ fn target_secret(identifier: &str) -> TargetSecret {
         public_info: None,
         current_version_id: None,
         generator: None,
+        derived: None,
     }
 }
 fn task(identifier: &str, version: Option<&str>) -> TargetTask {
@@ -60,6 +61,7 @@ fn expected(secret_ids: &[&str], tasks: &[TargetTask]) -> ExpectedTarget {
                 destination: destination(),
                 public_info: None,
                 generator: None,
+                derived: None,
             })
             .collect(),
         tasks: tasks
@@ -105,6 +107,7 @@ fn task_contribution_is_exactly_32_bytes() {
             requested_tasks: vec![id.into()],
             tasks: vec![task_entry(id, "v1", &invalid)],
             generate: vec![],
+            derive: vec![],
         };
         assert!(validate_batch(&batch, &target).is_err());
     }
@@ -115,6 +118,7 @@ fn task_contribution_is_exactly_32_bytes() {
         requested_tasks: vec![id.into()],
         tasks: vec![task_entry(id, "v1", &[7; 32])],
         generate: vec![],
+        derive: vec![],
     };
     assert!(validate_batch(&valid, &target).is_ok());
 }
@@ -137,6 +141,7 @@ fn local_key_task_requires_no_bootstrap_password() {
         requested_tasks: vec![id.into()],
         tasks: vec![entry],
         generate: vec![],
+        derive: vec![],
     };
     assert!(validate_batch(&batch, &target).is_ok());
     batch.tasks[0].password_base64 = STANDARD.encode(b"forbidden");
@@ -154,6 +159,7 @@ fn retry_of_current_version_is_accepted_but_selection_cannot_be_substituted() {
         requested_tasks: vec![id.into()],
         tasks: vec![task_entry(id, "v1", &[9; 32])],
         generate: vec![],
+        derive: vec![],
     };
     assert!(validate_batch(&retry, &target).is_ok());
     let mut substituted = retry;
@@ -192,6 +198,7 @@ fn server_sends_selected_task_then_applies_exact_batch() {
         requested_tasks: vec![id.into()],
         tasks: vec![task_entry(id, "v1", &[3; 32])],
         generate: vec![],
+        derive: vec![],
     };
     let mut input = Vec::new();
     write_wire_json(&mut input, &selection).unwrap();
@@ -236,6 +243,7 @@ fn generation_batch(entries: Vec<DeployEntry>, generate: &[&str]) -> DeploymentB
                 client_contribution_base64: STANDARD.encode([1_u8; 32]),
             })
             .collect(),
+        derive: vec![],
     }
 }
 

@@ -78,16 +78,23 @@ impl GenerationHost for SystemHost {
     }
 }
 
+/// Generates the requested values and then frames the requested derived
+/// values from them. A derived value's source must be among `entries`: the
+/// target frames only what it just generated or adopted, so it never needs a
+/// value the operator did not ask it to produce.
 pub fn run_value_generation(
     manifest: &Path,
     hostname: &str,
     entries: &[GenerateEntry],
+    derive: &[String],
     installed_versions: &BTreeMap<String, String>,
     provider: &impl CryptoProvider,
     host: &mut impl GenerationHost,
 ) -> Result<GeneratedValues, DeployError> {
     let schema = load_schema(manifest)?;
-    let mut deployments = Vec::with_capacity(entries.len());
+    let mut produced: BTreeMap<String, ([u8; VERSION_ID_SIZE], Zeroizing<Vec<u8>>)> =
+        BTreeMap::new();
+    let mut deployments = Vec::with_capacity(entries.len() + derive.len());
     let mut records = BTreeMap::new();
     for entry in entries {
         let path = SecretPath::parse(&entry.identifier)
@@ -152,6 +159,7 @@ pub fn run_value_generation(
                     invalid(format!("cannot encrypt {}: {error}", entry.identifier))
                 })?;
         let version_id = STANDARD.encode(version);
+        produced.insert(entry.identifier.clone(), (version, value.clone()));
         deployments.push(SecretDeployment {
             identifier: entry.identifier.clone(),
             version_id: version_id.clone(),
@@ -167,6 +175,33 @@ pub fn run_value_generation(
                 adopted,
             },
         );
+    }
+    for identifier in derive {
+        let path = SecretPath::parse(identifier)
+            .map_err(|error| invalid(format!("invalid derived identifier: {error}")))?;
+        if path.components().first().map(String::as_str) != Some(hostname) {
+            return Err(invalid("derived value belongs to another host"));
+        }
+        let LeafSpec::Stored(spec) = schema
+            .leaf(&path)
+            .map_err(|error| invalid(format!("derived value is absent from manifest: {error}")))?
+        else {
+            return Err(invalid("only stored values can be derived"));
+        };
+        let derived = spec
+            .derived_from
+            .ok_or_else(|| invalid(format!("{identifier} declares no derivedFrom")))?;
+        let (version, value) = produced.get(&derived.identifier).ok_or_else(|| {
+            invalid(format!(
+                "{identifier}: its source {} is not generated in this deployment",
+                derived.identifier
+            ))
+        })?;
+        deployments.push(SecretDeployment {
+            identifier: identifier.clone(),
+            version_id: derived.version(version),
+            contents_base64: STANDARD.encode(derived.frame(value).as_slice()),
+        });
     }
     Ok(GeneratedValues {
         deployments,

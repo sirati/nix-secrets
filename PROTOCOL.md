@@ -238,7 +238,16 @@ stored or generated. The frontend decrypts the named source, which may belong
 to another host, and deploys `prefix + source + suffix` as an ordinary entry.
 Its version is `d-` and 32 hex digits of SHA-256 over the length-prefixed
 source version, source identifier, prefix and suffix. It changes exactly when
-the source value or the framing changes. An unset source refuses the
+the source value or the framing changes.
+
+If the source is unset and in the same deployment's `generate` list, it is on
+the same target, and the batch names the derived value in `derive` instead of
+sending it. The target frames it from the value it generated or adopted for
+the source and computes the same version. Every target secret reports its
+canonical `derived` description, which the frontend compares with its schema
+before deploying, so the target frames exactly as declared. A `derive` entry
+whose source is not generated in the same batch is rejected. Any other unset
+source refuses the
 deployment before connecting, naming the source and, when the source is
 generatable, the host whose deployment generates it.
 

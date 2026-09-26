@@ -111,6 +111,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             path,
             &hostname,
             &batch.generate,
+            &batch.derive,
             &current,
             &AgeCommandProvider::new(age.clone()),
             &mut SystemHost,

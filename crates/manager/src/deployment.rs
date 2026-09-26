@@ -72,13 +72,14 @@ pub fn deploy(
     entries: Vec<DeployEntry>,
     tasks: Vec<TaskEntry>,
     generate: Vec<GenerateEntry>,
+    derive: Vec<String>,
 ) -> Result<AppliedOutput, String> {
     let requested = generate
         .iter()
         .map(|item| item.identifier.clone())
         .collect::<std::collections::BTreeSet<_>>();
     match prepared
-        .deploy_with_generation(entries, tasks, generate)
+        .deploy_with_generation(entries, tasks, generate, derive)
         .map_err(|error| error.to_string())?
     {
         DeploymentResult::Applied {

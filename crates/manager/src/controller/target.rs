@@ -18,6 +18,10 @@ pub(super) fn expected_target(
             LeafSpec::Stored(spec) => secrets.push(ExpectedSecret {
                 identifier: identifier.clone(),
                 generator: super::unset::expected_generator(&spec),
+                derived: spec
+                    .derived_from
+                    .as_ref()
+                    .map(|derived| derived.fingerprint()),
                 recipient_ids: spec.recipient_ids,
                 destination: destination(spec.destination, spec.consumer_units),
                 public_info: spec
@@ -116,6 +120,7 @@ mod tests {
             public_info: None,
             current_version_id: version.map(str::to_owned),
             generator: None,
+            derived: None,
         };
         let state = TargetState {
             protocol_version: 1,

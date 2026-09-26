@@ -95,6 +95,21 @@ pkgs.testers.runNixOSTest {
             mode = "0400";
           };
         };
+        secrets.cookie-file = {
+          valueType = "key";
+          derivedFrom = {
+            identifier = "machine.services.generated.cookie";
+            prefix = "[cookie]\nvalue=";
+            suffix = "\n";
+          };
+          destination = {
+            path = "/persistent/secrets/generated/service/cookie-file";
+            category = "service";
+            owner = "alpha";
+            group = "alpha";
+            mode = "0400";
+          };
+        };
       };
       # Operator-only: must never reach the host.
       services.signing.secrets.generation-key = {
@@ -338,11 +353,13 @@ pkgs.testers.runNixOSTest {
             return json.loads(exact(int.from_bytes(exact(4),'big')))
         s=socket.socket(socket.AF_UNIX)
         s.connect('{socket}')
-        s.sendall(wire({{'identifiers':['{identifier}']}}))
+        s.sendall(wire({{'identifiers':['{identifier}','machine.services.generated.cookie-file']}}))
         state=receive(s)
         assert state['protocol_version']==2
-        assert json.loads(state['secrets'][0]['generator'])['kind']=='value'
-        s.sendall(wire({{'version':2,'requested_identifiers':['{identifier}'],'entries':[],
+        cookie=[x for x in state['secrets'] if x['identifier']=='{identifier}'][0]
+        assert json.loads(cookie['generator'])['kind']=='value'
+        s.sendall(wire({{'version':2,'requested_identifiers':['{identifier}','machine.services.generated.cookie-file'],'entries':[],
+            'derive':['machine.services.generated.cookie-file'],
             'generate':[{{'identifier':'{identifier}',
             'client_contribution_base64':base64.b64encode(bytes([13])*32).decode()}}]}}))
         result=receive(s)
@@ -489,6 +506,10 @@ pkgs.testers.runNixOSTest {
     second = deploy_generated()
     assert second["adopted"] and second["version_id_base64"] == first["version_id_base64"]
     assert machine.succeed("cat /persistent/secrets/generated/service/cookie") == cookie
+    # The derived file, framed on the target from the value it generated.
+    assert machine.succeed("cat /persistent/secrets/generated/service/cookie-file") == (
+        "[cookie]\nvalue=" + cookie + "\n"
+    )
 
     machine.reboot()
     machine.wait_for_unit("multi-user.target")

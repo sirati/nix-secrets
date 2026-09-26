@@ -21,6 +21,9 @@ pub(crate) struct UnsetPlan {
     pub missing: Vec<(String, String)>,
     /// Derived values and their sources, deployed from the source's value.
     pub derived: Vec<(String, String)>,
+    /// Derived values the target frames itself, because their source is
+    /// unset, on the same host, and generated in this deployment.
+    pub derived_on_target: Vec<(String, String)>,
 }
 
 impl UnsetPlan {
@@ -50,6 +53,7 @@ pub(crate) fn plan_unset(
     set: &BTreeSet<String>,
 ) -> Result<UnsetPlan, String> {
     let mut plan = UnsetPlan::default();
+    let mut waiting = Vec::new();
     for identifier in identifiers {
         let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
         if let Ok(LeafSpec::Stored(spec)) = schema.leaf(&path) {
@@ -58,8 +62,7 @@ pub(crate) fn plan_unset(
                 if set.contains(source) {
                     plan.derived.push((identifier.clone(), source.clone()));
                 } else {
-                    plan.missing
-                        .push((identifier.clone(), source_first(schema, source)));
+                    waiting.push((identifier.clone(), source.clone()));
                 }
                 continue;
             }
@@ -89,6 +92,21 @@ pub(crate) fn plan_unset(
             Err(reason) => plan
                 .missing
                 .push((identifier.clone(), reason.reason().to_owned())),
+        }
+    }
+    // An unset source generated in this same request is on the same host
+    // (a request names one target), so that target frames the derived value
+    // from what it generates, and both land in one atomic generation.
+    for (identifier, source) in waiting {
+        if plan
+            .generate
+            .iter()
+            .any(|(generated, _)| generated == &source)
+        {
+            plan.derived_on_target.push((identifier, source));
+        } else {
+            let reason = source_first(schema, &source);
+            plan.missing.push((identifier, reason));
         }
     }
     Ok(plan)
@@ -207,7 +225,7 @@ impl Controller {
         let framed = derived.frame(&value);
         Ok(DeployEntry {
             identifier: identifier.to_owned(),
-            version_id: derived_version(&stored.version_id, &derived),
+            version_id: derived.version(&stored.version_id),
             contents_base64: STANDARD.encode(framed.as_slice()),
         })
     }
@@ -259,33 +277,6 @@ impl Controller {
             Err(format!("Deployed, but {}", problems.join(" Also, ")))
         }
     }
-}
-
-/// `d-` + hex of SHA-256 over the source version and the framing: stable
-/// while both are, and never equal to a stored value's base64 version.
-pub(crate) fn derived_version(
-    source_version: &[u8],
-    derived: &nix_secrets_core::DerivedFrom,
-) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for part in [
-        source_version,
-        derived.identifier.as_bytes(),
-        derived.prefix.as_bytes(),
-        derived.suffix.as_bytes(),
-    ] {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
-    }
-    let digest = hasher.finalize();
-    format!(
-        "d-{}",
-        digest[..16]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
 }
 
 #[cfg(test)]

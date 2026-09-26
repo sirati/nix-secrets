@@ -62,7 +62,10 @@ fn fixture() -> Fixture {
                 "externalInputRequired": true})),
             "opaque": leaf(&public_key, "opaque", json!({"valueType": "key"})),
             "shared": leaf(&public_key, "shared", json!({"valueType": "password",
-                "generateOnDeploy": false}))
+                "generateOnDeploy": false})),
+            "knot": leaf(&public_key, "knot", json!({"valueType": "key",
+                "derivedFrom": {"identifier": "host.services.app.cookie",
+                    "prefix": "secret: ", "suffix": "\n"}}))
         }}
     }});
     let manifest = temp.path().join("manifest.json");
@@ -159,10 +162,16 @@ impl Target {
     fn deploy(&mut self, fixture: &Fixture, plan: &UnsetPlan) -> BTreeMap<String, GeneratedRecord> {
         let entries = generate_entries(plan).unwrap();
         let versions = self.versions.clone();
+        let derive = plan
+            .derived_on_target
+            .iter()
+            .map(|(identifier, _)| identifier.clone())
+            .collect::<Vec<_>>();
         let result = run_value_generation(
             &fixture.manifest,
             "host",
             &entries,
+            &derive,
             &versions,
             // The target encrypts with plain age; it holds no identity.
             &AgeCommandProvider::new("age"),
@@ -512,4 +521,57 @@ mod derived {
         let only_dns = json!({"dns": document["dns"].clone()});
         assert!(Schema::from_json(&only_dns.to_string()).is_ok());
     }
+}
+
+#[test]
+fn a_derived_value_and_its_unset_source_on_one_host_deploy_together() {
+    let fixture = fixture();
+    let mut controller = fixture.controller();
+    let identifiers = Fixture::ids(&["cookie", "knot"]);
+    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new()).unwrap();
+    assert_eq!(plan.refusal(), None);
+    assert_eq!(
+        plan.derived_on_target,
+        vec![(
+            "host.services.app.knot".to_string(),
+            "host.services.app.cookie".to_string()
+        )]
+    );
+    let mut target = Target::default();
+    let records = target.deploy(&fixture, &plan);
+    controller.store_generated(&records).unwrap();
+    // The target installed the framed source, and the store holds only the
+    // source: the operator decrypts exactly the bytes framed on the target.
+    let cookie = fixture.decrypt(&mut controller, "cookie");
+    assert_eq!(
+        target.value("knot"),
+        [b"secret: ".as_slice(), &cookie, b"\n"].concat()
+    );
+    assert!(controller
+        .client
+        .list()
+        .unwrap()
+        .get("host.services.app.knot")
+        .is_none());
+    // A later deployment derives from the stored source on the operator side
+    // and yields the same bytes and version, so nothing changes on the host.
+    let set = controller.client.list().unwrap();
+    let plan = plan_unset(
+        &fixture.schema,
+        &identifiers,
+        &set.keys().cloned().collect(),
+    )
+    .unwrap();
+    assert!(plan.derived_on_target.is_empty());
+    let entry = controller
+        .derived_entry("host.services.app.knot", "host.services.app.cookie", &set)
+        .unwrap();
+    assert_eq!(
+        STANDARD.decode(&entry.contents_base64).unwrap(),
+        target.value("knot")
+    );
+    assert_eq!(entry.version_id, target.versions["host.services.app.knot"]);
+    // Without its source in the request, it still waits for the source.
+    let plan = plan_unset(&fixture.schema, &Fixture::ids(&["knot"]), &BTreeSet::new()).unwrap();
+    assert!(plan.refusal().unwrap().contains("deploy host first"));
 }
