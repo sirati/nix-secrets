@@ -73,6 +73,13 @@ pub fn drive(
             continue;
         }
         let action = reduce(model, event, writer);
+        // Ctrl+E in the commit dialog: the frontend suspends for the editor.
+        if let Mode::Commit { editing, draft, .. } = &mut model.mode {
+            if std::mem::take(editing) {
+                let edited = frontend.edit(&draft.message);
+                reduce(model, UiEvent::Edited(edited), writer);
+            }
+        }
         model.show_pending_approval();
         schedule(&mut redraw_at);
         if action == Action::Quit {
@@ -240,6 +247,15 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             }
             model.inform(format!("deleted view profile {name}"));
         }
+        // The summary opens the dialog only if nothing else opened meanwhile.
+        Completion::CommitSummary(summary) if matches!(model.mode, Mode::Browse) => {
+            super::commit::show(model, summary)
+        }
+        Completion::CommitSummary(_) => {}
+        // The overwrite and delete warnings ask the backend about HEAD each
+        // time they open, so they see the new commit without a refresh.
+        Completion::Committed(result) => super::commit::committed(model, result),
+        Completion::CommitFailed(error) => model.fail(format!("git commit failed:\n{error}")),
     }
     model.show_pending_approval();
 }

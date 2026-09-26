@@ -34,6 +34,8 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             model.mode = Mode::FacetCategories { selected: 0 }
         }
         (Mode::Browse, UiEvent::Character('T')) => model.mode = Mode::TreeOrder { selected: 0 },
+        (Mode::Browse, UiEvent::Character('C')) => commit::open(model, writer),
+        (mode @ Mode::Commit { .. }, event) => commit::reduce(model, writer, mode, event),
         (Mode::Browse, UiEvent::Character('S')) => model.mode = Mode::Profiles { selected: 0 },
         (
             mode @ (Mode::Profiles { .. }

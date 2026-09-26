@@ -5,6 +5,7 @@ pub mod approval_types;
 pub mod backend;
 pub mod framing;
 pub mod generator;
+pub mod git;
 pub mod profiles;
 pub mod schema;
 pub mod store;

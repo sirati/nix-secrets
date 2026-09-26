@@ -309,6 +309,7 @@ fn bulk_generation_only_requests_unset_passwords() {
 }
 
 mod collapse_tests;
+mod commit_tests;
 mod generation_tests;
 mod navigation_tests;
 

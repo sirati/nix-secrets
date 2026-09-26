@@ -58,6 +58,14 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
             Ok(snapshot) => Completion::ProfileSaved { name, snapshot },
             Err(error) => Completion::Failed(error),
         },
+        Command::CommitSummary => match controller.commit_summary() {
+            Ok(summary) => Completion::CommitSummary(summary),
+            Err(error) => Completion::Failed(error),
+        },
+        Command::Commit(options) => match controller.commit(options) {
+            Ok(result) => Completion::Committed(result),
+            Err(error) => Completion::CommitFailed(error),
+        },
         Command::DeleteProfile { name, revision } => {
             match controller.delete_profile(name.clone(), revision) {
                 Ok(snapshot) => Completion::ProfileDeleted { name, snapshot },

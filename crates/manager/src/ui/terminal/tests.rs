@@ -469,3 +469,53 @@ fn groups_show_a_collapse_marker() {
     assert!(screen.contains("▸ group/"), "{screen}");
     assert!(!screen.contains("value"), "{screen}");
 }
+
+#[test]
+fn commit_dialog_shows_the_summary_and_clickable_checkboxes() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::Commit {
+        draft: crate::model::CommitDraft {
+            message: "Store secrets".into(),
+            amend: false,
+            signoff: true,
+        },
+        summary: nix_secrets_core::git::CommitSummary {
+            diff_stat: " nix-secrets.toml | 2 +-".into(),
+            changed: vec![" M nix-secrets.toml".into()],
+            foreign_staged: vec![],
+            head_message: None,
+            signs: true,
+        },
+        editing: false,
+    };
+    let mut hits = HitMap::default();
+    terminal.draw(|frame| hits = render(frame, &model)).unwrap();
+    let screen = (0..40)
+        .map(|y| line(&terminal, y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("Git Commit"), "{screen}");
+    assert!(screen.contains("Store secrets"), "{screen}");
+    assert!(screen.contains("□ Amend the last commit"), "{screen}");
+    assert!(screen.contains("☑ Signoff"), "{screen}");
+    assert!(screen.contains("nix-secrets.toml | 2 +-"), "{screen}");
+    for target in [
+        MouseTarget::CommitAmend,
+        MouseTarget::CommitSignoff,
+        MouseTarget::CommitEditor,
+        MouseTarget::CommitSubmit,
+    ] {
+        let (area, _) = hits
+            .regions
+            .iter()
+            .find(|(_, hit)| *hit == target)
+            .unwrap_or_else(|| panic!("{target:?} is not clickable"));
+        // The label, not only the box, is inside the checkbox region.
+        if target == MouseTarget::CommitAmend {
+            let row = line(&terminal, area.y);
+            assert!(row.contains("Amend the last commit"), "{row}");
+            assert!(area.width > 20);
+        }
+    }
+}

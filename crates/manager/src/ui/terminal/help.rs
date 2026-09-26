@@ -14,6 +14,7 @@ F  Filter by any identity or presentation attribute
 T  Choose which attributes form the tree and reorder them
 S  Open named view profiles; Enter loads, n saves new, s overwrites, d deletes
 O  Settings for this session (reset on restart; never saved to the repository)
+C  Git Commit: commit nix-secrets.toml and nix-secrets-profiles.toml only
 1 Required (external values, and unset values needed before install) · 2 All · 3 Keys · 4 Passwords · 5 Public info
 6 Everyone · 7 Human-facing
 ?  Show or close this help
@@ -54,6 +55,13 @@ Ctrl+R  In the entry field or that question: reveal the current stored value;
 A value that was never committed to git gets a loss warning; only
 Ctrl+Shift+Y or its Yes button overwrites it; n, Enter, Space and Esc keep it.
 Terminals that cannot report Shift with Ctrl need the Yes button
+
+GIT COMMIT (C)
+Type the message; Enter adds a line. Tab or a click toggles Amend (fills in
+the last message when empty), Ctrl+O or a click toggles Signoff.
+Ctrl+E opens $VISUAL/$EDITOR here; Ctrl+S commits; Esc keeps the draft.
+Only the two nix-secrets files are committed; other staged changes block it.
+Signing uses the ssh-agent of this machine, relayed for that commit only.
 
 DEPLOYMENT
 A target deployer requests one server's values.

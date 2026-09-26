@@ -241,6 +241,56 @@ boot.nmbl.signing.publicKeys = [
 
 Both read only the committed TOML, so evaluation stays pure.
 
+### Committing from the TUI
+
+`C` or the "Git Commit" button opens a commit dialog. It shows the
+`git diff --stat HEAD` of the two files the backend manages,
+`nix-secrets.toml` and `nix-secrets-profiles.toml`, and says whether commits
+are signed. Type the message directly; Enter starts a new line. Tab or a
+click on "Amend" toggles `--amend`, and with an empty message fills in the
+message of `HEAD`; an amend with an empty message keeps it. Ctrl+O or a
+click toggles "Signoff" (`--signoff`). Ctrl+E or "Open in editor" suspends
+the TUI and edits the message in `$VISUAL`, `$EDITOR` or `vi` on the machine
+running the TUI; the file lives in a new 0700 directory under
+`$XDG_RUNTIME_DIR` and is deleted afterwards. Ctrl+S or "Commit" commits;
+Esc closes the dialog and keeps the draft for next time.
+
+Only the two managed files are staged and committed (`git add -- <files>`,
+then `git commit -- <files>`). If anything else is already staged, the
+commit is refused and the dialog names those paths. Committing only our
+paths would also leave them out, but silently, and a later plain
+`git commit` would pick them up unreviewed. An empty message is refused
+unless amending. Success shows the new hash and the commit line; a failure
+shows git's full error output. The overwrite and delete warnings ask the
+backend about `HEAD` each time they open, so they see the new commit.
+
+The backend runs `git`, but signing uses the ssh-agent of the machine running
+the TUI, which may be a laptop connected over SSH. For the duration of one
+commit:
+
+1. The TUI asks the backend to commit with a forwarded agent over the
+   existing, peer-credential-checked backend connection.
+2. The backend creates a private directory (0700) under `$XDG_RUNTIME_DIR`
+   with a socket (0600) that accepts only its own user, and runs
+   `git -c gpg.ssh.program=ssh-keygen commit ...` with `SSH_AUTH_SOCK`
+   pointing there, for that child only. `ssh-keygen -Y sign` signs through
+   the agent; `op-ssh-sign` would ask a 1Password app on the backend host
+   instead. `user.signingkey` and the rest of the configuration stay as they
+   are.
+3. Each agent request travels to the TUI as a frame on the backend
+   connection. Both the backend and the TUI allow only
+   `REQUEST_IDENTITIES` and a `SIGN_REQUEST` whose data is an SSHSIG blob in
+   the `git` namespace. Adding or removing keys, locking, extensions, and
+   signing anything else, such as an SSH login challenge, get
+   `SSH_AGENT_FAILURE`.
+4. The TUI answers from its own `SSH_AUTH_SOCK`, so 1Password asks for
+   approval there. When git exits, the backend removes the socket and its
+   directory.
+
+This works the same when the TUI runs on the backend host. Without an
+`SSH_AUTH_SOCK` in the TUI, git signs as the backend's own configuration
+would.
+
 ## Backend
 
 The frontend connects to a Unix socket selected by repository configuration,

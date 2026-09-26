@@ -180,6 +180,13 @@ pub enum Mode {
         replacing: bool,
     },
     Approval(ApprovalRequest),
+    /// The Git Commit dialog.
+    Commit {
+        draft: CommitDraft,
+        summary: nix_secrets_core::git::CommitSummary,
+        /// Set by Ctrl+E: the frontend opens the message in an editor.
+        editing: bool,
+    },
     ProviderFailure {
         message: String,
         path: String,
@@ -220,6 +227,9 @@ pub struct Model {
     /// The slow background operation in progress, shown as an overlay.
     pub activity: Option<Activity>,
     pub settings: Settings,
+    /// The commit message and options last typed, kept until a commit
+    /// succeeds so a cancelled or failed commit can be resumed.
+    pub commit_draft: CommitDraft,
     /// Collapsed groups by their path of attribute values; see `collapse`.
     pub collapsed: std::collections::BTreeSet<Vec<String>>,
     /// Groups folded during a search, with the query they belong to.
@@ -301,6 +311,7 @@ impl Model {
             active_profile: None,
             activity: None,
             settings: Settings::default(),
+            commit_draft: CommitDraft::default(),
             collapsed: Default::default(),
             search_collapsed: Default::default(),
         };
@@ -406,3 +417,10 @@ impl Model {
 mod facet_tests;
 #[cfg(test)]
 mod tests;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CommitDraft {
+    pub message: String,
+    pub amend: bool,
+    pub signoff: bool,
+}
