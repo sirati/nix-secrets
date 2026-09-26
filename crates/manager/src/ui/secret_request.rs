@@ -2,12 +2,16 @@
 //! the dialog underneath keeps its state and is usable again once the
 //! request is answered.
 //!
-//! Only Ctrl+Shift+Y or the Yes button approves. n, Esc and Enter deny.
-//! After [`crate::operator_channel::DECISION_TIMEOUT`] the channel denies
-//! on its own and the modal closes.
+//! Only Ctrl+Shift+Y or the Yes button approves. n, Esc and Enter deny; d
+//! toggles the details. After [`crate::operator_channel::DECISION_TIMEOUT`]
+//! the channel denies on its own and the modal closes.
+use super::terminal::ellipsize;
 use super::*;
 use crate::operator_channel::SecretPrompt;
+use nix_secrets_core::secret_request::ProcessInfo;
+use std::path::Path;
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
 
 /// Handles input while a request is shown. Returns whether it consumed the
 /// event; if not, no request is open and the event goes on as usual.
@@ -36,6 +40,12 @@ pub(super) fn intercept(
             model.secret_scroll = model.scrolled(model.secret_scroll, true);
             return true;
         }
+        UiEvent::Character('d')
+        | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Character('d'))) => {
+            model.secret_details = !model.secret_details;
+            model.secret_scroll = 0;
+            return true;
+        }
         UiEvent::ConfirmLoss | UiEvent::Click(MouseTarget::ConfirmLoss) => true,
         UiEvent::Character('n')
         | UiEvent::Escape
@@ -50,6 +60,7 @@ pub(super) fn intercept(
     let count = prompt.values.len();
     model.secret_prompt = None;
     model.secret_scroll = 0;
+    model.secret_details = false;
     // An approval shows the progress strip; the outcome arrives as a notice.
     if let Err(error) = writer.answer_secret(&id, decision, count) {
         model.fail(error);
@@ -63,6 +74,7 @@ pub(super) fn tick(model: &mut Model, writer: &mut impl SecretWriter) -> bool {
     if let Some(prompt) = writer.poll_secret_prompt() {
         model.secret_prompt = Some(prompt);
         model.secret_scroll = 0;
+        model.secret_details = false;
         changed = true;
     }
     if model
@@ -106,39 +118,189 @@ fn process_lines(label: &str, process: &crate::model::ProcessDisplay<'_>) -> Str
     text
 }
 
-/// The modal body.
-pub(super) fn body(prompt: &SecretPrompt) -> String {
-    let remaining = prompt.deadline.saturating_duration_since(Instant::now());
-    let mut text = format!(
-        "A process on the backend host asks for {} secret value{}.\n\n",
-        prompt.values.len(),
-        if prompt.values.len() == 1 { "" } else { "s" }
-    );
-    if let Some(parent) = &prompt.parent {
-        text.push_str(&process_lines(
-            "Program",
-            &crate::model::ProcessDisplay(parent),
-        ));
-        text.push('\n');
+/// The file name of a process's executable, else of its first argument.
+fn program_name(process: &ProcessInfo) -> String {
+    process
+        .executable
+        .as_deref()
+        .or(process.argv.first().map(String::as_str))
+        .map(|path| {
+            Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_owned())
+        })
+        .unwrap_or_else(|| "unknown program".into())
+}
+
+/// The modal title: who asked.
+pub(crate) fn title(prompt: &SecretPrompt) -> String {
+    format!(
+        "Secret request from {} (pid {})",
+        program_name(&prompt.requester),
+        prompt.requester.pid
+    )
+}
+
+/// Where the private key comes from, in one word.
+fn key_source(identity: &str) -> &str {
+    if identity.starts_with("1Password") {
+        "1Password"
+    } else if identity.starts_with("identity file") {
+        "identity-file"
+    } else {
+        identity.split_whitespace().next().unwrap_or("unknown")
     }
-    text.push_str(&process_lines(
+}
+
+/// `name: ssh-ed25519 SHA256:abcdefgh…` as `name SHA256:abcdefgh`.
+fn short_recipient(recipient: &str) -> String {
+    let (name, key) = recipient.split_once(": ").unwrap_or((recipient, ""));
+    let fingerprint = key.split_whitespace().last().unwrap_or("");
+    let short = match fingerprint.strip_prefix("SHA256:") {
+        Some(hash) => format!("SHA256:{}", hash.chars().take(8).collect::<String>()),
+        None => fingerprint.chars().take(16).collect(),
+    };
+    if short.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name} {short}")
+    }
+}
+
+/// The seconds until the request denies itself.
+pub(crate) fn remaining_seconds(prompt: &SecretPrompt) -> u64 {
+    prompt
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .as_secs()
+}
+
+/// The modal body for an inner width of `width` columns. The summary keeps
+/// every line within `width`; the details wrap.
+pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String {
+    let source = key_source(&prompt.identity);
+    let fit = |line: String| ellipsize(&line, width);
+    let mut lines = vec![
+        fit(format!("Approve to decrypt these once with {source}.")),
+        String::new(),
+    ];
+    if details {
+        return details_body(prompt, lines);
+    }
+    // Identifier and kind always show; the description only with room left.
+    let id_width = prompt
+        .values
+        .iter()
+        .map(|value| UnicodeWidthStr::width(value.identifier.as_str()))
+        .chain([UnicodeWidthStr::width("Identifier")])
+        .max()
+        .unwrap_or(0)
+        .min(width * 3 / 5);
+    let kind_width = prompt
+        .values
+        .iter()
+        .map(|value| UnicodeWidthStr::width(value.kind.as_str()))
+        .chain([UnicodeWidthStr::width("Kind")])
+        .max()
+        .unwrap_or(0);
+    let rest = width.saturating_sub(id_width + kind_width + 4);
+    let with_description = rest >= 12
+        && prompt
+            .values
+            .iter()
+            .any(|value| value.description.is_some());
+    let row = |identifier: &str, kind: &str, description: &str| {
+        let mut line = format!(
+            "{}  {}",
+            pad(&ellipsize(identifier, id_width), id_width),
+            pad(kind, kind_width)
+        );
+        if with_description {
+            line.push_str("  ");
+            line.push_str(&ellipsize(description, rest));
+        }
+        fit(line.trim_end().to_owned())
+    };
+    lines.push(row(
+        "Identifier",
+        "Kind",
+        if with_description { "Description" } else { "" },
+    ));
+    for value in &prompt.values {
+        lines.push(row(
+            &value.identifier,
+            &value.kind,
+            value.description.as_deref().unwrap_or(""),
+        ));
+    }
+    lines.push(String::new());
+    let mut recipients: Vec<String> = Vec::new();
+    for recipient in prompt.values.iter().flat_map(|value| &value.recipients) {
+        let short = short_recipient(recipient);
+        if !recipients.contains(&short) {
+            recipients.push(short);
+        }
+    }
+    let label = if recipients.len() == 1 {
+        "Recipient"
+    } else {
+        "Recipients"
+    };
+    lines.push(fit(format!("{label:<10} {}", recipients.join(", "))));
+    lines.push(fit(format!("{:<10} {source}", "Key")));
+    let requester = &prompt.requester;
+    lines.push(fit(format!(
+        "{:<10} {}",
+        "Command",
+        requester.argv.join(" ")
+    )));
+    if let Some(cwd) = &requester.cwd {
+        lines.push(fit(format!("{:<10} {cwd}", "Cwd")));
+    }
+    if let Some(parent) = &prompt.parent {
+        lines.push(fit(format!(
+            "{:<10} via {} ({})",
+            "Parent",
+            program_name(parent),
+            parent.pid
+        )));
+    }
+    lines.join("\n")
+}
+
+fn details_body(prompt: &SecretPrompt, mut lines: Vec<String>) -> String {
+    lines.push("Values:".into());
+    for value in &prompt.values {
+        lines.push(format!("• {} ({})", value.identifier, value.kind));
+        if let Some(description) = &value.description {
+            lines.push(format!("  {description}"));
+        }
+        for recipient in &value.recipients {
+            lines.push(format!("  recipient {recipient}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push(process_lines(
         "Requester",
         &crate::model::ProcessDisplay(&prompt.requester),
     ));
-    text.push_str("\n\nValues:\n");
-    for value in &prompt.values {
-        text.push_str(&format!("• {} ({})\n", value.identifier, value.kind));
-        if let Some(description) = &value.description {
-            text.push_str(&format!("  {description}\n"));
-        }
-        for recipient in &value.recipients {
-            text.push_str(&format!("  recipient {recipient}\n"));
-        }
+    if let Some(parent) = &prompt.parent {
+        lines.push(process_lines(
+            "Parent",
+            &crate::model::ProcessDisplay(parent),
+        ));
     }
-    text.push_str(&format!(
-        "\nDecrypted with: {}\nThe values are sent to the backend, which hands them only to this program until it exits.\n\nDenies automatically in {} s.\nCtrl+Shift+Y or Yes: send · n, Enter or Esc: deny",
-        prompt.identity,
-        remaining.as_secs()
-    ));
-    text
+    lines.push(String::new());
+    lines.push(format!("Decrypted with: {}", prompt.identity));
+    lines.push(
+        "The values go to the backend, which hands them only to this program until it exits."
+            .into(),
+    );
+    lines.join("\n")
+}
+
+fn pad(text: &str, width: usize) -> String {
+    let used = UnicodeWidthStr::width(text);
+    format!("{text}{}", " ".repeat(width.saturating_sub(used)))
 }

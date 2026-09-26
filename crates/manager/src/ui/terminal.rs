@@ -18,14 +18,18 @@ use filters::render_filters;
 use frontend::CrosstermFrontend;
 use help::help_text;
 use hit::HitMap;
-use layout::regions;
+use layout::{dialog_area, regions};
+pub(super) use text::ellipsize;
 use text::{prompt, selected_text, selector_items, selector_selected};
 use tree::{render_tree, task_status};
+use unicode_width::UnicodeWidthStr;
 
 pub fn run(rows: Vec<Row>, writer: &mut impl SecretWriter) -> io::Result<()> {
     let mut frontend = CrosstermFrontend::setup()?;
     let result = drive(&mut frontend, writer, &mut Model::new(rows));
-    result.and(frontend.restore())
+    // A request still open when the TUI quits leaves no warning title.
+    let restored = frontend.signal(None).and(frontend.restore());
+    result.and(restored)
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
@@ -154,13 +158,15 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
                 area,
                 hits,
                 Dialog {
-                    title: if failure { "Error" } else { "Notice" },
-                    body: if failure {
+                    title: if failure { "Error" } else { "Notice" }.into(),
+                    body: fixed(if failure {
                         format!("{}\n\n↑↓: scroll · Enter or OK: close", notice.text)
                     } else {
                         // A key never reaches a confirmation or entry dialog below.
                         format!("{}\n\n(press any key to close this)", notice.text)
-                    },
+                    }),
+                    padded: false,
+                    note: None,
                     scroll: model.modal_scroll,
                     selector: None,
                     footer: failure.then(|| hotkeys(model, area.width < 70)),
@@ -181,8 +187,10 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
                 area,
                 hits,
                 Dialog {
-                    title: "Notice",
-                    body: format!("{}\n\n{INFO_NOTICE_HINT}", notice.text),
+                    title: "Notice".into(),
+                    body: fixed(format!("{}\n\n{INFO_NOTICE_HINT}", notice.text)),
+                    padded: false,
+                    note: None,
                     scroll: 0,
                     selector: None,
                     footer: None,
@@ -219,8 +227,10 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
         area,
         hits,
         Dialog {
-            title,
-            body,
+            title: title.into(),
+            body: fixed(body),
+            padded: false,
+            note: None,
             scroll,
             selector: selector_items(model),
             footer: Some(hotkeys(model, area.width < 70)),
@@ -229,9 +239,20 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
     );
 }
 
-struct Dialog {
-    title: &'static str,
-    body: String,
+/// A body that does not depend on the width.
+fn fixed<'a>(body: String) -> Box<dyn Fn(usize) -> String + 'a> {
+    Box::new(move |_| body.clone())
+}
+
+struct Dialog<'a> {
+    title: String,
+    /// The body for an inner width in columns. Most bodies ignore it and
+    /// wrap; the secret request fits its summary lines to it.
+    body: Box<dyn Fn(usize) -> String + 'a>,
+    /// Whether the box is made about 4:3 on screen; see [`dialog_area`].
+    padded: bool,
+    /// Right-aligned on the bottom border, such as a countdown.
+    note: Option<String>,
     scroll: u16,
     selector: Option<Vec<String>>,
     footer: Option<Vec<Button>>,
@@ -252,30 +273,45 @@ fn draw_dialog(
     if dialog.exclusive {
         hits.regions.clear();
     }
-    let body = dialog.body;
-    let width = area.width.min(80).max(1);
-    let inner_width = width.saturating_sub(2).max(1) as usize;
-    let lines = if dialog.selector.is_some() {
-        body.lines().count()
-    } else {
-        // Counts the lines exactly as the wrapped paragraph renders them.
-        Paragraph::new(body.as_str())
-            .wrap(Wrap { trim: false })
-            .line_count(inner_width as u16)
-    };
     let chrome = if dialog.footer.is_some() { 4 } else { 2 };
-    let height = area.height.min((lines + chrome).max(chrome + 1) as u16);
-    let box_area = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
+    let selector = dialog.selector.is_some();
+    // The body in a box `width` wide and its lines, counted exactly as the
+    // wrapped paragraph renders them.
+    let layout_at = |width: u16| {
+        let inner = width.saturating_sub(2).max(1);
+        let body = (dialog.body)(inner as usize);
+        let lines = if selector {
+            body.lines().count()
+        } else {
+            Paragraph::new(body.as_str())
+                .wrap(Wrap { trim: false })
+                .line_count(inner)
+        };
+        (body, lines)
     };
+    // The width at which no line wraps, with the widest inner width.
+    let natural_width = (dialog.body)(area.width.saturating_sub(2).max(1) as usize)
+        .lines()
+        .map(UnicodeWidthStr::width)
+        .chain([UnicodeWidthStr::width(dialog.title.as_str()) + 2])
+        .max()
+        .unwrap_or(0)
+        .saturating_add(2)
+        .min(u16::MAX as usize) as u16;
+    let box_area = dialog_area(area, natural_width, dialog.padded, |width| {
+        (layout_at(width).1 + chrome)
+            .max(chrome + 1)
+            .min(u16::MAX as usize) as u16
+    });
+    let (body, lines) = layout_at(box_area.width);
     frame.render_widget(Clear, box_area);
-    frame.render_widget(
-        Block::default().title(dialog.title).borders(Borders::ALL),
-        box_area,
-    );
+    let mut block = Block::default()
+        .title(dialog.title.as_str())
+        .borders(Borders::ALL);
+    if let Some(note) = dialog.note {
+        block = block.title_bottom(Line::from(note).right_aligned());
+    }
+    frame.render_widget(block, box_area);
     let body_area = Rect {
         x: box_area.x + 1,
         y: box_area.y + 1,
@@ -448,14 +484,29 @@ fn render_secret_request(
         area,
         hits,
         Dialog {
-            title: "Secret request",
-            body: super::secret_request::body(prompt),
+            title: super::secret_request::title(prompt),
+            body: Box::new(|width| {
+                super::secret_request::body(prompt, model.secret_details, width)
+            }),
+            padded: true,
+            note: Some(format!(
+                " denies in {} s ",
+                super::secret_request::remaining_seconds(prompt)
+            )),
             scroll: model.secret_scroll,
             selector: None,
             footer: Some(vec![
                 Button::new("Ctrl+Shift+Y Yes, send", MouseTarget::ConfirmLoss),
                 Button::new("n Deny", MouseTarget::Shortcut(Shortcut::Character('n'))),
                 Button::new("Esc Deny", MouseTarget::Shortcut(Shortcut::Escape)),
+                Button::new(
+                    if model.secret_details {
+                        "d Summary"
+                    } else {
+                        "d Details"
+                    },
+                    MouseTarget::Shortcut(Shortcut::Character('d')),
+                ),
             ]),
             exclusive: true,
         },

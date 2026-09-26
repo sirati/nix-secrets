@@ -74,11 +74,15 @@ n / Esc  Reject the request
 
 SECRET REQUESTS
 A program on the backend host (nix-secrets with-secrets or pipe-secret)
-asks for values. A modal opens over any view, listing each value, its
-kind, description and recipient keys, the requesting program with its PID,
-command and directory, and a countdown. The dialog underneath is kept.
+asks for values. A modal opens over any view with a table of the values
+and their kinds, the recipient, the key source, the requesting command,
+its directory and parent, and a countdown. The dialog underneath is kept.
+The terminal bell rings, a desktop notification is sent where the
+terminal supports one, and the window title shows the request; the bell
+rings again 30 s before the request expires.
 Ctrl+Shift+Y or Yes  Decrypt all of them with one 1Password authorization
                      and send them to that program
+d or Details         Show full descriptions, fingerprints and commands
 n / Enter / Esc      Deny; the program gets nothing
 After 120 s the request is denied. A notice names the requester and
 whether the values were sent.
