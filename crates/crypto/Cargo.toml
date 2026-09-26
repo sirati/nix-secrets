@@ -10,6 +10,7 @@ real-age-tests = []
 [dependencies]
 base64 = "0.22.1"
 getrandom = "0.4.2"
+sha2 = "0.10"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 zeroize = "1.8.2"

@@ -50,6 +50,8 @@ fn notices_are_acknowledged_in_order_before_pending_approval() {
         recipient_keys: vec![],
         host_key: None,
         tasks: vec![],
+        generate: vec![],
+        missing: vec![],
     });
     assert!(matches!(model.mode, Mode::Browse));
     assert_eq!(model.message_text(), Some("first"));

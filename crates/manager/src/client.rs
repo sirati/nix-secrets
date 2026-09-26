@@ -119,6 +119,25 @@ impl BackendClient {
         }
     }
 
+    /// Stores an envelope produced elsewhere, such as a target-generated
+    /// value, through the same conditional write as local edits.
+    pub fn set_envelope_if_version(
+        &mut self,
+        path: &SecretPath,
+        envelope: StoredSecret,
+        expected_version: Option<Vec<u8>>,
+    ) -> io::Result<()> {
+        match self.exchange(&Request::SetIfVersion {
+            path: path.clone(),
+            envelope,
+            expected_version,
+        })? {
+            Response::Updated => Ok(()),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
     pub fn remove_if_version(
         &mut self,
         path: &SecretPath,

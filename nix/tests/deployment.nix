@@ -74,6 +74,28 @@ pkgs.testers.runNixOSTest {
           mode = "0400";
         };
       };
+      services.generated = {
+        recipientPublicKeys = [
+          (builtins.replaceStrings [ "\n" ] [ "" ] (builtins.readFile "${testKey}/id.pub"))
+        ];
+        secrets.cookie = {
+          valueType = "key";
+          valueGenerator = {
+            kind = "random-bytes";
+            bytes = 32;
+            encoding = "base64url";
+            prefix = "COOKIE=";
+            suffix = "\n";
+          };
+          destination = {
+            path = "/persistent/secrets/generated/service/cookie";
+            category = "service";
+            owner = "alpha";
+            group = "alpha";
+            mode = "0400";
+          };
+        };
+      };
       services.keys.secrets.local-key.generatedSecret = {
         type = "local-ssh-key";
         output = {
@@ -187,7 +209,7 @@ pkgs.testers.runNixOSTest {
         s.connect("{socket}")
         s.sendall(base64.b64decode("{encoded_selection}"))
         state = receive(s)
-        assert state["protocol_version"] == 1
+        assert state["protocol_version"] == 2
         assert state["hostname"] == "machine"
         assert {{item["identifier"] for item in state["secrets"]}} == {set(identifiers)!r}
         for item in state["secrets"]:
@@ -245,7 +267,7 @@ pkgs.testers.runNixOSTest {
         assert outer(p.stdout) == (3, b"")
         p.stdin.write(frame(3, base64.b64decode("{selection}"))); p.stdin.flush()
         state = inner(p.stdout)
-        assert state["protocol_version"] == 1 and state["hostname"] == "machine"
+        assert state["protocol_version"] == 2 and state["hostname"] == "machine"
         assert {{item["identifier"] for item in state["secrets"]}} == {set(identifiers)!r}
         p.stdin.write(frame(3, base64.b64decode("{payload}")) + frame(4)); p.stdin.flush()
         result = inner(p.stdout)
@@ -291,6 +313,44 @@ pkgs.testers.runNixOSTest {
         """)
         encoded = base64.b64encode(script.encode()).decode()
         machine.succeed(f"echo {encoded} | base64 -d >/root/local-key.py; python3 /root/local-key.py")
+
+    def deploy_generated():
+        identifier = "machine.services.generated.cookie"
+        script = textwrap.dedent(f"""
+        import base64,json,socket
+        def wire(value):
+            body=json.dumps(value).encode()
+            return len(body).to_bytes(4,'big')+body
+        def receive(sock):
+            def exact(n):
+                data=bytes()
+                while len(data)<n:
+                    chunk=sock.recv(n-len(data)); assert chunk; data+=chunk
+                return data
+            return json.loads(exact(int.from_bytes(exact(4),'big')))
+        s=socket.socket(socket.AF_UNIX)
+        s.connect('{socket}')
+        s.sendall(wire({{'identifiers':['{identifier}']}}))
+        state=receive(s)
+        assert state['protocol_version']==2
+        assert json.loads(state['secrets'][0]['generator'])['kind']=='value'
+        s.sendall(wire({{'version':2,'requested_identifiers':['{identifier}'],'entries':[],
+            'generate':[{{'identifier':'{identifier}',
+            'client_contribution_base64':base64.b64encode(bytes([13])*32).decode()}}]}}))
+        result=receive(s)
+        assert result['status']=='applied', result
+        record=result['generated_records']['{identifier}']
+        age=base64.b64decode(record['age_ciphertext_base64'])
+        assert age.startswith(b'age-encryption.org/v1\\n-> ssh-ed25519 ')
+        assert b'COOKIE=' not in age
+        open('/root/generated.age','wb').write(age)
+        print(json.dumps(record))
+        s.close()
+        """)
+        encoded = base64.b64encode(script.encode()).decode()
+        return json.loads(machine.succeed(
+            f"echo {encoded} | base64 -d >/root/generated.py; python3 /root/generated.py"
+        ))
 
     def deploy_public(value, expected_status="applied"):
         identifier = "machine.services.backup.known-hosts"
@@ -405,6 +465,20 @@ pkgs.testers.runNixOSTest {
     deploy([entry("authorized-keys", "node-20260923T120000000Z " + public_key + "\n")])
     deploy([entry("authorized-keys", "this is not a public key")], expected_status="rejected")
     machine.succeed("grep node-20260923T120000000Z /persistent/secrets/authorized-keys/service/token")
+
+    # The target generates an unset value, installs it, and returns only
+    # ciphertext that decrypts to the installed bytes under the inner envelope.
+    first = deploy_generated()
+    assert not first["adopted"]
+    cookie = machine.succeed("cat /persistent/secrets/generated/service/cookie")
+    assert cookie.startswith("COOKIE=") and cookie.endswith("\n") and len(cookie) == 7 + 43 + 1
+    machine.succeed("test \"$(stat -c %a /persistent/secrets/generated/service/cookie)\" = 400")
+    inner = machine.succeed("${pkgs.age}/bin/age -d -i /root/forward-key /root/generated.age | base64 -w0")
+    assert base64.b64decode(inner).endswith(cookie.encode())
+    # A retry after a lost store write re-encrypts the installed value.
+    second = deploy_generated()
+    assert second["adopted"] and second["version_id_base64"] == first["version_id_base64"]
+    assert machine.succeed("cat /persistent/secrets/generated/service/cookie") == cookie
 
     machine.reboot()
     machine.wait_for_unit("multi-user.target")

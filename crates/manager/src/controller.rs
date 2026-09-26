@@ -40,6 +40,8 @@ pub struct Controller {
     pending_profiles: Option<ProfileSnapshot>,
     approvals_ready: bool,
     background_error: Option<String>,
+    /// Values the last deployment generated on its target and stored.
+    last_generated: Vec<String>,
 }
 
 enum BackgroundUpdate {
@@ -52,6 +54,11 @@ enum BackgroundUpdate {
 impl Controller {
     pub fn uses_one_password(&self) -> bool {
         self.provider.uses_one_password()
+    }
+
+    /// Values the last deployment generated on its target, for the notice.
+    pub fn take_generated(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.last_generated)
     }
 }
 
@@ -74,6 +81,7 @@ impl Controller {
             pending_profiles: None,
             approvals_ready: false,
             background_error: None,
+            last_generated: Vec::new(),
         })
     }
 
@@ -167,6 +175,7 @@ impl Controller {
                 }
             }
         }
+        let plan = unset::plan_unset(&self.schema, &request.secrets, set)?;
         Ok(UiApproval {
             id: request.id.clone(),
             target: request.target.clone(),
@@ -175,26 +184,54 @@ impl Controller {
             recipient_keys: keys.into_iter().collect(),
             host_key: None,
             tasks,
+            generate: plan.generate,
+            missing: plan.missing,
         })
     }
 
     fn deploy_active(&mut self) -> Result<(), String> {
-        if self
+        let identifiers = self
             .active
             .as_ref()
             .ok_or("no claimed approval request")?
+            .request
+            .secrets
+            .clone();
+        let entries = self.client.list().map_err(|error| error.to_string())?;
+        let set = entries.keys().cloned().collect::<BTreeSet<_>>();
+        // Refuse before connecting, decrypting, generating, or writing.
+        let plan = unset::plan_unset(&self.schema, &identifiers, &set)?;
+        if let Some(refusal) = plan.refusal() {
+            return Err(refusal);
+        }
+        if self
+            .active
+            .as_ref()
+            .expect("active approval exists")
             .prepared
             .is_none()
         {
             self.prepare_active()?;
         }
-        let active = self.active.as_ref().expect("active approval exists");
-        let source_host = active.request.target.clone();
-        let entries = self.client.list().map_err(|error| error.to_string())?;
-        let identifiers = active.request.secrets.clone();
+        let source_host = self
+            .active
+            .as_ref()
+            .expect("active approval exists")
+            .request
+            .target
+            .clone();
+        let generating = plan
+            .generate
+            .iter()
+            .map(|(identifier, _)| identifier.as_str())
+            .collect::<BTreeSet<_>>();
+        let generate_entries = unset::generate_entries(&plan)?;
         let mut deploy_entries = Vec::new();
         let mut task_entries = Vec::new();
         for identifier in &identifiers {
+            if generating.contains(identifier.as_str()) {
+                continue;
+            }
             let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
             let spec = self.schema.leaf(&path).map_err(|error| error.to_string())?;
             if let LeafSpec::Stored(public) = &spec {
@@ -241,7 +278,7 @@ impl Controller {
             }
             let stored = entries
                 .get(identifier)
-                .ok_or_else(|| format!("required secret is unset: {identifier}"))?;
+                .ok_or_else(|| format!("required secret became unset: {identifier}"))?;
             let record = EncryptedSecret {
                 format_version: stored.format_version,
                 version_id: stored.version_id.clone(),
@@ -275,12 +312,18 @@ impl Controller {
             .prepared
             .take()
             .expect("prepared above");
-        let public_keys = deployment::deploy(prepared, deploy_entries, task_entries)?;
-        self.register_public_keys(&source_host, &public_keys)?;
+        let applied = deployment::deploy(prepared, deploy_entries, task_entries, generate_entries)?;
+        // Store generated values first: they are the only copy outside the target.
+        let stored = self.store_generated(&applied.generated_records);
+        let registered = self.register_public_keys(&source_host, &applied.generated_public_keys);
         let active = self.active.take().expect("approval remains active");
         self.client
             .resolve(active.request.id, active.lease_id, true)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let stored = stored?;
+        registered?;
+        self.last_generated = stored;
+        Ok(())
     }
 
     fn prepare_active(&mut self) -> Result<(), String> {
@@ -300,6 +343,7 @@ mod metadata;
 mod public_info;
 mod registration;
 mod ssh_validation;
+pub(crate) mod unset;
 mod writer;
 
 mod target;

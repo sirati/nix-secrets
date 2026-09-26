@@ -76,6 +76,8 @@ in
           "${cfg.package}/bin/secret-deploy"
           "--manifest"
           (toString config.system.build.nixSecretsManifest)
+          "--age"
+          "${pkgs.age}/bin/age"
           "--audit-file"
           "/run/nix-secrets/audit/%i.json"
           "--audit-group"

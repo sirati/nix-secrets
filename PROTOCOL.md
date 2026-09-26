@@ -187,6 +187,50 @@ Path components come from the validated manifest. Absolute components,
 `..`, symlink traversal, hard-link substitution, device nodes, and unexpected
 owners are rejected.
 
+## Values generated at deployment
+
+Deployment protocol 2 lets the target generate stored values that are unset
+in the operator store. Plaintext of such a value never leaves the target.
+
+1. Before connecting, the frontend classifies each requested unset leaf. A
+   leaf is generatable when it is not public information, not
+   `externalInputRequired`, not `generateOnDeploy = false`, and is either
+   `valueType = "password"` (password generator under its consumer
+   constraints) or declares `valueGenerator`. A Storage Box task whose
+   bootstrap input is unset is never generatable. If any requested value is
+   not generatable, the frontend refuses the whole deployment with one list of
+   all such values and generates, sends and writes nothing. The approval
+   dialog shows the same list, or the values the target will generate.
+2. The target's state reports, per stored leaf, a canonical `generator`
+   description derived from its own manifest. Before sending a generation
+   request, the frontend requires this description to equal the one derived
+   from its schema, so the target cannot produce a value in another format.
+3. The batch carries `generate` entries: identifier and 32 frontend CSPRNG
+   bytes. Their identifiers are part of `requested_identifiers` and cannot also
+   appear in `entries`.
+4. If the target already has a nix-secrets version of the leaf installed, it
+   re-encrypts that installed value under its installed version (`adopted`).
+   Otherwise it writes the contribution to `/dev/urandom`, generates the value
+   from kernel randomness, and chooses a fresh 16-byte version. It encrypts
+   the value with the same inner envelope as the frontend (identifier and
+   version authenticated inside the age payload) to the leaf's recipient keys
+   from its manifest, using the receiver's pinned `age`.
+5. The value is staged and published with the rest of the generation. The
+   result carries `generated_records`: format version, version, recipient IDs
+   and age ciphertext, exactly one per requested identifier.
+6. The frontend checks each record without decrypting: format version,
+   16-byte version, recipient IDs equal to the schema's, and an age v1 header
+   whose stanzas are exactly one `ssh-ed25519`/`ssh-rsa` stanza per schema
+   recipient key (matched by age's SHA-256 key tag) and nothing else. It
+   stores the record with a conditional write that requires the value to be
+   still unset, which also publishes the normal change event.
+
+Retry behaviour: a record lost between target publication and the store write
+(connection loss, backend failure) is recovered by deploying again, because the
+target adopts the installed value instead of generating a different one. If
+someone entered the value in the store meanwhile, the conditional write keeps
+that value, the frontend reports it, and the next deployment installs it.
+
 ## Generated-secret tasks
 
 A generated leaf has `kind = "generated"` and a `generatedSecret` declaration

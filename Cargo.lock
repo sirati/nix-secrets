@@ -1398,6 +1398,7 @@ name = "nix-secrets-core"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "getrandom 0.4.3",
  "regex",
  "rustix 1.1.5",
  "serde",
@@ -1406,6 +1407,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "zeroize",
 ]
 
 [[package]]
@@ -1416,6 +1418,7 @@ dependencies = [
  "getrandom 0.4.3",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "zeroize",
 ]
@@ -1425,8 +1428,10 @@ name = "nix-secrets-deploy"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "getrandom 0.4.3",
  "nix 0.29.0",
  "nix-secrets-core",
+ "nix-secrets-crypto",
  "nix-secrets-storagebox-bootstrap",
  "nix-secrets-transport",
  "serde",
@@ -1447,11 +1452,13 @@ dependencies = [
  "getrandom 0.4.3",
  "nix-secrets-core",
  "nix-secrets-crypto",
+ "nix-secrets-deploy",
  "nix-secrets-transport",
  "ratatui",
  "rustix 1.1.5",
  "serde_json",
  "ssh-key 0.6.7",
+ "tempfile",
  "unicode-width 0.2.0",
  "zeroize",
 ]

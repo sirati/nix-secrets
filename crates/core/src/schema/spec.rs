@@ -1,3 +1,4 @@
+use super::value_generator::ValueGenerator;
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -20,6 +21,8 @@ pub struct SecretSpec {
     pub consumer_units: Vec<String>,
     pub value_type: Option<ValueType>,
     pub consumer_constraints: Option<ConsumerConstraints>,
+    pub value_generator: Option<ValueGenerator>,
+    pub generate_on_deploy: bool,
 }
 
 #[derive(Clone, Debug)]

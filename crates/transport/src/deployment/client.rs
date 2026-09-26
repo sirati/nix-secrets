@@ -1,5 +1,5 @@
 use super::server::encode_json;
-use super::validation::{validate_batch, validate_selection, validate_target};
+use super::validation::{validate_batch, validate_selection, validate_target, verify_generators};
 use super::*;
 use crate::{Frame, FrameKind, SshSession, MAX_FRAME_BYTES};
 use serde::{de::DeserializeOwned, Serialize};
@@ -30,6 +30,7 @@ pub struct DeploymentClient<'a> {
 pub struct PreparedDeployment {
     session: SshSession,
     state: TargetState,
+    expected: ExpectedTarget,
 }
 
 fn selection(expected: &ExpectedTarget) -> DeploymentSelection {
@@ -47,13 +48,23 @@ fn selection(expected: &ExpectedTarget) -> DeploymentSelection {
     }
 }
 
-fn batch(entries: Vec<DeployEntry>, tasks: Vec<TaskEntry>) -> DeploymentBatch {
+fn batch(
+    version: u16,
+    entries: Vec<DeployEntry>,
+    tasks: Vec<TaskEntry>,
+    generate: Vec<GenerateEntry>,
+) -> DeploymentBatch {
     DeploymentBatch {
-        version: DEPLOYMENT_PROTOCOL_VERSION,
-        requested_identifiers: entries.iter().map(|item| item.identifier.clone()).collect(),
+        version,
+        requested_identifiers: entries
+            .iter()
+            .map(|item| item.identifier.clone())
+            .chain(generate.iter().map(|item| item.identifier.clone()))
+            .collect(),
         requested_tasks: tasks.iter().map(|item| item.identifier.clone()).collect(),
         entries,
         tasks,
+        generate,
     }
 }
 
@@ -68,7 +79,11 @@ impl PreparedDeployment {
         send_transport_json(&mut session, &selected)?;
         let state: TargetState = receive_transport_json(&mut session)?;
         validate_target(&state, expected)?;
-        Ok(Self { session, state })
+        Ok(Self {
+            session,
+            state,
+            expected: expected.clone(),
+        })
     }
 
     pub fn state(&self) -> &TargetState {
@@ -80,11 +95,38 @@ impl PreparedDeployment {
     }
 
     pub fn deploy_with_tasks(
-        mut self,
+        self,
         entries: Vec<DeployEntry>,
         tasks: Vec<TaskEntry>,
     ) -> Result<DeploymentResult, DeploymentError> {
-        let batch = batch(entries, tasks);
+        self.deploy_with_generation(entries, tasks, Vec::new())
+    }
+
+    /// Whether the target can generate values (deployment protocol 2).
+    pub fn supports_generation(&self) -> bool {
+        self.state.protocol_version >= DEPLOYMENT_PROTOCOL_VERSION
+    }
+
+    pub fn deploy_with_generation(
+        mut self,
+        entries: Vec<DeployEntry>,
+        tasks: Vec<TaskEntry>,
+        generate: Vec<GenerateEntry>,
+    ) -> Result<DeploymentResult, DeploymentError> {
+        if !generate.is_empty() && !self.supports_generation() {
+            return Err(DeploymentError::Invalid(
+                "target runs deployment protocol 1 and cannot generate values; rebuild it first",
+            ));
+        }
+        verify_generators(
+            &self.state,
+            &self.expected,
+            &generate
+                .iter()
+                .map(|item| item.identifier.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        let batch = batch(self.state.protocol_version, entries, tasks, generate);
         validate_batch(&batch, &self.state)?;
         send_transport_json(&mut self.session, &batch)?;
         let result: DeploymentResult = receive_transport_json(&mut self.session)?;
@@ -130,7 +172,7 @@ impl<'a> DeploymentClient<'a> {
             .state
             .as_ref()
             .ok_or(DeploymentError::Invalid("target state was not validated"))?;
-        let batch = batch(entries, tasks);
+        let batch = batch(state.protocol_version, entries, tasks, Vec::new());
         validate_batch(&batch, state)?;
         send_transport_json(self.transport, &batch)?;
         reject_or_return(receive_transport_json(self.transport)?)

@@ -35,7 +35,8 @@ pub(super) fn validate_tree(
                     }
                     validate_recipients(&path, &leaf.recipient_public_keys, &leaf.recipient_ids)?;
                     validate_destination(&path, service, &leaf.destination)?;
-                    validate_value(&path, leaf.value_type, leaf.consumer_constraints.as_ref())
+                    validate_value(&path, leaf.value_type, leaf.consumer_constraints.as_ref())?;
+                    validate_value_generator(&path, leaf)
                 }
                 SecretKind::PublicInfo => {
                     if !leaf.recipient_public_keys.is_empty()
@@ -43,6 +44,7 @@ pub(super) fn validate_tree(
                         || !leaf.recipient_names.is_empty()
                         || leaf.value_type.is_some()
                         || leaf.consumer_constraints.is_some()
+                        || leaf.value_generator.is_some()
                     {
                         return Err(invalid(
                             &path,
@@ -400,4 +402,30 @@ pub(super) fn validate_namespace(namespace: &str) -> Result<(), SchemaError> {
     valid
         .then_some(())
         .ok_or_else(|| SchemaError::InvalidNamespace(namespace.into()))
+}
+
+fn validate_value_generator(
+    path: &SecretPath,
+    leaf: &super::SecretLeaf,
+) -> Result<(), SchemaError> {
+    let Some(generator) = &leaf.value_generator else {
+        return Ok(());
+    };
+    let fail = |message: String| SchemaError::InvalidValueDefinition(path.clone(), message);
+    if leaf.external_input_required {
+        return Err(fail(
+            "valueGenerator contradicts externalInputRequired".into(),
+        ));
+    }
+    if leaf.value_type == Some(super::ValueType::Password) {
+        return Err(fail(
+            "a password leaf uses the password generator; remove valueGenerator".into(),
+        ));
+    }
+    if leaf.destination.content_type.is_some() {
+        return Err(fail(
+            "valueGenerator cannot produce a typed destination contentType".into(),
+        ));
+    }
+    generator.validate_definition().map_err(fail)
 }

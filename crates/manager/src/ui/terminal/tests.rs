@@ -358,3 +358,49 @@ fn settings_dialog_lists_session_settings() {
         "{screen}"
     );
 }
+
+#[test]
+fn deployment_prompt_lists_generated_and_missing_values() {
+    use crate::model::ApprovalRequest;
+    let request =
+        |generate: Vec<(String, String)>, missing: Vec<(String, String)>| ApprovalRequest {
+            id: "r".into(),
+            target: "host".into(),
+            create: vec!["host.services.a.set".into()],
+            replace: vec![],
+            recipient_keys: vec!["operator".into()],
+            host_key: None,
+            tasks: vec![],
+            generate,
+            missing,
+        };
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::Approval(request(
+        vec![
+            ("host.services.a.pw".into(), "password".into()),
+            (
+                "host.services.a.key".into(),
+                "32 random bytes, base64".into(),
+            ),
+        ],
+        vec![],
+    ));
+    let prompt = text::prompt(&model);
+    assert!(
+        prompt.contains("will generate 2 values on the target"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("host.services.a.key (32 random bytes, base64)"));
+    model.mode = Mode::Approval(request(
+        vec![("host.services.a.pw".into(), "password".into())],
+        vec![
+            ("host.services.a.x".into(), "external input".into()),
+            ("host.services.a.y".into(), "no valueGenerator".into()),
+        ],
+    ));
+    let prompt = text::prompt(&model);
+    assert!(prompt.contains("missing values that must be entered: host.services.a.x (external input), host.services.a.y (no valueGenerator)"), "{prompt}");
+    assert!(prompt.contains("Nothing will be generated or written"));
+    let notice = crate::ui::drive::deployed_notice(&["host.services.a.pw".into()]);
+    assert!(notice.contains("generated") && notice.contains("host.services.a.pw"));
+}

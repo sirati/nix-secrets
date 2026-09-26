@@ -209,6 +209,12 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             }
             model.inform("deployment request finished");
         }
+        Completion::Deployed { generated } => {
+            if matches!(model.mode, Mode::Approval(_)) {
+                model.mode = Mode::Browse;
+            }
+            model.inform(deployed_notice(&generated));
+        }
         Completion::ApprovalLost(message) => {
             if matches!(model.mode, Mode::Approval(_)) {
                 model.mode = Mode::Browse;
@@ -250,5 +256,18 @@ fn dialog_path(mode: &Mode) -> Option<&str> {
     match mode {
         Mode::Edit { path, .. } | Mode::Replace { path, .. } => Some(path),
         _ => None,
+    }
+}
+
+pub(crate) fn deployed_notice(generated: &[String]) -> String {
+    if generated.is_empty() {
+        "deployment request finished".into()
+    } else {
+        format!(
+            "Deployment finished. The target generated and the store now holds {} value{}:\n{}",
+            generated.len(),
+            if generated.len() == 1 { "" } else { "s" },
+            generated.join("\n")
+        )
     }
 }

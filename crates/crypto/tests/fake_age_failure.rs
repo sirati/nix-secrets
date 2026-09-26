@@ -7,16 +7,28 @@ use nix_secrets_crypto::{
 
 const IDENTIFIER: &str = "host.services.mail.password";
 
-struct Scripts(PathBuf);
+/// Holds the lock for one test. A thread that forks copies every open file
+/// descriptor until its child execs, including another thread's script still
+/// open for writing, so executing that script fails with ETXTBSY. Renaming
+/// does not help; running these tests one at a time does.
+struct Scripts(
+    PathBuf,
+    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+);
+
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Scripts {
     fn new() -> Self {
+        let guard = SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut random = [0_u8; 8];
         getrandom::fill(&mut random).unwrap();
         let suffix = random.map(|byte| format!("{byte:02x}")).concat();
         let path = env::temp_dir().join(format!("nix-secrets-fake-age-{suffix}"));
         fs::create_dir(&path).unwrap();
-        Self(path)
+        Self(path, guard)
     }
 
     fn script(&self, name: &str, body: &str) -> PathBuf {

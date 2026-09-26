@@ -34,6 +34,11 @@ pub struct ApprovalRequest {
     pub recipient_keys: Vec<String>,
     pub host_key: Option<String>,
     pub tasks: Vec<TaskApproval>,
+    /// Unset values the target will generate, with the generator label.
+    pub generate: Vec<(String, String)>,
+    /// Unset values nobody can generate. A deployment with any of them is
+    /// refused before anything is generated or written.
+    pub missing: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

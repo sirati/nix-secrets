@@ -95,6 +95,11 @@ keys save their returned public metadata after a compare-and-set and read-back.
 }
 ```
 
+Unset password leaves, and leaves declaring `valueGenerator`, are generated
+on the target during deployment unless they set `externalInputRequired = true`
+or `generateOnDeploy = false`. See "Values generated at deployment" in the top
+level README for the `valueGenerator` format.
+
 Only consumer compatibility limits belong in `consumerConstraints`. For example,
 if a program rejects values longer than 64 characters, declare
 `consumerConstraints.cannotHandleLongerThan = 64;`. The optional fields are

@@ -26,6 +26,7 @@ let
     validSshPublicKey
     validateConsumerConstraints
     validateGeneratedSecret
+    validateValueGenerator
     ;
 
   normalizeLeaf =
@@ -51,6 +52,8 @@ let
         "consumerUnits"
         "valueType"
         "consumerConstraints"
+        "valueGenerator"
+        "generateOnDeploy"
         "description"
         "humanFacing"
         "externalInputRequired"
@@ -69,6 +72,8 @@ let
         || node ? recipientPublicKeys
         || node ? valueType
         || node ? consumerConstraints
+        || node ? valueGenerator
+        || node ? generateOnDeploy
       then
         throw "public-info cannot have encryption recipients or a private value type"
       else
@@ -96,6 +101,14 @@ let
       throw "unsupported secret valueType"
     else if node ? consumerConstraints && (node.valueType or null) != "password" then
       throw "consumerConstraints requires valueType=password"
+    else if node ? generateOnDeploy && !builtins.isBool node.generateOnDeploy then
+      throw "generateOnDeploy must be a boolean"
+    else if node ? valueGenerator && (node.valueType or null) == "password" then
+      throw "a password leaf uses the password generator; remove valueGenerator"
+    else if node ? valueGenerator && (node.externalInputRequired or false) then
+      throw "valueGenerator contradicts externalInputRequired"
+    else if node ? valueGenerator && (node.destination.contentType or null) != null then
+      throw "valueGenerator cannot produce a typed destination contentType"
     else
       builtins.removeAttrs node [
         "recipientPublicKeys"
@@ -111,6 +124,9 @@ let
       }
       // lib.optionalAttrs (node ? consumerConstraints) {
         consumerConstraints = validateConsumerConstraints node.consumerConstraints;
+      }
+      // lib.optionalAttrs (node ? valueGenerator) {
+        valueGenerator = validateValueGenerator node.valueGenerator;
       };
 
   normalizeGeneratedLeaf =
@@ -332,5 +348,6 @@ in
     recipientId
     validSshPublicKey
     validateConsumerConstraints
+    validateValueGenerator
     ;
 }

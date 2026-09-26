@@ -13,6 +13,7 @@ mod registry;
 use registry::{missing, synthetic_path, validate_named_recipients, validate_shared_public_specs};
 pub(crate) mod validation;
 mod value;
+pub mod value_generator;
 pub use generated::{
     GeneratedKind, GeneratedSecret, GeneratedSecretLeaf, GeneratedSecretType, StorageBoxBootstrap,
 };
@@ -20,6 +21,9 @@ pub use identity::{SecretIdentity, SecretPresentation};
 pub use validation::validate_ssh_known_hosts;
 use validation::{validate_component, validate_namespace, validate_tree};
 pub use value::{ConsumerConstraints, ValueType};
+pub use value_generator::{
+    DeployGenerator, NotGeneratable, RandomEncoding, ValueGenerator, deployment_generator,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(transparent)]
@@ -95,6 +99,14 @@ pub struct SecretLeaf {
     pub value_type: Option<ValueType>,
     #[serde(rename = "consumerConstraints", default)]
     pub consumer_constraints: Option<ConsumerConstraints>,
+    #[serde(rename = "valueGenerator", default)]
+    pub value_generator: Option<ValueGenerator>,
+    #[serde(rename = "generateOnDeploy", default = "default_true")]
+    pub generate_on_deploy: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -250,6 +262,8 @@ impl Schema {
                 consumer_units: leaf.consumer_units.clone(),
                 value_type: leaf.value_type,
                 consumer_constraints: leaf.consumer_constraints.clone(),
+                value_generator: leaf.value_generator.clone(),
+                generate_on_deploy: leaf.generate_on_deploy,
             })),
             SecretNode::Generated(leaf) => Ok(LeafSpec::Generated(GeneratedSecretSpec {
                 path: path.clone(),

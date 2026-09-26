@@ -157,6 +157,47 @@ let
     else
       constraints;
 
+  # Byte-exact format of a value the target generates when it is unset:
+  # prefix + encode(random bytes) + suffix. See README "Generated at deployment".
+  validateValueGenerator =
+    generator:
+    let
+      allowed = [
+        "kind"
+        "bytes"
+        "encoding"
+        "prefix"
+        "suffix"
+      ];
+      extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames generator);
+      affixOk =
+        name:
+        !(generator ? ${name})
+        || (builtins.isString generator.${name} && builtins.stringLength generator.${name} <= 1024);
+    in
+    if !isAttrs generator then
+      throw "valueGenerator must be an attribute set"
+    else if extra != [ ] then
+      throw "valueGenerator has unknown fields: ${lib.concatStringsSep ", " extra}"
+    else if (generator.kind or null) != "random-bytes" then
+      throw "valueGenerator.kind must be \"random-bytes\""
+    else if
+      !(builtins.isInt (generator.bytes or null) && generator.bytes >= 16 && generator.bytes <= 1024)
+    then
+      throw "valueGenerator.bytes must be an integer from 16 through 1024"
+    else if
+      !(builtins.elem (generator.encoding or null) [
+        "base64"
+        "base64url"
+        "hex"
+      ])
+    then
+      throw "valueGenerator.encoding must be base64, base64url, or hex"
+    else if !(affixOk "prefix" && affixOk "suffix") then
+      throw "valueGenerator prefix and suffix must be strings of at most 1024 bytes"
+    else
+      generator;
+
   validateGeneratedSecret =
     serviceName: generated:
     let
@@ -251,5 +292,6 @@ in
     validSshPublicKey
     validateConsumerConstraints
     validateGeneratedSecret
+    validateValueGenerator
     ;
 }

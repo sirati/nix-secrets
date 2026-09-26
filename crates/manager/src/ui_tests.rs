@@ -184,6 +184,8 @@ fn approval_is_explicit_and_testable() {
         recipient_keys: vec!["operator".into()],
         host_key: None,
         tasks: vec![],
+        generate: vec![],
+        missing: vec![],
     };
     reduce(&mut model, UiEvent::Approval(request), &mut writer);
     assert_eq!(
@@ -226,6 +228,8 @@ fn task_approval_exposes_input_and_target_output_status() {
             output_is_set: Some(false),
             requires_input: true,
         }],
+        generate: vec![],
+        missing: vec![],
     };
     assert_eq!(
         reduce(&mut model, UiEvent::Approval(request), &mut writer),

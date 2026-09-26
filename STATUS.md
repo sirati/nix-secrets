@@ -24,6 +24,10 @@ The repository implements the local editing and target deployment path in
 - Schema-authorized password, EFF passphrase, and encoded random-byte
   password and passphrase creation in the TUI, with masked preview, explicit reveal/copy, and
   replacement confirmation.
+- Target-side generation of unset password and `valueGenerator` leaves during
+  deployment, with ciphertext-only return, header recipient checks, retry
+  adoption of installed values, and a single list of values that must be
+  entered.
 - NixOS modules, packages, apps, Rust tests, a real-age check, and NixOS VM
   tests for the service and deployment boundaries.
 

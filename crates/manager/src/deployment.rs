@@ -1,8 +1,8 @@
 use nix_secrets_transport::{
-    Decision, DeployEntry, DeploymentResult, ExpectedTarget, HostIdentity, HostKeyPreflight,
-    HostKeyStatus, HostKeyVerifier, OpenSsh, PreparedDeployment, TaskEntry,
+    AppliedOutput, Decision, DeployEntry, DeploymentResult, ExpectedTarget, GenerateEntry,
+    HostIdentity, HostKeyPreflight, HostKeyStatus, HostKeyVerifier, OpenSsh, PreparedDeployment,
+    TaskEntry,
 };
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -71,17 +71,37 @@ pub fn deploy(
     prepared: PreparedDeployment,
     entries: Vec<DeployEntry>,
     tasks: Vec<TaskEntry>,
-) -> Result<BTreeMap<String, String>, String> {
+    generate: Vec<GenerateEntry>,
+) -> Result<AppliedOutput, String> {
+    let requested = generate
+        .iter()
+        .map(|item| item.identifier.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     match prepared
-        .deploy_with_tasks(entries, tasks)
+        .deploy_with_generation(entries, tasks, generate)
         .map_err(|error| error.to_string())?
     {
         DeploymentResult::Applied {
+            versions,
             generated_public_keys,
-            ..
-        } => return Ok(generated_public_keys),
+            generated_records,
+        } => {
+            if generated_records
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                != requested
+            {
+                return Err("target returned records for other values than requested".into());
+            }
+            Ok(AppliedOutput {
+                versions,
+                generated_public_keys,
+                generated_records,
+            })
+        }
         DeploymentResult::Rejected { message } => {
-            return Err(format!("target rejected deployment: {message}"))
+            Err(format!("target rejected deployment: {message}"))
         }
     }
 }

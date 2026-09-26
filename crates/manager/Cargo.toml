@@ -19,6 +19,10 @@ zeroize = "1"
 unicode-width = "0.2"
 arboard = { version = "3.6", default-features = false }
 
+[dev-dependencies]
+nix-secrets-deploy = { path = "../deploy" }
+tempfile = "3"
+
 [[bin]]
 name = "nix-secrets"
 path = "src/main.rs"

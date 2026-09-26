@@ -88,6 +88,10 @@ pub enum Completion {
         total: usize,
     },
     ApprovalDone(Option<ApprovalRequest>),
+    /// A deployment finished; lists values its target generated and stored.
+    Deployed {
+        generated: Vec<String>,
+    },
     ApprovalLost(String),
     Failed(String),
     ProfileSaved {

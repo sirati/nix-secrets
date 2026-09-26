@@ -24,6 +24,8 @@ pub enum CryptoError {
     SecretTooLarge,
     #[error("age input worker terminated unexpectedly")]
     InputWorkerFailed,
+    #[error("age recipients differ from the expected recipients")]
+    RecipientMismatch,
 }
 
 impl CryptoError {

@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
 
+use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_deploy::{
     install_public_default, load_and_validate_manifest, load_target_state, run_generated_tasks,
-    system_hostname, Deployer, DeploymentBatch, SecretDeployment,
+    run_value_generation, system_hostname, Deployer, DeploymentBatch, SecretDeployment, SystemHost,
 };
-use nix_secrets_transport::serve_deployment;
+use nix_secrets_transport::{serve_deployment, AppliedOutput};
 use std::io;
 use std::path::Path;
 mod audit;
@@ -49,10 +50,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(Into::into);
     }
     if first.as_deref() != Some(std::ffi::OsStr::new("--manifest")) {
-        return Err("usage: secret-deploy --manifest ABSOLUTE-NIX-STORE-JSON".into());
+        return Err(
+            "usage: secret-deploy --manifest ABSOLUTE-NIX-STORE-JSON [--age PATH] [--audit-file PATH --audit-group NAME]"
+                .into(),
+        );
     }
     let manifest = args.next().ok_or("--manifest requires a path")?;
-    let audit_file = match args.next().as_deref() {
+    let mut next = args.next();
+    // The age program encrypts values generated here to their recipients.
+    let age = if next.as_deref() == Some(std::ffi::OsStr::new("--age")) {
+        let program = args.next().ok_or("--age requires a path")?;
+        next = args.next();
+        program
+    } else {
+        std::ffi::OsString::from("age")
+    };
+    let audit_file = match next.as_deref() {
         Some(value) if value == "--audit-file" => {
             Some(args.next().ok_or("--audit-file requires a path")?)
         }
@@ -94,6 +107,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let generated = run_generated_tasks(path, &hostname, &batch.tasks)
             .map_err(|error| error.to_string())?;
         entries.extend(generated.deployments);
+        let values = run_value_generation(
+            path,
+            &hostname,
+            &batch.generate,
+            &current,
+            &AgeCommandProvider::new(age.clone()),
+            &mut SystemHost,
+        )
+        .map_err(|error| error.to_string())?;
+        entries.extend(values.deployments);
         let local = DeploymentBatch {
             version: u32::from(batch.version),
             requested_identifiers,
@@ -132,20 +155,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         eprintln!("nix-secrets-audit: {audit}");
-        Ok((
-            {
-                let mut versions = deployer
-                    .current_versions()
-                    .map_err(|error| error.to_string())?;
-                versions.extend(
-                    public_deployer
-                        .current_versions()
-                        .map_err(|error| error.to_string())?,
-                );
-                versions
-            },
-            generated.public_keys,
-        ))
+        let mut versions = deployer
+            .current_versions()
+            .map_err(|error| error.to_string())?;
+        versions.extend(
+            public_deployer
+                .current_versions()
+                .map_err(|error| error.to_string())?,
+        );
+        Ok(AppliedOutput {
+            versions,
+            generated_public_keys: generated.public_keys,
+            generated_records: values.records,
+        })
     })?;
     Ok(())
 }
