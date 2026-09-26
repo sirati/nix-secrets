@@ -45,7 +45,7 @@ fn lost_lease_drops_the_modal_and_reports_expiry() {
 }
 
 #[test]
-fn task_provider_failure_keeps_approval_for_retry() {
+fn a_failed_approval_closes_the_dialog_for_good() {
     let mut model = model(true);
     let mut writer = writer();
     let request = ApprovalRequest {
@@ -73,13 +73,13 @@ fn task_provider_failure_keeps_approval_for_retry() {
         reduce(&mut model, UiEvent::Character('y'), &mut writer),
         Action::Continue
     );
-    assert!(matches!(model.mode, Mode::Approval(_)));
-    writer.approval_error = false;
+    // The failure is shown once and the request is not offered again: a
+    // retry would open another connection and another agent prompt.
+    assert!(matches!(model.mode, Mode::Browse));
+    assert!(model.message_text().unwrap().contains("locked"));
     reduce(&mut model, UiEvent::Enter, &mut writer);
-    assert_eq!(
-        reduce(&mut model, UiEvent::Character('y'), &mut writer),
-        Action::Approved
-    );
+    assert!(matches!(model.mode, Mode::Browse));
+    assert!(model.message.is_none());
 }
 
 #[test]

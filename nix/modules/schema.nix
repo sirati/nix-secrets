@@ -197,6 +197,21 @@ in
         type = lib.types.ints.between 1 65535;
         default = 22;
       };
+      identityPublicKeys = lib.mkOption {
+        type = lib.types.listOf (lib.types.strMatching "[^\n]+");
+        default =
+          if cfg.forwarder.enable or false then
+            map (lib.removeSuffix "\n") cfg.forwarder.authorizedKeys
+          else
+            [ ];
+        defaultText = lib.literalExpression "the forwarder's authorizedKeys when it is enabled";
+        description = ''
+          The public keys the deploying frontend offers, and the only ones. They
+          must be the keys the forwarder authorizes; the frontend asks its
+          ssh-agent to sign with one of them, so an agent holding many keys is
+          not cut off by sshd's MaxAuthTries before reaching the right one.
+        '';
+      };
     };
     defaultRecipientPublicKeys = lib.mkOption {
       type = lib.types.listOf lib.types.str;

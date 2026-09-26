@@ -22,6 +22,18 @@ let
   operatorPublic = lib.concatStringsSep " " (
     lib.take 2 (lib.splitString " " (builtins.readFile "${operatorKey}/id.pub"))
   );
+  # The login key of the forwarder account, held only in the operator's
+  # ssh-agent behind eight unrelated keys, as in a password manager's agent.
+  agentKeys =
+    pkgs.runCommand "nix-secrets-agent-test-keys" { nativeBuildInputs = [ pkgs.openssh ]; }
+      ''
+        mkdir "$out"
+        for index in 1 2 3 4 5 6 7 8; do
+          ssh-keygen -q -t ed25519 -N "" -C "unrelated-$index" -f "$out/other-$index"
+        done
+        ssh-keygen -q -t ed25519 -N "" -C "IT Secrets" -f "$out/forwarder"
+      '';
+  forwarderPublic = lib.removeSuffix "\n" (builtins.readFile "${agentKeys}/forwarder.pub");
   destination = service: name: {
     path = "/persistent/secrets/${service}/service/${name}";
     category = "service";
@@ -90,6 +102,7 @@ let
     inherit host;
     destination = "nix-secrets-forward@${host}";
     port = 22;
+    identityPublicKeys = [ forwarderPublic ];
   };
   deployment = deploymentOf "machine";
   normalize =
@@ -158,6 +171,9 @@ pkgs.testers.runNixOSTest {
         # Every deployment scans the host key before connecting; the test runs
         # many in a row from one address, which sshd would otherwise penalise.
         services.openssh.settings.PerSourcePenalties = "no";
+        # Fewer tries than the agent holds keys: offering them all would be
+        # cut off before the forwarder key, as on ns1.
+        services.openssh.settings.MaxAuthTries = 3;
         services.nixSecrets = {
           enable = true;
           hostName = "machine";
@@ -166,7 +182,7 @@ pkgs.testers.runNixOSTest {
           receiver.enable = true;
           forwarder = {
             enable = true;
-            authorizedKeys = [ operatorPublic ];
+            authorizedKeys = [ forwarderPublic ];
           };
           services = targetSecrets;
         };
@@ -198,7 +214,7 @@ pkgs.testers.runNixOSTest {
     socket = "/run/user/1000/nix-secrets/backend.sock"
 
     def as_op(command):
-        return f"runuser -u op -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/op sh -c {shlex.quote(command)}"
+        return f"runuser -u op -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/op SSH_AUTH_SOCK=/home/op/agent.sock sh -c {shlex.quote(command)}"
 
     def deploy(*arguments):
         return as_op(
@@ -212,7 +228,7 @@ pkgs.testers.runNixOSTest {
         machine_log = f"/home/op/{name}.log"
         operator.succeed(as_op(
             "nix-secrets-test-operator --backend-socket " + socket
-            + " --schema-file ${schema} --secret-identity /home/op/.ssh/id_ed25519"
+            + " --schema-file ${schema} --secret-identity /home/op/age-identity"
             + " --known-hosts /home/op/.ssh/known_hosts --answer " + answer + " " + arguments
             + f" >{machine_log} 2>&1 & echo $! >/home/op/{name}.pid"
         ))
@@ -246,8 +262,26 @@ pkgs.testers.runNixOSTest {
     operator.succeed("loginctl enable-linger op")
     operator.wait_until_succeeds("test -d /run/user/1000")
     operator.succeed(as_op("mkdir -p " + repo + " ~/.ssh && git init -q " + repo))
-    operator.succeed("install -o op -m 0600 ${operatorKey}/id /home/op/.ssh/id_ed25519")
-    operator.succeed("install -o op -m 0644 ${operatorKey}/id.pub /home/op/.ssh/id_ed25519.pub")
+    # The age identity is a plain file outside ssh's default key names; the
+    # SSH login key is only in the agent.
+    operator.succeed("install -o op -m 0600 ${operatorKey}/id /home/op/age-identity")
+    operator.succeed(as_op("ssh-agent -d -a /home/op/agent.sock >/home/op/agent.log 2>&1 &"))
+    operator.wait_until_succeeds("test -S /home/op/agent.sock")
+    for index in range(1, 9):
+        operator.succeed(f"install -o op -m 0600 ${agentKeys}/other-{index} /home/op/other-{index}")
+        operator.succeed(as_op(f"ssh-add -q /home/op/other-{index}"))
+    operator.succeed("install -o op -m 0600 ${agentKeys}/forwarder /home/op/forwarder")
+    operator.succeed(as_op("ssh-add -q /home/op/forwarder && rm /home/op/forwarder /home/op/other-*"))
+    assert operator.succeed(as_op("ssh-add -l | wc -l")).strip() == "9"
+    # Plain ssh, offering every agent key, is cut off by MaxAuthTries.
+    operator.succeed(as_op("ssh-keyscan machine >~/.ssh/scan 2>/dev/null"))
+    error = operator.fail(as_op(
+        "ssh -o UserKnownHostsFile=~/.ssh/scan -o BatchMode=yes nix-secrets-forward@machine true 2>&1"
+    ))
+    assert "Too many authentication failures" in error, error
+
+    def signatures():
+        return int(operator.succeed("grep -ac 'process_sign_request2: entering' /home/op/agent.log || true").strip())
     operator.succeed(as_op("touch ~/.ssh/known_hosts"))
     operator.succeed(as_op(
         "nix-secrets-backend --repository " + repo + " --socket " + socket
@@ -281,14 +315,32 @@ pkgs.testers.runNixOSTest {
     stop_operator("partial-refused")
     machine.fail("test -e /persistent/secrets/.current")
 
+    # Without the forwarder key in the agent the deployment names the key
+    # and the agent instead of trying keys the target refuses.
+    operator.succeed(as_op("ssh-add -L | grep 'IT Secrets' >~/forwarder.pub && ssh-add -d ~/forwarder.pub"))
+    log = start_operator("no-key", "p")
+    expect_failure(
+        deploy("--wait", "machine"),
+        "the forwarder key \"IT Secrets\" (ssh-ed25519 SHA256:",
+        "is not in your ssh-agent",
+        log=log,
+    )
+    stop_operator("no-key")
+    operator.succeed("install -o op -m 0600 ${agentKeys}/forwarder /home/op/forwarder")
+    operator.succeed(as_op("ssh-add -q /home/op/forwarder && rm /home/op/forwarder"))
+
     # 3. ... and deploys everything else when the requester allows it. The
     #    skip list reaches the requester and the target keeps waiting.
     log = start_operator("partial", "y")
+    signed = signatures()
     output = operator.succeed(deploy("--wait", "--allow-partial", "machine"))
     assert "deployed machine" in output, output
     assert "skipped until their source host is deployed" in output, output
     assert "machine.services.dns-update.update-key" in output, output
     stop_operator("partial")
+    # One authenticated connection for the whole deployment: one agent
+    # signature, so 1Password would ask once.
+    assert signatures() - signed == 1, (signed, signatures())
     dialogs = operator.succeed(f"cat {log}")
     assert "allow-partial=true" in dialogs and "host-key=true" not in dialogs, dialogs
     assert "skippable=[\"machine.services.dns-update.update-key\"]" in dialogs, dialogs

@@ -18,10 +18,9 @@ pub(super) fn reduce(
             match result {
                 Ok(Some(next)) => model.mode = Mode::Approval(next),
                 Ok(None) => return Action::Approved,
-                Err(message) => {
-                    fail_unless_queued(model, message);
-                    model.mode = Mode::Approval(request);
-                }
+                // A failed deployment is final: the request is resolved with
+                // the error and never re-offered, so the dialog closes.
+                Err(message) => fail_unless_queued(model, message),
             }
         }
         // Switches between refusing and deploying everything else while

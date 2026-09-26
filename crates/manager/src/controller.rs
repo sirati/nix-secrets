@@ -155,6 +155,9 @@ impl Controller {
         state: Option<&TargetState>,
         set: &BTreeSet<String>,
     ) -> Result<UiApproval, String> {
+        let skippable = unset::plan_unset(&self.schema, &request.secrets, set)
+            .map(|plan| plan.skippable)
+            .unwrap_or_default();
         let mut create = Vec::new();
         let mut replace = Vec::new();
         let mut tasks = Vec::new();
@@ -173,7 +176,8 @@ impl Controller {
                     if !matches!(spec.kind, SecretKind::PublicInfo) {
                         keys.extend(spec.recipient_ids);
                     }
-                    if let Some(state) = state {
+                    // Not selected on the target: it waits for another host.
+                    if let Some(state) = state.filter(|_| !skippable.contains(identifier)) {
                         if target_has_version(state, identifier)? {
                             replace.push(identifier.clone());
                         } else {
@@ -246,14 +250,25 @@ impl Controller {
         } else {
             Vec::new()
         };
-        if !skipped.is_empty() {
-            identifiers.retain(|identifier| !skipped.contains(identifier));
-            let active = self.active.as_mut().expect("active approval exists");
-            let mut narrowed = active.request.clone();
-            narrowed.secrets = identifiers.clone();
-            active.expected = expected_target(&self.schema, &narrowed)?;
-            // The open session selected the whole request; select again.
-            active.prepared = None;
+        identifiers.retain(|identifier| !skipped.contains(identifier));
+        // The session was opened for the request without the values that
+        // wait for another host. It is never reopened: each connection costs
+        // the operator an agent prompt.
+        let opened = {
+            let expected = &self.active.as_ref().expect("active approval exists").expected;
+            expected
+                .secrets
+                .iter()
+                .map(|secret| &secret.identifier)
+                .chain(expected.tasks.iter().map(|task| &task.identifier))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        if opened != identifiers.iter().cloned().collect::<BTreeSet<_>>() {
+            return Err(
+                "values changed in the store since the target was read; request the deployment again"
+                    .into(),
+            );
         }
         if self
             .active

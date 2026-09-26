@@ -48,7 +48,7 @@ fn changed_key_is_rejected_without_prompt() {
     let mut decision = |_: &HostIdentity| Decision::Accept;
     assert!(matches!(
         verifier().verify_with("host", 22, &mut decision, &fake),
-        Err(HostKeyError::Changed)
+        Err(HostKeyError::Changed(_))
     ));
 }
 
@@ -95,4 +95,74 @@ fn the_identity_does_not_depend_on_scan_order() {
     assert_eq!(first.identity, reversed.identity);
     assert_eq!(first.identity.keys.len(), 3);
     assert_eq!(first.known_host_lines, reversed.known_host_lines);
+}
+
+#[test]
+fn a_changed_key_names_the_host_the_fingerprints_and_the_fix() {
+    use base64::Engine;
+    let encode = |byte: u8| {
+        let mut blob = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+        blob.extend_from_slice(&[byte; 32]);
+        base64::engine::general_purpose::STANDARD.encode(blob)
+    };
+    let (old, new) = (encode(1), encode(2));
+    let fake = Fake {
+        scan: format!("ns1.lamk.eu ssh-ed25519 {new}\n").into_bytes(),
+        find: format!("# Host ns1.lamk.eu found: line 17\nns1.lamk.eu ssh-ed25519 {old}\n").into_bytes(),
+    };
+    // The file must exist to be asked; the fake answers for it.
+    let file = tempfile_known_hosts();
+    let verifier = HostKeyVerifier::new(vec![file.clone()]);
+    let error = match verifier.preflight_with("ns1.lamk.eu", 22, &fake) {
+        Err(HostKeyError::Changed(changed)) => changed,
+        other => panic!("expected a changed key, got {other:?}"),
+    };
+    let text = error.to_string();
+    let old_print = fingerprint(&old);
+    let new_print = fingerprint(&new);
+    assert!(old_print.starts_with("SHA256:") && old_print != new_print);
+    assert!(text.contains("SSH HOST KEY MISMATCH for ns1.lamk.eu:22"), "{text}");
+    assert!(
+        text.contains(&format!("expected: ssh-ed25519 {old_print} ({} line 17)", file.display())),
+        "{text}"
+    );
+    assert!(text.contains(&format!("offered:  ssh-ed25519 {new_print}")), "{text}");
+    assert!(
+        text.contains(&format!("`ssh-keygen -R ns1.lamk.eu -f {}`", file.display())),
+        "{text}"
+    );
+    assert!(text.contains("any IP address"), "{text}");
+}
+
+#[test]
+fn a_non_default_port_is_quoted_for_ssh_keygen() {
+    let changed = ChangedHostKey {
+        host: "ns1".into(),
+        port: 2222,
+        expected: vec![KnownKey {
+            file: PathBuf::from("/k"),
+            line: None,
+            key: PresentedKey {
+                algorithm: "ssh-ed25519".into(),
+                encoded: "AAAA".into(),
+            },
+        }],
+        offered: vec![],
+    };
+    assert!(changed.to_string().contains("`ssh-keygen -R '[ns1]:2222' -f /k`"));
+}
+
+#[test]
+fn fingerprints_match_ssh_keygen() {
+    // ssh-keygen -lf of this key prints the same.
+    assert_eq!(
+        fingerprint("AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f"),
+        "SHA256:ZkAslGjFiUHdGf/WUL8rQvkib4PTvQatUV0OUQSncCA"
+    );
+}
+
+fn tempfile_known_hosts() -> PathBuf {
+    let path = std::env::temp_dir().join(format!("nix-secrets-known-hosts-{}", std::process::id()));
+    fs::write(&path, "").unwrap();
+    path
 }

@@ -16,11 +16,12 @@ pub use deployment::{
     LOCAL_SSH_KEY, STORAGE_BOX_SSH_KEY,
 };
 pub use hostkey::{
-    Decision, HostIdentity, HostKeyDecision, HostKeyError, HostKeyPreflight, HostKeyStatus,
-    HostKeyVerifier, PresentedKey,
+    fingerprint, ChangedHostKey, Decision, HostIdentity, HostKeyDecision, HostKeyError,
+    HostKeyPreflight, HostKeyStatus, HostKeyVerifier, KnownKey, PresentedKey,
 };
 pub use invocation::{Invocation, InvocationError};
-pub use openssh::{OpenSsh, SshError, SshSession};
+pub use openssh::identity::{agent_keys, choose, client_config, describe_line, ClientConfig};
+pub use openssh::{Offer, OpenSsh, SshError, SshSession};
 pub use protocol::{Frame, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use receiver::{
     login_shell_arguments, run_receiver, ReceiverError, DEPLOYER_SOCKET, MANAGER_SOCKET,
