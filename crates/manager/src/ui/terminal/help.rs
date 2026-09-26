@@ -8,7 +8,7 @@ F  Filter by any identity or presentation attribute
 T  Choose which attributes form the tree and reorder them
 S  Open named view profiles; Enter loads, n saves new, s overwrites, d deletes
 O  Settings for this session (reset on restart; never saved to the repository)
-1 Required (external values only) · 2 All · 3 Keys · 4 Passwords · 5 Public info
+1 Required (external values, and unset values needed before install) · 2 All · 3 Keys · 4 Passwords · 5 Public info
 6 Everyone · 7 Human-facing
 ?  Show or close this help
 

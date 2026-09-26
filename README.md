@@ -179,6 +179,56 @@ in
 }
 ```
 
+### Values required before install
+
+Some values must exist before a host can be installed at all, because
+evaluation bakes them in: an operator key whose public half is part of the
+system, such as the NMBL generation signing key, or a value whose public part
+feeds another option. Mark such a leaf, of any kind except `derivedFrom`, with
+`requiredForInstall = true`:
+
+```nix
+services.nixSecrets = {
+  # The committed store, read purely at evaluation (defaults to
+  # publicInfoInventoryFile).
+  storeFile = toString ./nix-secrets.toml;
+  services.nmbl.secrets.generation-key = {
+    kind = "operator";
+    requiredForInstall = true;
+    generator = { installable = "…#nmbl-sign"; args = [ "keygen" ]; };
+  };
+  # Values declared elsewhere, e.g. on another host, can be required by
+  # identifier.
+  requiredBeforeInstall = [ "ns1.services.dns.update-key" ];
+};
+```
+
+While such a value is missing from `storeFile`, evaluating the host fails with
+an assertion per value:
+
+```text
+generate/enter host.services.nmbl.generation-key in the nix-secrets TUI first: it is required before this host can be installed
+```
+
+An operator leaf with a generator counts as present once its public key is
+stored; public information once its shared record exists; anything else once
+its encrypted record exists. The TUI's Required view lists these values until
+they are set.
+
+`lib.requireOperatorPublicKey STORE IDENTIFIER` is `operatorPublicKey` that
+throws the same message instead of returning null, for a value that
+evaluation cannot do without:
+
+```nix
+boot.nmbl.signing.publicKeys = [
+  (pkgs.runCommand "nmbl-generation-key.pub" { } ''
+    echo ${nix-secrets.lib.requireOperatorPublicKey ./nix-secrets.toml "host.services.nmbl.generation-key"} | base64 -d > $out
+  '')
+];
+```
+
+Both read only the committed TOML, so evaluation stays pure.
+
 ## Backend
 
 The frontend connects to a Unix socket selected by repository configuration,

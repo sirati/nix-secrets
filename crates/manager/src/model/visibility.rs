@@ -25,7 +25,10 @@ impl Model {
                 continue;
             }
             let category = match self.filter {
-                ViewFilter::Required => row.external_input_required,
+                // A value needed before install stays listed until it is stored.
+                ViewFilter::Required => {
+                    row.external_input_required || (row.required_for_install && !row.is_set)
+                }
                 ViewFilter::All => true,
                 ViewFilter::Keys => {
                     matches!(row.category, RowCategory::Key | RowCategory::Operator)

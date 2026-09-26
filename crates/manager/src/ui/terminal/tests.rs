@@ -149,7 +149,7 @@ fn narrow_terminal_retains_distinct_sections_and_all_filters() {
 fn help_and_legend_match_actual_filter_shortcuts() {
     let model = Model::new(vec![]);
     assert!(help_text().contains(
-        "1 Required (external values only) · 2 All · 3 Keys · 4 Passwords · 5 Public info"
+        "1 Required (external values, and unset values needed before install) · 2 All · 3 Keys · 4 Passwords · 5 Public info"
     ));
     assert!(help_text().contains("6 Everyone · 7 Human-facing"));
     assert!(hotkeys(&model, false)

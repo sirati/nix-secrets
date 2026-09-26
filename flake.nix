@@ -107,6 +107,18 @@
               secretsLib = self.lib;
             };
             pkgs.runCommand "operator-leaf-test" { } "touch $out";
+          required-for-install =
+            assert import ./nix/tests/required-for-install.nix {
+              secretsLib = self.lib;
+              inherit (nixpkgs) lib;
+            };
+            pkgs.runCommand "required-for-install-test" { } "touch $out";
+          required-for-install-module =
+            assert import ./nix/tests/required-for-install-module.nix {
+              inherit nixpkgs system;
+              module = self.nixosModules.default;
+            };
+            pkgs.runCommand "required-for-install-module-test" { } "touch $out";
           real-age = pkgs.callPackage ./nix/checks/real-age.nix { };
           inherit (self.packages.${system}) secrets-ready-waiter;
           secrets-ready-waiter-vm = import ./nix/tests/secrets-ready-waiter.nix {

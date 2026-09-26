@@ -62,6 +62,7 @@ let
         "externalInputRequired"
         "identity"
         "presentation"
+        "requiredForInstall"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in
@@ -163,6 +164,7 @@ let
         "recipientPublicKeys"
         "recipientNames"
         "generator"
+        "requiredForInstall"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in
@@ -209,6 +211,7 @@ let
         "externalInputRequired"
         "identity"
         "presentation"
+        "requiredForInstall"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in
@@ -268,6 +271,10 @@ let
       in
       if !isAttrs node then
         throw "secret tree entry ${name} must be an attribute set"
+      else if isLeaf node && !builtins.isBool (node.requiredForInstall or false) then
+        throw "requiredForInstall of ${name} must be a boolean"
+      else if (node.requiredForInstall or false) && node ? derivedFrom then
+        throw "${name}: requiredForInstall belongs on the derivedFrom source leaf"
       else if isOperatorLeaf node && (node ? destination || node ? generatedSecret) then
         throw "operator leaf ${name} cannot have a destination or generatedSecret"
       else if isOperatorLeaf node then
@@ -408,21 +415,105 @@ let
       ) tree
     );
 
+  readStore =
+    store:
+    if store != null && builtins.pathExists store then
+      builtins.fromTOML (builtins.readFile store)
+    else
+      { };
+
   # The public key the operator generated for an operator leaf, as the base64
   # text stored in plain beside its ciphertext, or null while it is unset.
   #   operatorPublicKey ./nix-secrets.toml "host.services.nmbl.generation-key"
   operatorPublicKey =
+    store: identifier: ((readStore store).secrets or { }).${identifier}.public_key or null;
+
+  missingBeforeInstallMessage =
+    identifier:
+    "generate/enter ${identifier} in the nix-secrets TUI first: it is required before this host can be installed";
+
+  # operatorPublicKey for a value evaluation cannot do without: evaluation
+  # fails, naming the identifier, while the key is unset.
+  #   requireOperatorPublicKey ./nix-secrets.toml "host.services.nmbl.generation-key"
+  requireOperatorPublicKey =
     store: identifier:
     let
-      document = if builtins.pathExists store then builtins.fromTOML (builtins.readFile store) else { };
+      key = operatorPublicKey store identifier;
     in
-    (document.secrets or { }).${identifier}.public_key or null;
+    if key == null then throw (missingBeforeInstallMessage identifier) else key;
+
+  # Whether the committed store holds a value for a leaf: public-info needs its
+  # shared record, an operator leaf with a generator its public key, anything
+  # else its encrypted record. A null leaf means "any record".
+  isStored =
+    document: identifier: leaf:
+    let
+      record = (document.secrets or { }).${identifier} or null;
+    in
+    if leaf != null && (leaf.kind or null) == "public-info" then
+      (document.public_info or { }) ? ${leaf.sharedPublicId}
+    else if leaf != null && isOperatorLeaf leaf && leaf ? generator then
+      record != null && record ? public_key
+    else
+      record != null;
+
+  # Identifiers of requiredForInstall leaves in an evaluated inventory
+  # (normalizeHost's value), with the leaf.
+  requiredForInstallLeaves =
+    evaluatedHosts:
+    let
+      walk =
+        prefix: tree:
+        concatLists (
+          map (
+            name:
+            let
+              node = tree.${name};
+              identifier = "${prefix}.${name}";
+            in
+            if isLeaf node then
+              lib.optional (node.requiredForInstall or false) { inherit identifier; leaf = node; }
+            else
+              walk identifier node
+          ) (attrNames tree)
+        );
+    in
+    concatLists (
+      lib.mapAttrsToList (
+        host: groups:
+        concatLists (
+          lib.mapAttrsToList (
+            group: services:
+            concatLists (lib.mapAttrsToList (service: walk "${host}.${group}.${service}") services)
+          ) (builtins.removeAttrs groups [ "metadata" ])
+        )
+      ) evaluatedHosts
+    );
+
+  # Of `required` ({ identifier; leaf; } with leaf possibly null), the
+  # identifiers the store at `store` has no value for yet.
+  missingBeforeInstall =
+    store: required:
+    let
+      document = readStore store;
+    in
+    # Reads the store only when something is required.
+    if required == [ ] then
+      [ ]
+    else
+      map (entry: entry.identifier) (
+        builtins.filter (entry: !(isStored document entry.identifier entry.leaf)) required
+      );
 in
 {
   inherit
     isLeaf
     isOperatorLeaf
+    missingBeforeInstall
+    missingBeforeInstallMessage
     operatorPublicKey
+    requireOperatorPublicKey
+    requiredForInstallLeaves
     withoutOperatorLeaves
     collectLeaves
     normalizeHost
