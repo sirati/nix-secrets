@@ -22,6 +22,12 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         (Mode::Browse, UiEvent::Up) => model.move_by(-1),
         (Mode::Browse, UiEvent::Down) => model.move_by(1),
         (Mode::Browse, UiEvent::Character('f')) => model.cycle_filter(),
+        // Space folds or unfolds the selected group; on a value it does nothing.
+        (Mode::Browse, UiEvent::Character(' ')) => {
+            model.toggle_selected_group();
+        }
+        (Mode::Browse, UiEvent::Character('-')) => model.collapse_all(),
+        (Mode::Browse, UiEvent::Character('+')) => model.expand_all(),
         (Mode::Browse, UiEvent::Character('F')) => {
             model.set_filter(crate::model::ViewFilter::All);
             model.set_human_only(false);
@@ -175,10 +181,12 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         (Mode::KeypairConfirm { .. }, UiEvent::Escape) => {}
         (confirm @ Mode::KeypairConfirm { .. }, _) => model.mode = confirm,
         (Mode::Browse, UiEvent::Character('d')) => match model.selected().cloned() {
+            // Like replacing, deleting a value that was never committed loses
+            // it for good, so that case gets the loss warning.
             Some(row) if row.is_secret() && row.is_set => {
-                model.mode = Mode::DeleteConfirm {
-                    path: row.path.expect("secret row has path"),
-                }
+                let path = row.path.expect("secret row has path");
+                let commit = writer.commit_state(&path);
+                model.mode = Mode::DeleteConfirm { path, commit }
             }
             _ => model.inform("select a set secret to delete"),
         },
@@ -219,12 +227,22 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             }
             _ => model.inform("select a set OpenSSH private key"),
         },
-        (Mode::DeleteConfirm { path }, UiEvent::Character('y')) => match writer.delete(&path) {
+        (
+            Mode::DeleteConfirm {
+                path,
+                commit: CommitState::Committed | CommitState::Unset,
+            },
+            UiEvent::Character('y'),
+        )
+        | (Mode::DeleteConfirm { path, .. }, UiEvent::ConfirmLoss) => match writer.delete(&path) {
             Ok(()) => model.mark_deleted(&path),
             Err(error) => fail_unless_queued(model, error),
         },
-        (Mode::DeleteConfirm { .. }, UiEvent::Character('n') | UiEvent::Escape) => {}
-        (Mode::DeleteConfirm { path }, _) => model.mode = Mode::DeleteConfirm { path },
+        // No is the default, as for replacing: Enter and Space cancel too.
+        (
+            Mode::DeleteConfirm { .. },
+            UiEvent::Character('n' | ' ') | UiEvent::Escape | UiEvent::Enter,
+        ) => {}
         (
             Mode::Reveal {
                 path,
@@ -257,11 +275,17 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
                 underneath,
             };
         }
-        // Ctrl+R shows the stored value over the entry or replace dialog. It
-        // never runs on its own, and closing the reveal returns to the dialog.
-        (dialog @ (Mode::Edit { .. } | Mode::Replace { .. }), UiEvent::RevealCurrent) => {
+        // Ctrl+R shows the stored value over the entry, replace or delete
+        // dialog. It never runs on its own, and closing the reveal returns to
+        // the dialog.
+        (
+            dialog @ (Mode::Edit { .. } | Mode::Replace { .. } | Mode::DeleteConfirm { .. }),
+            UiEvent::RevealCurrent,
+        ) => {
             let path = match &dialog {
-                Mode::Edit { path, .. } | Mode::Replace { path, .. } => path.clone(),
+                Mode::Edit { path, .. }
+                | Mode::Replace { path, .. }
+                | Mode::DeleteConfirm { path, .. } => path.clone(),
                 _ => unreachable!(),
             };
             if !model.is_set(&path) {
@@ -284,6 +308,7 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
                 }
             }
         }
+        (mode @ Mode::DeleteConfirm { .. }, _) => model.mode = mode,
         (Mode::Browse, UiEvent::Escape) => return Action::Quit,
         (Mode::Edit { path, mut value }, UiEvent::Character(character)) => {
             let mut bytes = [0; 4];

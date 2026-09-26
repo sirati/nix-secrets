@@ -148,7 +148,33 @@ impl Model {
                 label: labels.join("/"),
             });
         }
-        result
+        self.hide_collapsed(result)
+    }
+
+    /// Drops the rows below collapsed groups. Rows are in pre-order, so a
+    /// group's subtree is the run of following rows whose attribute path
+    /// extends the group's. Chains of single-child groups share one row, so
+    /// the path and not the depth decides membership.
+    fn hide_collapsed(&self, rows: Vec<VisibleRow>) -> Vec<VisibleRow> {
+        if self.active_collapsed().is_none_or(|set| set.is_empty()) {
+            return rows;
+        }
+        let mut hidden_below: Option<&[String]> = None;
+        rows.into_iter()
+            .filter(|visible| {
+                let row = &self.rows[visible.index];
+                if hidden_below.is_some_and(|group| {
+                    row.display_segments.len() > group.len()
+                        && row.display_segments.starts_with(group)
+                }) {
+                    return false;
+                }
+                hidden_below = self
+                    .is_collapsed(row)
+                    .then_some(row.display_segments.as_slice());
+                true
+            })
+            .collect()
     }
 
     pub fn selected_display_path(&self) -> Option<String> {

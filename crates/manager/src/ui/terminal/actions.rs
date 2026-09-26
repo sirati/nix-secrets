@@ -51,6 +51,7 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                     letter("O Settings", 'O'),
                     letter("/ Search", '/'),
                     key("Enter Edit", Shortcut::Enter).enabled(editable),
+                    letter("Space Fold", ' ').enabled(selected.is_some_and(|row| !row.is_secret())),
                     letter("g Generate", 'g').enabled(generatable),
                     letter("G Missing", 'G').enabled(missing),
                     letter("d Delete", 'd').enabled(set),
@@ -105,7 +106,15 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
             key("Enter Keep", Shortcut::Enter),
             key("Esc Clear", Shortcut::Escape),
         ],
-        Mode::DeleteConfirm { .. } => vec![letter("y Delete", 'y'), letter("n Cancel", 'n')],
+        Mode::DeleteConfirm {
+            commit: nix_secrets_core::CommitState::Committed | nix_secrets_core::CommitState::Unset,
+            ..
+        } => vec![letter("y Delete", 'y'), letter("n Cancel", 'n')],
+        Mode::DeleteConfirm { .. } => vec![
+            Button::new("Ctrl+Shift+Y Yes, delete", MouseTarget::ConfirmLoss),
+            key("Enter No", Shortcut::Enter),
+            Button::new("Ctrl+R Reveal current", MouseTarget::RevealCurrent),
+        ],
         Mode::Replace {
             commit: nix_secrets_core::CommitState::Committed,
             ..
