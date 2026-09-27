@@ -294,6 +294,9 @@ impl Controller {
                     .into(),
             );
         }
+        // The one connection was opened for this request. It is never
+        // reopened: a failure ends the deployment, and a second connection
+        // would cost another agent signature.
         if self
             .active
             .as_ref()
@@ -301,7 +304,7 @@ impl Controller {
             .prepared
             .is_none()
         {
-            self.prepare_active()?;
+            return Err("the connection to the target is gone; request the deployment again".into());
         }
         let source_host = self
             .active
@@ -321,26 +324,12 @@ impl Controller {
             .and_then(|active| active.prepared.as_ref())
             .is_some_and(|prepared| !prepared.supports_shared_sources());
         if !plan.shared.is_empty() && old_target {
-            // The target cannot generate a shared value yet. Its derived values
-            // wait, and the rest deploys over a narrower selection: one more
-            // connection, only against such an old target.
-            let shared = std::mem::take(&mut plan.shared);
-            let waiting = plan
-                .derived_on_target
-                .iter()
-                .filter(|(_, source)| shared.iter().any(|(id, _)| id == source))
-                .map(|(identifier, _)| identifier.clone())
-                .collect::<Vec<_>>();
-            plan.derived_on_target
-                .retain(|(identifier, _)| !waiting.contains(identifier));
-            identifiers.retain(|identifier| !waiting.contains(identifier));
-            skipped.extend(waiting);
-            let active = self.active.as_mut().expect("active approval exists");
-            let mut narrowed = active.request.clone();
-            narrowed.secrets = identifiers.clone();
-            active.expected = expected_target(&self.schema, &narrowed)?;
-            active.prepared = None;
-            self.prepare_active()?;
+            // The preflight leaves these out when the host's protocol is
+            // older or unknown; a target that says otherwise ends it here.
+            return Err(format!(
+                "{source_host} runs a receiver older than deployment protocol 3 and cannot generate {}; update it first. Nothing was sent.",
+                plan.shared.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
+            ));
         }
         let generate_entries = unset::generate_entries(&self.schema, &plan)?;
         let derive_on_target = plan
