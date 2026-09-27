@@ -528,19 +528,19 @@ mod derived {
             plan.derived,
             vec![(DERIVED.to_string(), SOURCE.to_string())]
         );
-        let entry = controller.derived_entry(DERIVED, SOURCE, &set).unwrap();
+        let entry = derive(&controller, DERIVED, SOURCE, &set).unwrap();
         assert_eq!(
             STANDARD.decode(&entry.contents_base64).unwrap(),
             format!("{KNOT_PREFIX}c2VjcmV0LXRzaWctYnl0ZXM=\n").into_bytes()
         );
         // The same source and framing give the same version; a new source
         // value gives a new one, so the target replaces the derived file.
-        let again = controller.derived_entry(DERIVED, SOURCE, &set).unwrap();
+        let again = derive(&controller, DERIVED, SOURCE, &set).unwrap();
         assert_eq!(entry.version_id, again.version_id);
         assert!(entry.version_id.starts_with("d-"));
         SecretWriter::write(&mut controller, SOURCE, Zeroizing::new(b"bmV3".to_vec())).unwrap();
         let set = controller.client.list().unwrap();
-        let changed = controller.derived_entry(DERIVED, SOURCE, &set).unwrap();
+        let changed = derive(&controller, DERIVED, SOURCE, &set).unwrap();
         assert_ne!(entry.version_id, changed.version_id);
         assert!(STANDARD
             .decode(&changed.contents_base64)
@@ -612,8 +612,7 @@ fn a_derived_value_and_its_unset_source_on_one_host_deploy_together() {
     )
     .unwrap();
     assert!(plan.derived_on_target.is_empty());
-    let entry = controller
-        .derived_entry("host.services.app.knot", "host.services.app.cookie", &set)
+    let entry = derive(&controller, "host.services.app.knot", "host.services.app.cookie", &set)
         .unwrap();
     assert_eq!(
         STANDARD.decode(&entry.contents_base64).unwrap(),
@@ -716,4 +715,103 @@ mod ns1 {
         // A private key is only ever generated on its own host.
         assert!(shared_generator(&schema, "hetzner2.services.reporter.fault-key").is_none());
     }
+}
+
+/// Frames a derived value the way a deployment does: its source decrypted
+/// in the deployment's batch.
+fn derive(
+    controller: &Controller,
+    identifier: &str,
+    source: &str,
+    set: &BTreeMap<String, nix_secrets_core::EncryptedSecret>,
+) -> Result<DeployEntry, String> {
+    let derived = BTreeMap::from([(identifier.to_owned(), source.to_owned())]);
+    let plaintexts = controller.decrypt_for_deployment(
+        &[identifier.to_owned()],
+        &BTreeSet::new(),
+        &[],
+        &derived,
+        set,
+    )?;
+    controller.derived_entry(identifier, source, set, &plaintexts)
+}
+
+/// Every value a deployment decrypts, including a derived value's source,
+/// goes through one launcher run: with 1Password, one authorization.
+#[test]
+fn a_deployment_decrypts_everything_in_one_provider_batch() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = fixture();
+    let mut controller = fixture.controller();
+    for (name, value) in [("entered", "one"), ("cookie", "two"), ("provider", "three")] {
+        SecretWriter::write(
+            &mut controller,
+            &format!("host.services.app.{name}"),
+            Zeroizing::new(value.as_bytes().to_vec()),
+        )
+        .unwrap();
+    }
+    // A launcher that counts its runs; it then runs the batch the way the
+    // real one does (see tests/one_password_launcher.rs), here with a small
+    // program that decodes the framing.
+    let log = fixture._temp.path().join("launches");
+    let launcher = fixture._temp.path().join("launcher");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {log}\n[ \"$1\" = --batch ] || exit 64\nshift\nexec {helper} \"$@\"\n",
+            log = log.display(),
+            helper = batch_helper(&fixture).display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let provider = AgeCommandProvider::identity_file(&fixture.identity).through(&launcher, vec![]);
+    controller.provider = provider;
+    let entries = controller.client.list().unwrap();
+    let identifiers = Fixture::ids(&["entered", "cookie", "provider", "knot"]);
+    let derived = BTreeMap::from([(
+        "host.services.app.knot".to_owned(),
+        "host.services.app.cookie".to_owned(),
+    )]);
+    let values = controller
+        .decrypt_for_deployment(&identifiers, &BTreeSet::new(), &[], &derived, &entries)
+        .unwrap();
+    assert_eq!(values.len(), 3, "the derived source is decrypted once");
+    assert_eq!(values["host.services.app.entered"].as_slice(), b"one");
+    assert_eq!(values["host.services.app.cookie"].as_slice(), b"two");
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().lines().count(),
+        1,
+        "one launcher run for the whole deployment"
+    );
+}
+
+/// A program run as `helper PROGRAM ARGS...` that reads length-framed
+/// inputs on stdin, runs the program once per input and frames the outputs,
+/// like `nix-secrets-1password --batch`.
+fn batch_helper(fixture: &Fixture) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let helper = fixture._temp.path().join("batch-helper");
+    // Perl is always present where the test suite runs (git depends on it).
+    std::fs::write(
+        &helper,
+        r#"#!/usr/bin/env perl
+use strict; use IPC::Open2;
+binmode STDIN; binmode STDOUT; local $/;
+my $in = <STDIN>; my $out = '';
+while (length $in) {
+  my $n = unpack('N', substr($in, 0, 4)); my $body = substr($in, 4, $n);
+  $in = substr($in, 4 + $n);
+  my $pid = open2(my $r, my $w, @ARGV); binmode $r; binmode $w;
+  print $w $body; close $w; my $res = <$r>; $res = '' unless defined $res;
+  waitpid($pid, 0); exit($? >> 8) if $?;
+  $out .= pack('N', length $res) . $res;
+}
+print $out;
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    helper
 }

@@ -385,20 +385,29 @@ opaque version ID. Decryption requires the requested path, TOML map key, outer
 version ID, and authenticated inner values to agree. Replacing a value creates
 a new version and ciphertext without changing its schema identifier.
 
-The default key provider uses `age-plugin-1p`. Encryption needs only the SSH
-public key. During decryption the plugin retrieves the matching private key
-from 1Password through `op`; neither the TUI nor the repository needs a private
-key file. This uses 1Password CLI authorization rather than the SSH-agent
-signing API. On Linux, 1Password binds a CLI authorization to the terminal it
-came from, or to the session leader when there is no terminal, for 10 minutes
-of use. The TUI therefore runs each 1Password decryption through
-`nix-secrets-1password`, which starts age as the leader of a new session
-without a terminal. Each approval then covers exactly one decryption. It never
-reaches your shell, and the prompt names `nix-secrets-1password` as the
-requester. Pass `--1password-shared-session` to reuse the terminal's
-10-minute authorization instead. While a slow operation runs, a Working strip
-shows its name and elapsed time.
-See [AGE-PLUGIN-1P-REVIEW.md](AGE-PLUGIN-1P-REVIEW.md).
+The default key provider is 1Password. Encryption needs only the SSH public
+key. For decryption, the private key comes from 1Password through `op`, so
+neither the TUI nor the repository needs a private key file. This uses 1Password
+CLI authorization rather than the SSH-agent signing API. The TUI runs every
+1Password decryption through `nix-secrets-1password --batch --one-key`. It
+reads the ciphertexts, lists the SSH key items' fingerprints (metadata, no
+key material), picks the one key that every ciphertext is encrypted to, and
+reads only that key with `op read op://<vault>/<item>/private key`. It hands
+the key to `age --decrypt --identity /dev/fd/3` on a pipe for each value.
+age-plugin-1p's `-j 1p` would read every SSH private key in the account.
+
+A deployment decrypts all its values, including the sources of derived
+values, in one such run: one 1Password prompt per deployment, next to the
+one SSH signature for its connection. The prompt authorizes the CLI for your
+1Password account. 1Password's app integration cannot scope it to a vault or
+an item; see [AGE-PLUGIN-1P-REVIEW.md](AGE-PLUGIN-1P-REVIEW.md). On Linux,
+1Password binds the authorization to the terminal it came from, or to the
+session leader when there is no terminal, for 10 minutes of use. The
+launcher therefore leads a new session without a terminal: the approval
+covers that one run, never reaches your shell, and the prompt names
+`nix-secrets-1password`. Pass `--1password-shared-session` to reuse the
+terminal's 10-minute authorization instead. While a slow operation runs, a
+Working strip shows its name and elapsed time.
 
 The flake keeps runtime tools opt in. Use `.#nix-secrets-1password` for the
 1Password provider. The desktop-app integration accepts only an `op` that is

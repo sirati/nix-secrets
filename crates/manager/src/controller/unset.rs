@@ -341,6 +341,58 @@ pub(crate) fn record_envelope(
 }
 
 impl Controller {
+    /// Decrypts, in one provider batch, every stored value a deployment
+    /// sends and every source of a derived value it sends. With 1Password
+    /// this is one authorization for the whole deployment.
+    pub(super) fn decrypt_for_deployment(
+        &self,
+        identifiers: &[String],
+        generating: &BTreeSet<&str>,
+        derive_on_target: &[String],
+        derived: &BTreeMap<String, String>,
+        entries: &BTreeMap<String, nix_secrets_core::EncryptedSecret>,
+    ) -> Result<BTreeMap<String, Zeroizing<Vec<u8>>>, String> {
+        let mut wanted = BTreeSet::new();
+        for identifier in identifiers {
+            if generating.contains(identifier.as_str()) || derive_on_target.contains(identifier) {
+                continue;
+            }
+            if let Some(source) = derived.get(identifier) {
+                wanted.insert(source.clone());
+                continue;
+            }
+            // Public information and local keys need no stored value.
+            if entries.contains_key(identifier) {
+                wanted.insert(identifier.clone());
+            }
+        }
+        let records = wanted
+            .iter()
+            .map(|identifier| {
+                let stored = &entries[identifier];
+                (
+                    identifier.as_str(),
+                    EncryptedSecret {
+                        format_version: stored.format_version,
+                        version_id: stored.version_id.clone(),
+                        recipient_ids: stored.recipient_ids.clone(),
+                        age_ciphertext: stored.age_ciphertext.clone(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if records.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let borrowed = records
+            .iter()
+            .map(|(identifier, record)| (*identifier, record))
+            .collect::<Vec<_>>();
+        let values = nix_secrets_crypto::decrypt_secrets(&borrowed, &self.provider)
+            .map_err(|error| error.to_string())?;
+        Ok(wanted.into_iter().zip(values).collect())
+    }
+
     /// Decrypts a derived value's source and frames it. The version names the
     /// source version and the framing, so the target replaces the derived
     /// value exactly when either changes.
@@ -349,6 +401,7 @@ impl Controller {
         identifier: &str,
         source: &str,
         entries: &BTreeMap<String, nix_secrets_core::EncryptedSecret>,
+        plaintexts: &BTreeMap<String, Zeroizing<Vec<u8>>>,
     ) -> Result<DeployEntry, String> {
         let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
         let LeafSpec::Stored(spec) = self.schema.leaf(&path).map_err(|error| error.to_string())?
@@ -361,16 +414,11 @@ impl Controller {
         let stored = entries
             .get(source)
             .ok_or_else(|| format!("{identifier}: its source {source} became unset"))?;
-        let record = EncryptedSecret {
-            format_version: stored.format_version,
-            version_id: stored.version_id.clone(),
-            recipient_ids: stored.recipient_ids.clone(),
-            age_ciphertext: stored.age_ciphertext.clone(),
-        };
-        let value =
-            decrypt_secret(source, &record, &self.provider).map_err(|error| error.to_string())?;
+        let value = plaintexts
+            .get(source)
+            .ok_or_else(|| format!("{identifier}: its source {source} was not decrypted"))?;
         let framed = derived
-            .frame(&value)
+            .frame(value)
             .map_err(|error| format!("{identifier} cannot be derived: {error}"))?;
         Ok(DeployEntry {
             identifier: identifier.to_owned(),
