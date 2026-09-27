@@ -416,13 +416,41 @@ impl Controller {
         // Every stored value this deployment sends, and every source of a
         // derived value, decrypted in one batch: one 1Password authorization
         // for the whole deployment.
+        // Public-key inventories this deployment's local keys register into
+        // are decrypted in the same batch, so registering costs no second
+        // authorization.
+        let inventories = identifiers
+            .iter()
+            .filter_map(|identifier| {
+                let path = SecretPath::parse(identifier).ok()?;
+                match self.schema.leaf(&path).ok()? {
+                    LeafSpec::Generated(task) => task.generated_secret.register_at,
+                    _ => None,
+                }
+            })
+            .filter(|inventory| entries.contains_key(inventory))
+            .collect::<BTreeSet<_>>();
+        let mut wanted = identifiers.clone();
+        wanted.extend(inventories.iter().filter(|id| !identifiers.contains(id)).cloned());
         let plaintexts = self.decrypt_for_deployment(
-            &identifiers,
+            &wanted,
             &generating,
             &derive_on_target,
             &derived,
             &entries,
         )?;
+        let prefetched = inventories
+            .iter()
+            .filter_map(|identifier| {
+                Some((
+                    identifier.clone(),
+                    (
+                        entries.get(identifier)?.version_id.clone(),
+                        plaintexts.get(identifier)?.clone(),
+                    ),
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         for identifier in &identifiers {
             if generating.contains(identifier.as_str()) || derive_on_target.contains(identifier) {
                 continue;
@@ -524,7 +552,7 @@ impl Controller {
         )?;
         // Store generated values first: they are the only copy outside the target.
         let stored = self.store_generated(&applied.generated_records);
-        let registered = self.register_public_keys(&source_host, &applied.generated_public_keys);
+        let registered = self.register_public_keys(&source_host, &applied.generated_public_keys, &prefetched);
         let active = self.active.take().expect("approval remains active");
         // Values the target left out because a prerequisite is absent there.
         skipped.extend(applied.not_deployed.keys().cloned());

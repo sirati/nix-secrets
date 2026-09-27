@@ -192,7 +192,9 @@ fn validate_manifest(
     hostname: &str,
     batch: &DeploymentBatch,
 ) -> Result<ResolvedBatch, DeployError> {
-    if !matches!(batch.version, 1..=3) {
+    if !(nix_secrets_transport::LEGACY_DEPLOYMENT_PROTOCOL_VERSION..=nix_secrets_transport::DEPLOYMENT_PROTOCOL_VERSION)
+        .contains(&u16::try_from(batch.version).unwrap_or(0))
+    {
         return Err(DeployError::Invalid(
             "unsupported deployment version".into(),
         ));

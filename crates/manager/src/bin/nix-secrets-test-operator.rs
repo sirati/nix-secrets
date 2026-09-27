@@ -15,6 +15,7 @@
 //! ```text
 //! nix-secrets-test-operator --backend-socket PATH --schema-file PATH
 //!     --secret-identity PATH --known-hosts PATH [--answer y|p|n] [--requests N]
+//!     [--launcher PATH]
 //! ```
 //!
 //! `--answer` is the key pressed on each deployment dialog: `y` approves,
@@ -43,6 +44,9 @@ struct Options {
     answer: char,
     requests: usize,
     set: Vec<(String, String)>,
+    /// Decrypts through this nix-secrets-1password launcher, as the TUI
+    /// does with 1Password, so a test can count its authorizations.
+    launcher: Option<PathBuf>,
 }
 
 fn parse() -> Result<Options, String> {
@@ -51,6 +55,7 @@ fn parse() -> Result<Options, String> {
     let mut answer = 'y';
     let mut requests = 1;
     let mut set = Vec::new();
+    let mut launcher = None;
     while let Some(argument) = arguments.next() {
         let mut value = || arguments.next().ok_or(format!("{argument} requires a value"));
         match argument.as_str() {
@@ -82,6 +87,7 @@ fn parse() -> Result<Options, String> {
                     .map_err(|error| format!("cannot read {path}: {error}"))?;
                 set.push((identifier.to_owned(), text));
             }
+            "--launcher" => launcher = Some(PathBuf::from(value()?)),
             "--requests" => requests = value()?.parse().map_err(|_| "--requests needs a number")?,
             other => return Err(format!("unexpected argument {other}")),
         }
@@ -94,6 +100,7 @@ fn parse() -> Result<Options, String> {
         answer,
         requests,
         set,
+        launcher,
     })
 }
 
@@ -204,7 +211,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let controller = Controller::new(
         BackendClient::new(connect_verified(&options.socket)?),
         schema,
-        AgeCommandProvider::identity_file(&options.identity),
+        match &options.launcher {
+            // The 1Password provider, as the TUI runs it; the test's `op`
+            // serves the identity as the one SSH key item.
+            Some(launcher) => {
+                AgeCommandProvider::default().through(launcher, vec!["--shared-session".into()])
+            }
+            None => AgeCommandProvider::identity_file(&options.identity),
+        },
         vec![options.known_hosts.clone()],
     )?;
     let mut controller = controller;

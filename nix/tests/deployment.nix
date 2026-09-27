@@ -34,6 +34,51 @@ let
         ssh-keygen -q -t ed25519 -N "" -C "IT Secrets" -f "$out/forwarder"
       '';
   forwarderPublic = lib.removeSuffix "\n" (builtins.readFile "${agentKeys}/forwarder.pub");
+  # The 1Password CLI as the launcher sees it: one SSH key item, the
+  # operator's age identity. It logs every call; `op item list` is the call
+  # that raises the prompt.
+  fakeOp = pkgs.writeShellScript "op" ''
+    echo "$*" >> /home/op/op.log
+    case "$1 $2" in
+      "item list")
+        echo '[{"id":"operatoritem","title":"IT Secrets","vault":{"id":"vault1"},"additional_information":"@FINGERPRINT@"}]' ;;
+      "read op://vault1/operatoritem/private key") cat /home/op/age-identity ;;
+      *) exit 0 ;;
+    esac
+  '';
+  # Runs the packaged launcher with that `op` first on PATH.
+  launcher = pkgs.writeShellScript "launcher" ''
+    PATH=/home/op/bin:$PATH exec ${operatorPackage}/bin/nix-secrets-1password "$@"
+  '';
+  # A deploying client that stops half way: it opens the deployer through
+  # the forwarder, selects one value, reads the target's state, prints the
+  # ssh pid and then waits to be killed, never sending a batch.
+  halfClient = pkgs.writeText "half-client.py" ''
+    import json, struct, subprocess, sys, time
+    host, key, known_hosts = sys.argv[1:4]
+    ssh = subprocess.Popen(
+        ["${pkgs.openssh}/bin/ssh", "-T", "-i", key, "-o", "IdentitiesOnly=yes",
+         "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
+         "-o", "UserKnownHostsFile=" + known_hosts,
+         "nix-secrets-forward@" + host],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    def send(kind, payload=b""):
+        ssh.stdin.write(b"NSF1" + bytes([kind]) + struct.pack(">I", len(payload)) + payload)
+        ssh.stdin.flush()
+    def receive():
+        header = ssh.stdout.read(9)
+        assert header[:4] == b"NSF1", header
+        return header[4], ssh.stdout.read(struct.unpack(">I", header[5:9])[0])
+    send(2)  # OpenDeployer
+    assert receive() == (3, b"")
+    selection = json.dumps({"identifiers": ["machine.services.alpha.token"]}).encode()
+    send(3, struct.pack(">I", len(selection)) + selection)
+    kind, payload = receive()
+    assert kind == 3 and payload, (kind, payload)
+    print("ssh-pid", ssh.pid, flush=True)
+    print("state-received", flush=True)
+    time.sleep(600)
+  '';
   destination = service: name: {
     path = "/persistent/secrets/${service}/service/${name}";
     category = "service";
@@ -161,6 +206,43 @@ let
         destination = destination "stalwart" "dns-update-key";
       };
     };
+    # ns1's Storage Box case: the task takes its host key from public
+    # information that has no stored value and no default, and mail has no
+    # inventory file. It is listed before connecting; the rest deploys.
+    box-known-hosts.secrets.known-hosts = {
+      kind = "public-info";
+      sharedPublicId = "box/known-hosts";
+      expectedSshHost = "box.example";
+      expectedSshHosts = [ "sub1.box.example" ];
+      expectedSshPort = 23;
+      installDefaultIfMissing = true;
+      destination = {
+        path = "/persistent/public-info/box/known-hosts";
+        category = "public-info";
+        owner = "root";
+        group = "root";
+        mode = "0644";
+        contentType = "ssh-known-hosts";
+      };
+    };
+    box-backup.secrets.storage-key = {
+      valueType = "password";
+      generatedSecret = {
+        type = "storage-box-ssh-key";
+        output = destination "box-backup" "storage-key" // {
+          category = "backup";
+          path = "/persistent/secrets/box-backup/backup/storage-key";
+          owner = "stalwart";
+          group = "stalwart";
+        };
+        bootstrap = {
+          host = "sub1.box.example";
+          port = 23;
+          user = "sub1";
+          knownHostsFile = "/persistent/public-info/box/known-hosts";
+        };
+      };
+    };
     reporter.secrets.fault-key.generatedSecret = {
       type = "local-ssh-key";
       output = destination "reporter" "fault-key" // {
@@ -176,6 +258,8 @@ let
     destination = "nix-secrets-forward@${host}";
     port = 22;
     identityPublicKeys = [ forwarderPublic ];
+    # As the module reports it from the receiver package.
+    protocolVersion = 4;
   };
   deployment = deploymentOf "machine";
   normalize =
@@ -269,6 +353,7 @@ pkgs.testers.runNixOSTest {
       pkgs.age
       pkgs.openssh
       pkgs.git
+      pkgs.python3
     ];
     users.users.op = {
       isNormalUser = true;
@@ -302,6 +387,9 @@ pkgs.testers.runNixOSTest {
             "nix-secrets-test-operator --backend-socket " + socket
             + " --schema-file ${schema} --secret-identity /home/op/age-identity"
             + " --known-hosts /home/op/.ssh/known_hosts --answer " + answer + " " + arguments
+            # Decrypts through the real 1Password launcher with an `op` that
+            # logs each call, so each authorization is counted.
+            + " --launcher /home/op/launcher"
             + f" >{machine_log} 2>&1 & echo $! >/home/op/{name}.pid"
         ))
         operator.wait_until_succeeds(f"grep -q '^ready$' {machine_log}")
@@ -355,6 +443,19 @@ pkgs.testers.runNixOSTest {
     ))
     assert "Too many authentication failures" in error, error
 
+    def authorizations():
+        # The launcher's first `op` call of a run raises the one 1Password
+        # prompt: `op item list` for the one-key path.
+        return int(operator.succeed("cat /home/op/op.log 2>/dev/null | grep -c '^item list' || true").strip())
+    # The launcher next to the operator's nix-secrets, run with an `op` that
+    # authorizes every request, logs it, and serves the operator's age key as
+    # the one 1Password SSH key item.
+    fingerprint = operator.succeed("ssh-keygen -l -E sha256 -f ${operatorKey}/id.pub").split()[1]
+    operator.succeed(
+        "install -D -o op -m 0755 ${fakeOp} /home/op/bin/op"
+        + f" && sed -i 's|@FINGERPRINT@|{fingerprint}|' /home/op/bin/op"
+        + " && install -o op -m 0755 ${launcher} /home/op/launcher"
+    )
     def signatures():
         return int(operator.succeed("grep -ac 'process_sign_request2: entering' /home/op/agent.log || true").strip())
     operator.succeed(as_op("touch ~/.ssh/known_hosts"))
@@ -372,6 +473,7 @@ pkgs.testers.runNixOSTest {
     #    and each missing value is listed with its reason. The token needs
     #    input; the credentials file too, and the Knot key framed from it.
     log = start_operator("first", "y")
+    authorized = authorizations()
     signed = signatures()
     status, output = operator.execute(deploy("--wait", "machine") + " 2>&1")
     if status != 0:
@@ -381,6 +483,9 @@ pkgs.testers.runNixOSTest {
     # One authenticated connection for the whole deployment: one agent
     # signature, so 1Password asks once.
     assert signatures() - signed == 1, (signed, signatures())
+    # And at most one 1Password authorization for every value it decrypts.
+    assert authorizations() - authorized <= 1, (authorized, authorizations())
+    print(operator.succeed("cat /home/op/op.log 2>/dev/null || true"))
     assert "deployed machine" in output, output
     assert "not deployed yet, machine waits for" in output, output
     assert "machine.services.alpha.token (external input)" in output, output
@@ -432,10 +537,20 @@ pkgs.testers.runNixOSTest {
     # 2. mail, the owner of the shared secret, receives the stored value
     #    unchanged: nothing is regenerated. Its own private key is generated
     #    on mail and registered into machine's inventory.
-    log = start_operator("mail", "y")
+    signed = signatures()
+    authorized = authorizations()
+    log = start_operator("mail", "y", "mail.services.box-backup.storage-key=bootstrap-password")
     output = operator.succeed(deploy("--wait", "mail"))
     stop_operator("mail")
     assert "deployed mail" in output, output
+    assert signatures() - signed == 1, (signed, signatures())
+    assert authorizations() - authorized <= 1, (authorized, authorizations())
+    # ns1's case: the Storage Box task's known_hosts has no value and no
+    # default. It is listed with the path before connecting; the rest of mail
+    # deployed.
+    assert "mail.services.box-backup.storage-key" in output, output
+    assert "/persistent/public-info/box/known-hosts is absent" in output, output
+    mail.fail("test -e /persistent/secrets/box-backup/backup/storage-key")
     assert mail.succeed("cat /persistent/secrets/stalwart/service/dns-update-key") == tsig
     mail.wait_for_unit("stalwart-consumer.service")
     mail.succeed("ssh-keygen -y -f /persistent/secrets/reporter/service/fault-key | grep -q '^ssh-ed25519 '")
@@ -449,6 +564,8 @@ pkgs.testers.runNixOSTest {
     operator.succeed(as_op("printf '[tsig]\\nkey_name = \"dyndns-rfc2136\"\\nsecret_base64 = \"ZHluZG5zLXNlY3JldA==\"\\n\\n[[credentials]]\\nusername = \"router\"\\npassword = \"pw\"\\n' >~/credentials.toml"))
     # mail's registration queued a deployment of the inventory: the TUI
     # handles it first, then the requested one.
+    signed = signatures()
+    authorized = authorizations()
     log = start_operator(
         "second", "y",
         "machine.services.alpha.token=token-one",
@@ -457,6 +574,14 @@ pkgs.testers.runNixOSTest {
     )
     output = operator.succeed(deploy("--wait", "machine"))
     stop_operator("second")
+    # Storing the token and credentials encrypts only. The two deployments
+    # (mail's inventory, then machine) decrypt the token, the credentials
+    # the Knot key is framed from, and the inventory: one authorization
+    # and one SSH signature each.
+    authorized_log = operator.succeed("cat /home/op/op.log")
+    assert authorizations() - authorized == 2, authorized_log
+    assert signatures() - signed == 2, (signed, signatures())
+    assert authorized_log.count("read op://vault1/operatoritem/private key") == authorizations(), authorized_log
     assert "not deployed yet" not in output, output
     machine.wait_for_unit("alpha-consumer.service")
     machine.succeed("runuser -u alpha -- grep -qx token-one /persistent/secrets/alpha/service/token")
@@ -478,6 +603,32 @@ pkgs.testers.runNixOSTest {
     expect_failure(deploy("--wait", "machine"), "rejected by the operator")
     stop_operator("reject")
     assert machine.succeed("readlink /persistent/secrets/.current").strip() == first
+
+    # A client that disappears mid-transaction: over the forwarder's SSH,
+    # open the deployer, send a selection, read the target's state, then
+    # kill ssh before any batch. On ns1 this left secret-deploy waiting for
+    # its 20-minute timeout. It must end within seconds, publish nothing and
+    # leave no staging.
+    operator.succeed(
+        "install -o op -m 0600 ${agentKeys}/forwarder /home/op/forwarder-key"
+    )
+    operator.succeed(as_op(
+        "python3 ${halfClient} machine /home/op/forwarder-key /home/op/.ssh/known_hosts"
+        + " >/home/op/half.log 2>&1 & echo $! >/home/op/half.pid"
+    ))
+    operator.wait_until_succeeds("grep -q '^state-received$' /home/op/half.log", timeout=60)
+    machine.wait_until_succeeds("systemctl list-units --no-legend 'nix-secrets-deployer@*' | grep -q activating", timeout=30)
+    ssh_pid = operator.succeed("sed -n 's/^ssh-pid //p' /home/op/half.log").strip()
+    operator.succeed(f"kill -9 {ssh_pid}")
+    machine.wait_until_fails(
+        "systemctl list-units --no-legend 'nix-secrets-deployer@*' | grep -q activating",
+        timeout=10,
+    )
+    machine.fail("pgrep -u nix-secrets-forward -f nix-secrets-forward-receiver")
+    machine.fail("pgrep -f 'secret-deploy --manifest'")
+    assert machine.succeed("readlink /persistent/secrets/.current").strip() == first
+    machine.fail("ls -d /persistent/secrets/.generations/.staging-* 2>/dev/null | grep -q .")
+    operator.succeed("rm /home/op/forwarder-key")
 
     # 5. A replaced value deploys again; without --wait the command returns
     #    at once and the TUI finishes it.
