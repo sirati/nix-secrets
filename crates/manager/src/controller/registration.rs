@@ -3,10 +3,15 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use std::collections::BTreeMap;
 
 impl Controller {
+    /// Registers the target's new public keys. `prefetched` holds inventory
+    /// values decrypted in the deployment's batch, by identifier, with the
+    /// version they were read at; they are used while still current, so a
+    /// registration needs no further 1Password authorization.
     pub(super) fn register_public_keys(
         &mut self,
         source_host: &str,
         keys: &BTreeMap<String, String>,
+        prefetched: &BTreeMap<String, (Vec<u8>, Zeroizing<Vec<u8>>)>,
     ) -> Result<(), String> {
         if source_host.is_empty()
             || !source_host
@@ -73,7 +78,15 @@ impl Controller {
             for _ in 0..3 {
                 let previous = self.client.list().map_err(|e| e.to_string())?;
                 let current = previous.get(&destination_id);
-                let lines = if let Some(stored) = current {
+                let cached = current.and_then(|stored| {
+                    prefetched
+                        .get(&destination_id)
+                        .filter(|(version, _)| *version == stored.version_id)
+                        .map(|(_, value)| value.to_vec())
+                });
+                let lines = if let Some(value) = cached {
+                    String::from_utf8(value).map_err(|_| "registered public keys are not UTF-8")?
+                } else if let Some(stored) = current {
                     let envelope = EncryptedSecret {
                         format_version: stored.format_version,
                         version_id: stored.version_id.clone(),
@@ -90,11 +103,26 @@ impl Controller {
                     String::new()
                 };
                 let updated = merge_named_key(&lines, source_host, &name, public_key);
-                match self.client.set_if_version(
-                    &destination,
+                // Encrypted here, so the read-back compares the stored record
+                // with this exact ciphertext instead of decrypting it again.
+                let encrypted = nix_secrets_crypto::encrypt_secret(
+                    &destination_id,
                     updated.as_bytes(),
                     &recipients,
                     &self.provider,
+                )
+                .map_err(|e| e.to_string())?;
+                let envelope = nix_secrets_core::EncryptedSecret {
+                    format_version: encrypted.format_version,
+                    version_id: encrypted.version_id.clone(),
+                    recipient_ids: encrypted.recipient_ids.clone(),
+                    recipient_refs: vec![],
+                    age_ciphertext: encrypted.age_ciphertext.clone(),
+                    public_key: None,
+                };
+                match self.client.set_envelope_if_version(
+                    &destination,
+                    envelope,
                     current.map(|record| record.version_id.clone()),
                 ) {
                     Ok(()) => {
@@ -103,15 +131,9 @@ impl Controller {
                             .get(&destination)
                             .map_err(|e| e.to_string())?
                             .ok_or("registered public key disappeared after save")?;
-                        let saved = EncryptedSecret {
-                            format_version: saved.format_version,
-                            version_id: saved.version_id,
-                            recipient_ids: saved.recipient_ids,
-                            age_ciphertext: saved.age_ciphertext,
-                        };
-                        let verified = decrypt_secret(&destination_id, &saved, &self.provider)
-                            .map_err(|e| e.to_string())?;
-                        if verified.as_slice() != updated.as_bytes() {
+                        if saved.version_id != encrypted.version_id
+                            || saved.age_ciphertext != encrypted.age_ciphertext
+                        {
                             return Err(
                                 "registered public key failed read-back verification".into()
                             );

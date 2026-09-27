@@ -759,7 +759,7 @@ fn a_deployment_decrypts_everything_in_one_provider_batch() {
     std::fs::write(
         &launcher,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {log}\n[ \"$1\" = --batch ] || exit 64\nshift\nexec {helper} \"$@\"\n",
+            "#!/bin/sh\necho \"$*\" >> {log}\n[ \"$1\" = --batch ] || exit 64\nshift\nexec perl {helper} \"$@\"\n",
             log = log.display(),
             helper = batch_helper(&fixture).display(),
         ),
