@@ -13,6 +13,7 @@ mod registry;
 use registry::{missing, synthetic_path, validate_named_recipients, validate_shared_public_specs};
 pub mod derived;
 mod deployable;
+mod producers;
 pub mod operator;
 pub use derived::DerivedFrom;
 pub(crate) mod validation;

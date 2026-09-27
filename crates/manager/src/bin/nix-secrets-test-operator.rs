@@ -73,6 +73,15 @@ fn parse() -> Result<Options, String> {
                     .ok_or("--set needs IDENTIFIER=VALUE")?;
                 set.push((identifier.to_owned(), text.replace("\\n", "\n")));
             }
+            "--set-file" => {
+                let assignment = value()?;
+                let (identifier, path) = assignment
+                    .split_once('=')
+                    .ok_or("--set-file needs IDENTIFIER=PATH")?;
+                let text = std::fs::read_to_string(path)
+                    .map_err(|error| format!("cannot read {path}: {error}"))?;
+                set.push((identifier.to_owned(), text));
+            }
             "--requests" => requests = value()?.parse().map_err(|_| "--requests needs a number")?,
             other => return Err(format!("unexpected argument {other}")),
         }

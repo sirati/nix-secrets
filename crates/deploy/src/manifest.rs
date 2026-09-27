@@ -191,7 +191,7 @@ fn validate_manifest(
     hostname: &str,
     batch: &DeploymentBatch,
 ) -> Result<ResolvedBatch, DeployError> {
-    if !matches!(batch.version, 1 | 2) {
+    if !matches!(batch.version, 1..=3) {
         return Err(DeployError::Invalid(
             "unsupported deployment version".into(),
         ));

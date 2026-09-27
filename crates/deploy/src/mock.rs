@@ -178,7 +178,7 @@ pub fn mock_install(
                     (*identifier).to_owned(),
                     (
                         derived.version(&version).into_bytes(),
-                        derived.frame(&value),
+                        derived.frame(&value).map_err(invalid)?,
                     ),
                 );
             }

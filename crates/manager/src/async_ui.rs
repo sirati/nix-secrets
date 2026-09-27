@@ -27,10 +27,7 @@ enum Command {
         kind: GenerateKind,
     },
     GenerateKeypair(String),
-    Approval {
-        accepted: bool,
-        partial: bool,
-    },
+    Approval(bool),
     RequestDeployment(String),
     SaveProfile {
         name: String,
@@ -48,7 +45,7 @@ enum Command {
 enum Event {
     Rows(Vec<Row>),
     Profiles(ProfileSnapshot),
-    Approval(ApprovalRequest),
+    Approval(Box<ApprovalRequest>),
     Completion(Completion),
     Error(String),
     ApprovalLost(String),
@@ -129,7 +126,7 @@ impl AsyncWriter {
                 }
                 match controller.poll_approval() {
                     Ok(Some(request)) => {
-                        if outgoing.send(Event::Approval(request)).is_err() {
+                        if outgoing.send(Event::Approval(Box::new(request))).is_err() {
                             return;
                         }
                     }
@@ -182,7 +179,7 @@ impl AsyncWriter {
             match event {
                 Event::Rows(rows) => self.rows = Some(rows),
                 Event::Profiles(snapshot) => self.profiles = Some(snapshot),
-                Event::Approval(request) => self.approvals.push(request),
+                Event::Approval(request) => self.approvals.push(*request),
                 Event::Completion(result) => {
                     if !matches!(result, Completion::BulkProgress { .. }) {
                         self.busy = false;
@@ -335,18 +332,7 @@ impl SecretWriter for AsyncWriter {
     }
 
     fn approval(&mut self, accepted: bool) -> Result<Option<ApprovalRequest>, String> {
-        self.queue(Command::Approval {
-            accepted,
-            partial: false,
-        })?;
-        Err(OPERATION_QUEUED.into())
-    }
-
-    fn approve_partial(&mut self) -> Result<Option<ApprovalRequest>, String> {
-        self.queue(Command::Approval {
-            accepted: true,
-            partial: true,
-        })?;
+        self.queue(Command::Approval(accepted))?;
         Err(OPERATION_QUEUED.into())
     }
 
@@ -463,12 +449,8 @@ fn activity(label: String, waits_for_one_password: bool) -> crate::model::Activi
 fn describe(command: &Command, one_password: bool) -> Option<crate::model::Activity> {
     let (label, decrypts) = match command {
         Command::Reveal(path) => (format!("Decrypting {path}"), true),
-        Command::Approval { accepted: true, .. } => {
-            ("Decrypting values for deployment".into(), true)
-        }
-        Command::Approval { accepted: false, .. } => {
-            ("Rejecting deployment request".into(), false)
-        }
+        Command::Approval(true) => ("Decrypting values for deployment".into(), true),
+        Command::Approval(false) => ("Rejecting deployment request".into(), false),
         Command::RequestDeployment(host) => (format!("Requesting a deployment of {host}"), false),
         // Saving verifies private keys and task values by decrypting them.
         Command::Write { path, .. } => (format!("Encrypting and saving {path}"), true),

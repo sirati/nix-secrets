@@ -263,10 +263,7 @@ impl SecretWriter for Controller {
         self.poll_approval_inner()
     }
     fn approval(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
-        self.approval_inner(accepted, false)
-    }
-    fn approve_partial(&mut self) -> Result<Option<UiApproval>, String> {
-        self.approval_inner(true, true)
+        self.approval_inner(accepted)
     }
     fn request_deployment(&mut self, host: &str) -> Result<(), String> {
         self.client

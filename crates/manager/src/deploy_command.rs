@@ -55,6 +55,7 @@ pub fn parse(
             "--repository" => options.repository = path("--repository")?,
             "--backend-socket" => options.backend_socket = Some(path("--backend-socket")?),
             "--wait" => wait = true,
+            // Kept as an alias: missing values never block a deployment.
             "--allow-partial" => allow_partial = true,
             _ if text.starts_with('-') => return Err(format!("unexpected argument {text:?}; {USAGE}")),
             _ if host.is_some() => return Err(format!("name exactly one host; {USAGE}")),

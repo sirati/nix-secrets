@@ -225,7 +225,7 @@ let
   validateDerivedFrom =
     derived:
     let
-      extra = builtins.filter (name: !(builtins.elem name [ "identifier" "prefix" "suffix" ])) (
+      extra = builtins.filter (name: !(builtins.elem name [ "identifier" "prefix" "suffix" "tomlPath" ])) (
         attrNames derived
       );
       affixOk =
@@ -244,6 +244,15 @@ let
       throw "derivedFrom.identifier must be a canonical secret identifier"
     else if !(affixOk "prefix" && affixOk "suffix") then
       throw "derivedFrom prefix and suffix must be strings of at most 1024 bytes"
+    else if
+      derived ? tomlPath
+      && !(
+        builtins.isList derived.tomlPath
+        && builtins.length derived.tomlPath <= 8
+        && builtins.all (key: builtins.isString key && key != "") derived.tomlPath
+      )
+    then
+      throw "derivedFrom.tomlPath must be a list of at most 8 non-empty keys"
     else
       derived;
 

@@ -1,6 +1,9 @@
-/// Version 2 adds target-side value generation. A client still deploys to
-/// a version 1 target when it needs no generation.
-pub const DEPLOYMENT_PROTOCOL_VERSION: u16 = 2;
+/// Version 2 adds target-side value generation. Version 3 adds generating a
+/// shared source the target does not own ([`SharedSource`]). A client still
+/// deploys to an older target what that target supports.
+pub const DEPLOYMENT_PROTOCOL_VERSION: u16 = 3;
+pub const GENERATION_PROTOCOL_VERSION: u16 = 2;
+pub const SHARED_SOURCE_PROTOCOL_VERSION: u16 = 3;
 pub const LEGACY_DEPLOYMENT_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_DEPLOYMENT_JSON: usize = 64 * 1024 * 1024;
 mod client;

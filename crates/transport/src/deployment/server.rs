@@ -22,7 +22,7 @@ where
     let batch: DeploymentBatch = read_wire_json(&mut input)?;
     if !matches!(
         batch.version,
-        LEGACY_DEPLOYMENT_PROTOCOL_VERSION | DEPLOYMENT_PROTOCOL_VERSION
+        LEGACY_DEPLOYMENT_PROTOCOL_VERSION..=DEPLOYMENT_PROTOCOL_VERSION
     ) {
         return Err(DeploymentError::Invalid(
             "unsupported deployment batch version",

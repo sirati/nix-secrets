@@ -43,16 +43,12 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
             Ok(()) => Completion::KeypairGenerated(path),
             Err(error) => Completion::Failed(error),
         },
-        Command::Approval { accepted, partial } => match if partial {
-            controller.approve_partial()
-        } else {
-            controller.approval(accepted)
-        } {
+        Command::Approval(accepted) => match controller.approval(accepted) {
             Ok(None) if accepted => Completion::Deployed {
                 generated: controller.take_generated(),
                 skipped: controller.take_skipped(),
             },
-            Ok(next) => Completion::ApprovalDone(next),
+            Ok(next) => Completion::ApprovalDone(next.map(Box::new)),
             // A failed deployment is final; the dialog closes.
             Err(error) => Completion::ApprovalLost(error),
         },

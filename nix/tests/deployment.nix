@@ -97,6 +97,79 @@ let
         group = "alpha";
       };
     };
+    # A. Public information with a pinned default: never sent, never blocks.
+    backup.secrets.known-hosts = {
+      kind = "public-info";
+      sharedPublicId = "storage-box/known-hosts";
+      expectedSshHost = "box.example";
+      expectedSshPort = 23;
+      installDefaultIfMissing = true;
+      destination = {
+        path = "/persistent/public-info/storage-box/known-hosts";
+        category = "public-info";
+        owner = "root";
+        group = "root";
+        mode = "0644";
+        contentType = "ssh-known-hosts";
+      };
+    };
+    # B. Filled by mail's local-ssh-key registration.
+    report-authorized.secrets.fault = {
+      valueType = "key";
+      destination = destination "report-authorized" "fault" // {
+        owner = "root";
+        group = "root";
+        contentType = "named-ssh-ed25519-public-keys";
+        authorizedForUser = "alpha";
+      };
+    };
+    # C. One field of an entered TOML file, framed as a Knot key.
+    dyndns.secrets.credentials = {
+      valueType = "key";
+      externalInputRequired = true;
+      destination = destination "dyndns" "credentials" // { owner = "dns"; group = "dns"; };
+    };
+    dyndns.secrets.knot-key = {
+      valueType = "key";
+      derivedFrom = {
+        identifier = "machine.services.dyndns.credentials";
+        tomlPath = [ "tsig" "secret_base64" ];
+        prefix = "key:\n  - id: dyndns-rfc2136\n    secret: ";
+        suffix = "\n";
+      };
+      destination = destination "dyndns" "knot-key" // { owner = "dns"; group = "dns"; };
+    };
+  };
+  knownKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+  knownHostsInventory = builtins.toFile "test-public-info.toml" ''
+    [public_info."storage-box/known-hosts"]
+    version_id = "00000000000000000000000000000000"
+    value = "[box.example]:23 ${knownKey}\n"
+  '';
+  # The owner of the shared TSIG secret, and of a private key that is only
+  # ever generated on it.
+  mailSecrets = {
+    stalwart = {
+      consumerUnits = [ "stalwart-consumer.service" ];
+      secrets.dns-update-key = {
+        valueType = "key";
+        valueGenerator = {
+          kind = "random-bytes";
+          bytes = 32;
+          encoding = "base64";
+        };
+        destination = destination "stalwart" "dns-update-key";
+      };
+    };
+    reporter.secrets.fault-key.generatedSecret = {
+      type = "local-ssh-key";
+      output = destination "reporter" "fault-key" // {
+        owner = "stalwart";
+        group = "stalwart";
+        contentType = "openssh-private-key";
+      };
+      registerAt = "machine.services.report-authorized.fault";
+    };
   };
   deploymentOf = host: {
     inherit host;
@@ -127,18 +200,7 @@ let
   # mail host whose value ns1-like hosts derive from.
   schema = pkgs.writeText "nix-secrets-schema.json" (
     builtins.toJSON (
-      normalize "machine" targetSecrets
-      // normalize "mail" {
-        stalwart.secrets.dns-update-key = {
-          valueType = "key";
-          valueGenerator = {
-            kind = "random-bytes";
-            bytes = 32;
-            encoding = "base64";
-          };
-          destination = destination "stalwart" "dns-update-key";
-        };
-      }
+      normalize "machine" targetSecrets // normalize "mail" mailSecrets
     )
   );
 
@@ -158,40 +220,48 @@ let
     alpha = 1201;
     dns = 1202;
     dns-update = 1203;
+    stalwart = 1204;
   };
+  target =
+    name: secrets: consumers:
+    {
+      users.users = systemUsers;
+      users.groups = lib.mapAttrs (_: gid: { inherit gid; }) accounts;
+      imports = [ module ];
+      services.openssh.enable = true;
+      # Every deployment scans the host key before connecting; the test
+      # runs many in a row from one address.
+      services.openssh.settings.PerSourcePenalties = "no";
+      # Fewer tries than the agent holds keys: offering them all would be
+      # cut off before the forwarder key, as on ns1.
+      services.openssh.settings.MaxAuthTries = 3;
+      services.nixSecrets = {
+        enable = true;
+        hostName = name;
+        deployment = deploymentOf name;
+        publicInfoInventoryFile = toString knownHostsInventory;
+        defaultRecipientPublicKeys = [ operatorPublic ];
+        receiver.enable = true;
+        forwarder = {
+          enable = true;
+          authorizedKeys = [ forwarderPublic ];
+        };
+        services = secrets;
+      };
+      services.secretsReadyWaiter.enable = true;
+      systemd.services = lib.genAttrs consumers (unit: consumer unit);
+      system.stateVersion = "26.05";
+    };
 in
 pkgs.testers.runNixOSTest {
   name = "nix-secrets-deployment";
 
-  nodes.machine = {
-    users.users = systemUsers;
-    users.groups = lib.mapAttrs (_: gid: { inherit gid; }) accounts;
-        imports = [ module ];
-        services.openssh.enable = true;
-        # Every deployment scans the host key before connecting; the test runs
-        # many in a row from one address, which sshd would otherwise penalise.
-        services.openssh.settings.PerSourcePenalties = "no";
-        # Fewer tries than the agent holds keys: offering them all would be
-        # cut off before the forwarder key, as on ns1.
-        services.openssh.settings.MaxAuthTries = 3;
-        services.nixSecrets = {
-          enable = true;
-          hostName = "machine";
-          inherit deployment;
-          defaultRecipientPublicKeys = [ operatorPublic ];
-          receiver.enable = true;
-          forwarder = {
-            enable = true;
-            authorizedKeys = [ forwarderPublic ];
-          };
-          services = targetSecrets;
-        };
-        services.secretsReadyWaiter.enable = true;
-        systemd.services.alpha-consumer = consumer "alpha";
-        systemd.services.dns-consumer = consumer "dns";
-        systemd.services.dns-update-consumer = consumer "dns-update";
-        system.stateVersion = "26.05";
-  };
+  nodes.machine = target "machine" targetSecrets [
+    "alpha-consumer"
+    "dns-consumer"
+    "dns-update-consumer"
+  ];
+  nodes.mail = target "mail" mailSecrets [ "stalwart-consumer" ];
 
   nodes.operator = {
     environment.systemPackages = [
@@ -222,9 +292,11 @@ pkgs.testers.runNixOSTest {
             + " " + " ".join(arguments)
         )
 
-    def start_operator(name, answer, *set_values):
+    def start_operator(name, answer, *set_values, requests=1):
         # The headless TUI; its output shows each dialog and notice.
-        arguments = " ".join(f"--set {value}" for value in set_values)
+        arguments = " ".join(
+            f"--set-file {value}" if "=/" in value else f"--set {value}" for value in set_values
+        ) + f" --requests {requests}"
         machine_log = f"/home/op/{name}.log"
         operator.succeed(as_op(
             "nix-secrets-test-operator --backend-socket " + socket
@@ -250,7 +322,10 @@ pkgs.testers.runNixOSTest {
         return output
 
     machine.start(allow_reboot=True)
+    mail.start()
     operator.start()
+    mail.wait_for_unit("nix-secrets-deployer.socket")
+    mail.succeed("systemctl start --no-block stalwart-consumer")
     machine.wait_for_unit("sshd.service")
     machine.wait_for_unit("nix-secrets-deployer.socket")
     for consumer in ["alpha", "dns", "dns-update"]:
@@ -293,32 +368,57 @@ pkgs.testers.runNixOSTest {
     error = operator.fail(deploy("machine") + " 2>&1")
     assert "open the nix-secrets TUI and retry" in error, error
 
-    # 1. Missing input refuses the whole deployment before anything is sent.
-    log = start_operator("refuse", "y")
-    expect_failure(
-        deploy("--wait", "machine"),
-        "Missing values that must be entered",
-        "machine.services.alpha.token (external input)",
-        log=log,
-    )
-    stop_operator("refuse")
+    # 1. Nothing is refused for missing values: everything deployable goes,
+    #    and each missing value is listed with its reason. The token needs
+    #    input; the credentials file too, and the Knot key framed from it.
+    log = start_operator("first", "y")
+    signed = signatures()
+    status, output = operator.execute(deploy("--wait", "machine") + " 2>&1")
+    if status != 0:
+        print(machine.succeed("journalctl -u 'nix-secrets-deployer@*' --no-pager | tail -20"))
+        raise AssertionError(output)
+    stop_operator("first")
+    # One authenticated connection for the whole deployment: one agent
+    # signature, so 1Password asks once.
+    assert signatures() - signed == 1, (signed, signatures())
+    assert "deployed machine" in output, output
+    assert "not deployed yet, machine waits for" in output, output
+    assert "machine.services.alpha.token (external input)" in output, output
+    assert "machine.services.report-authorized.fault (filled when mail deploy)" in output, output
     dialogs = operator.succeed(f"cat {log}")
     assert "host-key=true" in dialogs, dialogs
-    machine.fail("test -e /persistent/secrets/.current")
+    # A. The public default stays; nothing was sent for it.
+    machine.succeed("grep -q '\\[box.example\\]:23 ssh-ed25519 ' /persistent/public-info/storage-box/known-hosts")
+    # D. The shared TSIG secret of mail was generated here, the host
+    #    deployed first; the Knot file is framed from it, and the operator
+    #    stored only its ciphertext under mail's identifier.
+    update_key = machine.succeed("cat /persistent/secrets/dns-update/service/update-key")
+    assert update_key.startswith("key: ") and update_key.endswith("\n"), update_key
+    tsig = update_key[5:-1]
+    store = operator.succeed(f"cat {repo}/nix-secrets.toml")
+    assert "mail.services.stalwart.dns-update-key" in store and tsig not in store
+    machine.fail("test -e /persistent/secrets/stalwart")
+    machine.wait_for_unit("dns-update-consumer.service")
+    # Generated values: installed here, stored as ciphertext.
+    machine.succeed("test -s /persistent/secrets/alpha/service/password")
+    machine.succeed("ssh-keygen -y -f /persistent/secrets/keys/service/local-key | grep -q '^ssh-ed25519 '")
+    key = machine.succeed("cat /persistent/secrets/dns/service/transfer-key").strip()
+    assert machine.succeed("cat /persistent/secrets/dns/service/transfer-key-file") == f"secret: {key}\n"
+    assert "machine.services.dns.transfer-key" in store and key not in store
+    machine.wait_for_unit("dns-consumer.service")
+    # Values still missing keep only their own services waiting.
+    machine.fail("test -e /persistent/secrets/alpha/service/token")
+    machine.fail("test -e /run/alpha-started")
+    assert machine.succeed(
+        "systemctl show secrets-ready-waiter-alpha.service -p ActiveState --value"
+    ).strip() == "activating"
     # From now on the target's key is known and no longer asked about.
-    operator.succeed(as_op("ssh-keyscan -t ed25519 machine >>~/.ssh/known_hosts 2>/dev/null"))
-
-    # 2. The token is entered. The derived update key waits for the mail host,
-    #    so a full deployment is still refused ("deploy mail first") ...
-    log = start_operator("partial-refused", "y", "machine.services.alpha.token=token-one")
-    expect_failure(deploy("--wait", "machine"), "deploy mail first", log=log)
-    stop_operator("partial-refused")
-    machine.fail("test -e /persistent/secrets/.current")
+    operator.succeed(as_op("ssh-keyscan -t ed25519 machine mail >>~/.ssh/known_hosts 2>/dev/null"))
 
     # Without the forwarder key in the agent the deployment names the key
     # and the agent instead of trying keys the target refuses.
     operator.succeed(as_op("ssh-add -L | grep 'IT Secrets' >~/forwarder.pub && ssh-add -d ~/forwarder.pub"))
-    log = start_operator("no-key", "p")
+    log = start_operator("no-key", "y")
     expect_failure(
         deploy("--wait", "machine"),
         "the forwarder key \"IT Secrets\" (ssh-ed25519 SHA256:",
@@ -329,41 +429,47 @@ pkgs.testers.runNixOSTest {
     operator.succeed("install -o op -m 0600 ${agentKeys}/forwarder /home/op/forwarder")
     operator.succeed(as_op("ssh-add -q /home/op/forwarder && rm /home/op/forwarder"))
 
-    # 3. ... and deploys everything else when the requester allows it. The
-    #    skip list reaches the requester and the target keeps waiting.
-    log = start_operator("partial", "y")
-    signed = signatures()
-    output = operator.succeed(deploy("--wait", "--allow-partial", "machine"))
-    assert "deployed machine" in output, output
-    assert "skipped until their source host is deployed" in output, output
-    assert "machine.services.dns-update.update-key" in output, output
-    stop_operator("partial")
-    # One authenticated connection for the whole deployment: one agent
-    # signature, so 1Password would ask once.
-    assert signatures() - signed == 1, (signed, signatures())
-    dialogs = operator.succeed(f"cat {log}")
-    assert "allow-partial=true" in dialogs and "host-key=true" not in dialogs, dialogs
-    assert "skippable=[\"machine.services.dns-update.update-key\"]" in dialogs, dialogs
+    # 2. mail, the owner of the shared secret, receives the stored value
+    #    unchanged: nothing is regenerated. Its own private key is generated
+    #    on mail and registered into machine's inventory.
+    log = start_operator("mail", "y")
+    output = operator.succeed(deploy("--wait", "mail"))
+    stop_operator("mail")
+    assert "deployed mail" in output, output
+    assert mail.succeed("cat /persistent/secrets/stalwart/service/dns-update-key") == tsig
+    mail.wait_for_unit("stalwart-consumer.service")
+    mail.succeed("ssh-keygen -y -f /persistent/secrets/reporter/service/fault-key | grep -q '^ssh-ed25519 '")
+    # The private key never left mail; only its public half is stored.
+    fault_public = mail.succeed("ssh-keygen -y -f /persistent/secrets/reporter/service/fault-key").split()[1]
+    assert "PRIVATE KEY" not in operator.succeed(f"cat {repo}/nix-secrets.toml")
+
+    # 3. The token and the dyndns credentials are entered; B's inventory now
+    #    holds mail's key. Deploying machine again delivers all of them, and
+    #    C frames only the TSIG field of the credentials.
+    operator.succeed(as_op("printf '[tsig]\\nkey_name = \"dyndns-rfc2136\"\\nsecret_base64 = \"ZHluZG5zLXNlY3JldA==\"\\n\\n[[credentials]]\\nusername = \"router\"\\npassword = \"pw\"\\n' >~/credentials.toml"))
+    # mail's registration queued a deployment of the inventory: the TUI
+    # handles it first, then the requested one.
+    log = start_operator(
+        "second", "y",
+        "machine.services.alpha.token=token-one",
+        "machine.services.dyndns.credentials=/home/op/credentials.toml",
+        requests=2,
+    )
+    output = operator.succeed(deploy("--wait", "machine"))
+    stop_operator("second")
+    assert "not deployed yet" not in output, output
     machine.wait_for_unit("alpha-consumer.service")
-    machine.wait_for_unit("dns-consumer.service")
     machine.succeed("runuser -u alpha -- grep -qx token-one /persistent/secrets/alpha/service/token")
     machine.succeed("test \"$(stat -c %U:%G:%a /persistent/secrets/alpha/service/token)\" = alpha:alpha:400")
     machine.fail("runuser -u dns -- cat /persistent/secrets/alpha/service/token")
-    machine.succeed("test -s /persistent/secrets/alpha/service/password")
-    machine.succeed("ssh-keygen -y -f /persistent/secrets/keys/service/local-key | grep -q '^ssh-ed25519 '")
-    key = machine.succeed("cat /persistent/secrets/dns/service/transfer-key").strip()
-    assert machine.succeed("cat /persistent/secrets/dns/service/transfer-key-file") == f"secret: {key}\n"
-    machine.fail("test -e /persistent/secrets/dns-update/service/update-key")
-    machine.fail("test -e /run/dns-update-started")
-    # Its waiter keeps waiting, so its consumer stays stopped.
-    assert machine.succeed(
-        "systemctl show secrets-ready-waiter-dns-update.service -p ActiveState --value"
-    ).strip() == "activating"
+    assert machine.succeed("cat /persistent/secrets/dyndns/service/knot-key") == (
+        "key:\n  - id: dyndns-rfc2136\n    secret: ZHluZG5zLXNlY3JldA==\n"
+    )
+    machine.succeed(f"grep -q '^mail-.* ssh-ed25519 {fault_public}$' /persistent/secrets/report-authorized/service/fault")
+    # The shared secret is the same on both hosts and was not regenerated.
+    assert machine.succeed("cat /persistent/secrets/dns-update/service/update-key") == f"key: {tsig}\n"
     audits = machine.succeed("cat /run/nix-secrets/audit/*.json")
-    assert "token-one" not in audits
-    # Values the target generated are now in the operator's store, encrypted.
-    store = operator.succeed(f"cat {repo}/nix-secrets.toml")
-    assert "machine.services.dns.transfer-key" in store and key not in store
+    assert "token-one" not in audits and "ZHluZG5z" not in audits
 
     # 4. The TUI's `D` path is the same request; the operator rejecting it
     #    reaches the requester and changes nothing.
@@ -375,7 +481,7 @@ pkgs.testers.runNixOSTest {
 
     # 5. A replaced value deploys again; without --wait the command returns
     #    at once and the TUI finishes it.
-    start_operator("replace", "p", "machine.services.alpha.token=token-two")
+    start_operator("replace", "y", "machine.services.alpha.token=token-two")
     output = operator.succeed(deploy("machine") + " 2>&1")
     assert "approve it in the nix-secrets TUI" in output, output
     machine.wait_until_succeeds("grep -qx token-two /persistent/secrets/alpha/service/token")

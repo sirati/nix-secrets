@@ -44,7 +44,7 @@ pub struct Controller {
     background_error: Option<String>,
     /// Values the last deployment generated on its target and stored.
     last_generated: Vec<String>,
-    /// Values the last partial deployment skipped.
+    /// Values the last deployment left out, with why.
     last_skipped: Vec<String>,
     /// Runs operator keypair generators; tests replace it.
     keypair_runner: KeypairRunner,
@@ -155,8 +155,10 @@ impl Controller {
         state: Option<&TargetState>,
         set: &BTreeSet<String>,
     ) -> Result<UiApproval, String> {
+        // Values not in the target selection: missing ones and public
+        // information the host installs its own default for.
         let skippable = unset::plan_unset(&self.schema, &request.secrets, set)
-            .map(|plan| plan.skippable)
+            .map(|plan| plan.skippable.into_iter().chain(plan.host_default).collect::<Vec<_>>())
             .unwrap_or_default();
         let mut create = Vec::new();
         let mut replace = Vec::new();
@@ -197,6 +199,7 @@ impl Controller {
                         keys.extend(spec.recipient_ids);
                     }
                     let output_is_set = state
+                        .filter(|_| !skippable.contains(identifier))
                         .map(|state| target_task_has_version(state, identifier))
                         .transpose()?;
                     tasks.push(crate::model::TaskApproval {
@@ -214,7 +217,14 @@ impl Controller {
         let plan = unset::plan_unset(&self.schema, &request.secrets, set)?;
         Ok(UiApproval {
             skippable: plan.skippable.clone(),
-            allow_partial: request.allow_partial,
+            missing_kinds: plan
+                .reasons
+                .iter()
+                .map(|(identifier, kind)| (identifier.clone(), kind.label().to_owned()))
+                .collect(),
+            host_default: plan.host_default.clone(),
+            // Missing values never block: everything else is deployed.
+            allow_partial: true,
             id: request.id.clone(),
             target: request.target.clone(),
             create,
@@ -222,7 +232,17 @@ impl Controller {
             recipient_keys: keys.into_iter().collect(),
             host_key: None,
             tasks,
-            generate: plan.generate,
+            generate: plan
+                .generate
+                .into_iter()
+                .chain(plan.shared.into_iter().map(|(identifier, label)| {
+                    let host = identifier.split('.').next().unwrap_or("").to_owned();
+                    (
+                        identifier,
+                        format!("{label}; shared with {host}, generated and encrypted on {} and stored as ciphertext", request.target),
+                    )
+                }))
+                .collect(),
             missing: plan.missing,
             derived: plan
                 .derived
@@ -235,22 +255,26 @@ impl Controller {
     fn deploy_active(&mut self) -> Result<(), String> {
         let active = self.active.as_ref().ok_or("no claimed approval request")?;
         let mut identifiers = active.request.secrets.clone();
-        let allow_partial = active.request.allow_partial;
+        // Missing values never block: two hosts that need each other's
+        // values would otherwise never deploy. They are listed instead.
+        let allow_partial = true;
         let set = self.plan_set(&identifiers)?;
         let entries = self.client.list().map_err(|error| error.to_string())?;
         // Refuse before connecting, decrypting, generating, or writing.
-        let plan = unset::plan_unset(&self.schema, &identifiers, &set)?;
+        let mut plan = unset::plan_unset(&self.schema, &identifiers, &set)?;
         if let Some(refusal) = plan.refusal_for(allow_partial) {
             return Err(refusal);
         }
         // A partial deployment leaves the values that wait for another host
         // out of the target selection, so the target keeps waiting for them.
-        let skipped = if allow_partial {
+        let mut skipped = if allow_partial {
             plan.skippable.clone()
         } else {
             Vec::new()
         };
-        identifiers.retain(|identifier| !skipped.contains(identifier));
+        identifiers.retain(|identifier| {
+            !skipped.contains(identifier) && !plan.host_default.contains(identifier)
+        });
         // The session was opened for the request without the values that
         // wait for another host. It is never reopened: each connection costs
         // the operator an agent prompt.
@@ -291,7 +315,34 @@ impl Controller {
             .iter()
             .map(|(identifier, _)| identifier.as_str())
             .collect::<BTreeSet<_>>();
-        let generate_entries = unset::generate_entries(&plan)?;
+        let old_target = self
+            .active
+            .as_ref()
+            .and_then(|active| active.prepared.as_ref())
+            .is_some_and(|prepared| !prepared.supports_shared_sources());
+        if !plan.shared.is_empty() && old_target {
+            // The target cannot generate a shared value yet. Its derived values
+            // wait, and the rest deploys over a narrower selection: one more
+            // connection, only against such an old target.
+            let shared = std::mem::take(&mut plan.shared);
+            let waiting = plan
+                .derived_on_target
+                .iter()
+                .filter(|(_, source)| shared.iter().any(|(id, _)| id == source))
+                .map(|(identifier, _)| identifier.clone())
+                .collect::<Vec<_>>();
+            plan.derived_on_target
+                .retain(|(identifier, _)| !waiting.contains(identifier));
+            identifiers.retain(|identifier| !waiting.contains(identifier));
+            skipped.extend(waiting);
+            let active = self.active.as_mut().expect("active approval exists");
+            let mut narrowed = active.request.clone();
+            narrowed.secrets = identifiers.clone();
+            active.expected = expected_target(&self.schema, &narrowed)?;
+            active.prepared = None;
+            self.prepare_active()?;
+        }
+        let generate_entries = unset::generate_entries(&self.schema, &plan)?;
         let derive_on_target = plan
             .derived_on_target
             .iter()
@@ -408,6 +459,18 @@ impl Controller {
         let stored = self.store_generated(&applied.generated_records);
         let registered = self.register_public_keys(&source_host, &applied.generated_public_keys);
         let active = self.active.take().expect("approval remains active");
+        let skipped = skipped
+            .iter()
+            .map(|identifier| {
+                let reason = plan
+                    .missing
+                    .iter()
+                    .find(|(id, _)| id == identifier)
+                    .map(|(_, reason)| reason.as_str())
+                    .unwrap_or("its shared source needs a newer target");
+                format!("{identifier} ({reason})")
+            })
+            .collect::<Vec<_>>();
         let summary = deployment_summary(
             &source_host,
             stored.as_ref().map(Vec::as_slice).unwrap_or(&[]),
@@ -448,7 +511,7 @@ fn deployment_summary(
     }
     if !skipped.is_empty() {
         summary.push_str(&format!(
-            "; skipped until their source host is deployed (the target keeps waiting for them): {}",
+            "; not deployed yet, {target} waits for: {}",
             skipped.join(", ")
         ));
     }

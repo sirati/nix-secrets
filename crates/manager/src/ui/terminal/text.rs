@@ -92,90 +92,12 @@ pub(super) fn prompt(model: &Model) -> String {
         Mode::ProviderFailure { message, .. } => {
             format!("Provider failed: {message}. r: retry · Esc: cancel")
         }
-        Mode::Approval(request) => {
-            let failure = model.message_text().unwrap_or_default();
-            if let Some(host_key) = &request.host_key {
-                format!(
-                    "{failure} {host_key} Trust this host and inspect its deployment state? y/n"
-                )
-            } else if !request.deployable() {
-                let partial = if request.partial_possible() {
-                    " p: deploy everything else and skip these; the target keeps waiting for them ·"
-                } else {
-                    ""
-                };
-                format!(
-                    "{failure} Cannot deploy to {}: missing values that must be entered: {}. Nothing will be generated or written.{partial} n: dismiss",
-                    request.target,
-                    request
-                        .missing
-                        .iter()
-                        .map(|(id, reason)| format!("{id} ({reason})"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            } else {
-                let skipped = if request.missing.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " PARTIAL: skips {} value{} whose source host is not deployed yet; the target keeps waiting for {}: [{}] · p: refuse instead ·",
-                        request.missing.len(),
-                        if request.missing.len() == 1 { "" } else { "s" },
-                        if request.missing.len() == 1 { "it" } else { "them" },
-                        request
-                            .missing
-                            .iter()
-                            .map(|(id, reason)| format!("{id} ({reason})"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                let kept = |items: &[String]| {
-                    items
-                        .iter()
-                        .filter(|id| !request.skippable.contains(id))
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                let generate = if request.generate.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        ", will generate {} values on the target: [{}]",
-                        request.generate.len(),
-                        request
-                            .generate
-                            .iter()
-                            .map(|(id, kind)| format!("{id} ({kind})"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                let generate = if request.derived.is_empty() {
-                    generate
-                } else {
-                    format!(
-                        "{generate}, derived [{}]",
-                        request
-                            .derived
-                            .iter()
-                            .map(|(id, source)| format!("{id} from {source}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                format!(
-                    "{failure}{skipped} Deploy to {}? create [{}], replace [{}], tasks [{}]{generate}, keys [{}] · y/n",
-                    request.target,
-                    kept(&request.create),
-                    kept(&request.replace),
-                    request.tasks.iter().map(task_status).collect::<Vec<_>>().join(", "),
-                    request.recipient_keys.join(", ")
-                )
-            }
-        }
+        Mode::Approval(request) => super::deploy_view::plain(&super::deploy_view::approval_lines(
+            request,
+            model.message_text(),
+            model.approval_details,
+            80,
+        )),
         Mode::FacetCategories { .. } | Mode::FacetValues { .. } | Mode::FacetFirstChoice { .. } | Mode::TreeOrder { .. } | Mode::Profiles { .. } => unreachable!(),
     }
 }

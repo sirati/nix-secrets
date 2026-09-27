@@ -359,58 +359,6 @@ fn settings_dialog_lists_session_settings() {
     );
 }
 
-#[test]
-fn deployment_prompt_lists_generated_and_missing_values() {
-    use crate::model::ApprovalRequest;
-    let request =
-        |generate: Vec<(String, String)>, missing: Vec<(String, String)>| ApprovalRequest {
-            id: "r".into(),
-            target: "host".into(),
-            create: vec!["host.services.a.set".into()],
-            replace: vec![],
-            recipient_keys: vec!["operator".into()],
-            host_key: None,
-            tasks: vec![],
-            generate,
-            missing,
-            derived: vec![("host.services.a.knot".into(), "other.services.b.raw".into())],
-            skippable: vec![],
-            allow_partial: false,
-        };
-    let mut model = Model::new(vec![]);
-    model.mode = Mode::Approval(request(
-        vec![
-            ("host.services.a.pw".into(), "password".into()),
-            (
-                "host.services.a.key".into(),
-                "32 random bytes, base64".into(),
-            ),
-        ],
-        vec![],
-    ));
-    let prompt = text::prompt(&model);
-    assert!(
-        prompt.contains("will generate 2 values on the target"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("host.services.a.key (32 random bytes, base64)"));
-    assert!(
-        prompt.contains("derived [host.services.a.knot from other.services.b.raw]"),
-        "{prompt}"
-    );
-    model.mode = Mode::Approval(request(
-        vec![("host.services.a.pw".into(), "password".into())],
-        vec![
-            ("host.services.a.x".into(), "external input".into()),
-            ("host.services.a.y".into(), "no valueGenerator".into()),
-        ],
-    ));
-    let prompt = text::prompt(&model);
-    assert!(prompt.contains("missing values that must be entered: host.services.a.x (external input), host.services.a.y (no valueGenerator)"), "{prompt}");
-    assert!(prompt.contains("Nothing will be generated or written"));
-    let notice = crate::ui::drive::deployed_notice(&["host.services.a.pw".into()], &[]);
-    assert!(notice.contains("generated") && notice.contains("host.services.a.pw"));
-}
 
 #[test]
 fn uncommitted_delete_renders_the_loss_warning_with_its_buttons() {
@@ -520,37 +468,4 @@ fn commit_dialog_shows_the_summary_and_clickable_checkboxes() {
             assert!(area.width > 20);
         }
     }
-}
-
-#[test]
-fn a_partial_deployment_lists_the_skipped_values() {
-    use crate::model::ApprovalRequest;
-    let skipped = "ns1.services.dns.update-key".to_owned();
-    let mut request = ApprovalRequest {
-        id: "r".into(),
-        target: "ns1".into(),
-        create: vec!["ns1.services.dns.transfer-key".into(), skipped.clone()],
-        replace: vec![],
-        recipient_keys: vec!["operator".into()],
-        host_key: None,
-        tasks: vec![],
-        generate: vec![],
-        missing: vec![(skipped.clone(), "derived from unset mail.services.s.raw; deploy mail first, which generates it".into())],
-        derived: vec![],
-        skippable: vec![skipped.clone()],
-        allow_partial: false,
-    };
-    let mut model = Model::new(vec![]);
-    model.mode = Mode::Approval(request.clone());
-    let refused = text::prompt(&model);
-    assert!(refused.contains("Cannot deploy to ns1"), "{refused}");
-    assert!(refused.contains("p: deploy everything else and skip these"), "{refused}");
-    request.allow_partial = true;
-    model.mode = Mode::Approval(request);
-    let partial = text::prompt(&model);
-    assert!(partial.contains("PARTIAL: skips 1 value whose source host is not deployed yet"), "{partial}");
-    assert!(partial.contains(&format!("[{skipped} (derived from unset")), "{partial}");
-    assert!(partial.contains("create [ns1.services.dns.transfer-key]"), "{partial}");
-    let notice = crate::ui::drive::deployed_notice(&[], std::slice::from_ref(&skipped));
-    assert!(notice.contains("Skipped 1 value") && notice.contains(&skipped), "{notice}");
 }

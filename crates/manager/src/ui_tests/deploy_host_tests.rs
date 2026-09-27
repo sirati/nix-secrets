@@ -24,10 +24,6 @@ impl SecretWriter for DeployWriter {
         self.approvals.push(if accepted { "full" } else { "reject" });
         Ok(None)
     }
-    fn approve_partial(&mut self) -> Result<Option<ApprovalRequest>, String> {
-        self.approvals.push("partial");
-        Ok(None)
-    }
 }
 
 fn leaf(path: &str) -> Row {
@@ -152,57 +148,43 @@ fn waiting_request() -> ApprovalRequest {
         )],
         derived: vec![],
         skippable: vec!["ns1.services.dns.update-key".into()],
+        missing_kinds: Default::default(),
+        host_default: vec![],
         allow_partial: false,
     }
 }
 
 #[test]
-fn without_the_partial_choice_a_waiting_value_still_refuses() {
+fn missing_values_never_block_and_y_deploys_the_rest() {
     let mut model = hosts_model();
     let mut writer = DeployWriter::default();
     reduce(&mut model, UiEvent::Approval(waiting_request()), &mut writer);
-    // y goes to the controller, which refuses with the missing list.
-    reduce(&mut model, UiEvent::Character('y'), &mut writer);
-    assert_eq!(writer.approvals, ["full"]);
-}
-
-#[test]
-fn p_switches_to_a_partial_deployment_that_y_then_approves() {
-    let mut model = hosts_model();
-    let mut writer = DeployWriter::default();
-    reduce(&mut model, UiEvent::Approval(waiting_request()), &mut writer);
-    reduce(&mut model, UiEvent::Character('p'), &mut writer);
     let Mode::Approval(request) = &model.mode else {
-        panic!("still the approval: {:?}", model.mode)
+        panic!("the approval: {:?}", model.mode)
     };
-    assert!(request.allow_partial && request.deployable());
-    assert!(writer.approvals.is_empty(), "p alone deploys nothing");
-    // p again returns to the refusal.
-    reduce(&mut model, UiEvent::Character('p'), &mut writer);
-    assert!(matches!(&model.mode, Mode::Approval(request) if !request.allow_partial));
-    reduce(&mut model, UiEvent::Character('p'), &mut writer);
+    assert!(request.deployable());
     assert_eq!(
         reduce(&mut model, UiEvent::Character('y'), &mut writer),
         Action::Approved
     );
-    assert_eq!(writer.approvals, ["partial"]);
+    assert_eq!(writer.approvals, ["full"]);
 }
 
 #[test]
-fn p_is_not_offered_for_values_that_must_be_entered() {
+fn a_request_with_nothing_to_deploy_offers_no_approve() {
     let mut model = hosts_model();
     let mut writer = DeployWriter::default();
     let mut request = waiting_request();
-    request
-        .missing
-        .push(("ns1.services.dns.api-token".into(), "external input".into()));
+    request.create.clear();
+    request.generate.clear();
     reduce(&mut model, UiEvent::Approval(request), &mut writer);
-    reduce(&mut model, UiEvent::Character('p'), &mut writer);
-    assert!(matches!(&model.mode, Mode::Approval(request) if !request.allow_partial));
-    // Nor before the host key is trusted.
-    let mut unknown = waiting_request();
-    unknown.host_key = Some("UNKNOWN SSH HOST KEY".into());
-    model.mode = Mode::Approval(unknown);
-    reduce(&mut model, UiEvent::Character('p'), &mut writer);
-    assert!(matches!(&model.mode, Mode::Approval(request) if !request.allow_partial));
+    let Mode::Approval(request) = &model.mode else {
+        panic!("the approval: {:?}", model.mode)
+    };
+    assert!(!request.deployable());
+    assert_eq!(
+        reduce(&mut model, UiEvent::Character('n'), &mut writer),
+        Action::Rejected
+    );
+    assert_eq!(writer.approvals, ["reject"]);
 }

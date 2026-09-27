@@ -97,6 +97,13 @@ pub fn run_value_generation(
     let mut deployments = Vec::with_capacity(entries.len() + derive.len());
     let mut records = BTreeMap::new();
     for entry in entries {
+        if let Some(shared) = &entry.shared {
+            let (version, value, record) =
+                generate_shared(&schema, hostname, derive, entry, shared, provider, host)?;
+            produced.insert(entry.identifier.clone(), (version, value));
+            records.insert(entry.identifier.clone(), record);
+            continue;
+        }
         let path = SecretPath::parse(&entry.identifier)
             .map_err(|error| invalid(format!("invalid generated identifier: {error}")))?;
         if path.components().first().map(String::as_str) != Some(hostname) {
@@ -200,7 +207,7 @@ pub fn run_value_generation(
         deployments.push(SecretDeployment {
             identifier: identifier.clone(),
             version_id: derived.version(version),
-            contents_base64: STANDARD.encode(derived.frame(value).as_slice()),
+            contents_base64: STANDARD.encode(derived.frame(value).map_err(invalid)?.as_slice()),
         });
     }
     Ok(GeneratedValues {
@@ -230,6 +237,82 @@ fn read_installed(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, DeployError
     let mut value = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
     file.read_to_end(&mut value)?;
     Ok(Some(value))
+}
+
+/// The version and plaintext of a shared source, and its record.
+type SharedOutput = ([u8; VERSION_ID_SIZE], Zeroizing<Vec<u8>>, GeneratedRecord);
+
+/// Generates a secret this target shares but does not own: only when a
+/// requested derived value of this host is framed from it. It is encrypted
+/// to the owner leaf's recipients and returned; nothing of it is installed
+/// here except the derived values. It is always fresh: the target keeps no
+/// copy of a value it does not own, and the operator asks only while the
+/// value is unset in the store.
+fn generate_shared(
+    schema: &nix_secrets_core::Schema,
+    hostname: &str,
+    derive: &[String],
+    entry: &GenerateEntry,
+    shared: &nix_secrets_transport::SharedSource,
+    provider: &impl CryptoProvider,
+    host: &mut impl GenerationHost,
+) -> Result<SharedOutput, DeployError> {
+    SecretPath::parse(&entry.identifier)
+        .map_err(|error| invalid(format!("invalid shared source: {error}")))?;
+    let used = derive.iter().any(|identifier| {
+        SecretPath::parse(identifier)
+            .ok()
+            .filter(|path| path.components().first().map(String::as_str) == Some(hostname))
+            .and_then(|path| schema.leaf(&path).ok())
+            .is_some_and(|leaf| {
+                matches!(leaf, LeafSpec::Stored(spec)
+                    if spec.derived_from.as_ref().is_some_and(|d| d.identifier == entry.identifier))
+            })
+    });
+    if !used {
+        return Err(invalid(format!(
+            "{} is shared, but no requested derived value of this host is framed from it",
+            entry.identifier
+        )));
+    }
+    let generator: nix_secrets_core::DeployGenerator = serde_json::from_str(&shared.generator)
+        .map_err(|_| invalid("invalid shared source generator"))?;
+    if shared.recipient_ids.is_empty()
+        || shared.recipient_ids.len() != shared.recipient_public_keys.len()
+    {
+        return Err(invalid("invalid shared source recipients"));
+    }
+    let contribution = Zeroizing::new(
+        STANDARD
+            .decode(&entry.client_contribution_base64)
+            .map_err(|_| invalid("client contribution is not valid base64"))?,
+    );
+    if contribution.len() != 32 {
+        return Err(invalid("client contribution must be exactly 32 bytes"));
+    }
+    host.mix(&contribution)?;
+    let version = host.fresh_version()?;
+    let value = host.generate(&generator)?;
+    let recipients = shared
+        .recipient_ids
+        .iter()
+        .zip(&shared.recipient_public_keys)
+        .map(|(id, key)| Recipient {
+            id,
+            ssh_public_key: key,
+        })
+        .collect::<Vec<_>>();
+    let encrypted =
+        encrypt_secret_with_version(&entry.identifier, version, &value, &recipients, provider)
+            .map_err(|error| invalid(format!("cannot encrypt {}: {error}", entry.identifier)))?;
+    let record = GeneratedRecord {
+        format_version: encrypted.format_version,
+        version_id_base64: STANDARD.encode(version),
+        recipient_ids: encrypted.recipient_ids,
+        age_ciphertext_base64: STANDARD.encode(&encrypted.age_ciphertext),
+        adopted: false,
+    };
+    Ok((version, value, record))
 }
 
 fn invalid(message: impl Into<String>) -> DeployError {
