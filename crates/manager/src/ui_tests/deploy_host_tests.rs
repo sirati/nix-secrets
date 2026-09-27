@@ -151,6 +151,7 @@ fn waiting_request() -> ApprovalRequest {
         missing_kinds: Default::default(),
         host_default: vec![],
         allow_partial: false,
+        ..Default::default()
     }
 }
 

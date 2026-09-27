@@ -58,6 +58,7 @@ fn notices_are_acknowledged_in_order_before_pending_approval() {
         missing_kinds: Default::default(),
         host_default: vec![],
         allow_partial: false,
+        ..Default::default()
     });
     assert!(matches!(model.mode, Mode::Browse));
     assert_eq!(model.message_text(), Some("first"));

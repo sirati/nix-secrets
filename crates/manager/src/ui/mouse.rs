@@ -44,6 +44,12 @@ pub(super) fn click(
         {
             commit::click(model, target, writer)
         }
+        MouseTarget::DeployRow(_) if matches!(model.mode, Mode::Approval(_)) => {
+            let Mode::Approval(request) = std::mem::replace(&mut model.mode, Mode::Browse) else {
+                unreachable!()
+            };
+            approval::reduce(model, writer, request, UiEvent::Click(target))
+        }
         MouseTarget::ConfirmLoss => reduce(model, UiEvent::ConfirmLoss, writer),
         MouseTarget::AutosaveToggle => reduce(model, UiEvent::Tab, writer),
         MouseTarget::RevealCurrent => reduce(model, UiEvent::RevealCurrent, writer),

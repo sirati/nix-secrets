@@ -26,7 +26,7 @@ pub struct Notice {
     pub severity: NoticeSeverity,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ApprovalRequest {
     pub id: String,
     pub target: String,
@@ -50,6 +50,12 @@ pub struct ApprovalRequest {
     pub host_default: Vec<String>,
     /// The operator chose to deploy without the `skippable` values.
     pub allow_partial: bool,
+    /// The key the deployment's SSH login signs with, named.
+    pub login_key: Option<Box<str>>,
+    /// Rows the operator unchecked; they are not sent.
+    pub unchecked: std::collections::BTreeSet<String>,
+    /// The row the cursor is on, among the rows with a checkbox.
+    pub cursor: usize,
 }
 
 impl ApprovalRequest {
@@ -66,11 +72,118 @@ impl ApprovalRequest {
     /// Whether approving deploys anything. Missing values never block; only
     /// a request with nothing deployable is refused.
     pub fn deployable(&self) -> bool {
-        !self.create.is_empty()
-            || !self.replace.is_empty()
-            || !self.generate.is_empty()
-            || !self.tasks.is_empty()
-            || self.derived.iter().any(|(identifier, _)| !self.missing.iter().any(|(id, _)| id == identifier))
+        !self.checked().is_empty()
+    }
+}
+
+
+/// A section of the deployment dialog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Section {
+    /// Values the operator's machine sends: set, replaced, derived, public
+    /// information and target tasks.
+    Sent,
+    /// Values the target generates and returns as ciphertext.
+    Generated,
+}
+
+/// One row with a checkbox.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeployRow {
+    pub section: Section,
+    pub identifier: String,
+    /// What happens to it, such as "set", "replaced", "from <source>".
+    pub what: String,
+}
+
+impl ApprovalRequest {
+    /// The rows with a checkbox, in display order: "Will be sent", then
+    /// "Will be generated". Missing values have none.
+    pub fn rows(&self) -> Vec<DeployRow> {
+        let missing = |identifier: &String| self.missing.iter().any(|(id, _)| id == identifier);
+        let generated = |identifier: &String| self.generate.iter().any(|(id, _)| id == identifier);
+        let derived = |identifier: &String| self.derived.iter().any(|(id, _)| id == identifier);
+        let mut rows = Vec::new();
+        let mut sent = |identifier: &String, what: String| {
+            rows.push(DeployRow {
+                section: Section::Sent,
+                identifier: identifier.clone(),
+                what,
+            })
+        };
+        for (identifier, what) in self
+            .create
+            .iter()
+            .map(|id| (id, "set"))
+            .chain(self.replace.iter().map(|id| (id, "replaced")))
+        {
+            if !missing(identifier) && !generated(identifier) && !derived(identifier) {
+                sent(identifier, what.to_owned());
+            }
+        }
+        for (identifier, source) in &self.derived {
+            if !missing(identifier) {
+                sent(identifier, format!("derived from {source}"));
+            }
+        }
+        for task in &self.tasks {
+            if !missing(&task.identifier) {
+                sent(&task.identifier, task_what(task));
+            }
+        }
+        for (identifier, kind) in &self.generate {
+            rows.push(DeployRow {
+                section: Section::Generated,
+                identifier: identifier.clone(),
+                what: kind.clone(),
+            });
+        }
+        rows
+    }
+
+    /// The rows that are checked: what approving sends or generates.
+    pub fn checked(&self) -> Vec<DeployRow> {
+        self.rows()
+            .into_iter()
+            .filter(|row| !self.unchecked.contains(&row.identifier))
+            .collect()
+    }
+
+    /// Toggles one row.
+    pub fn toggle(&mut self, identifier: &str) {
+        if !self.unchecked.remove(identifier) {
+            self.unchecked.insert(identifier.to_owned());
+        }
+    }
+
+    /// Toggles a whole section: all checked unless every row already is.
+    pub fn toggle_section(&mut self, section: Section) {
+        let rows = self
+            .rows()
+            .into_iter()
+            .filter(|row| row.section == section)
+            .map(|row| row.identifier)
+            .collect::<Vec<_>>();
+        if rows.iter().all(|row| !self.unchecked.contains(row)) {
+            self.unchecked.extend(rows);
+        } else {
+            for row in rows {
+                self.unchecked.remove(&row);
+            }
+        }
+    }
+}
+
+fn task_what(task: &TaskApproval) -> String {
+    let output = match task.output_is_set {
+        Some(true) => "installed",
+        Some(false) => "not installed",
+        None => "unknown",
+    };
+    if task.requires_input {
+        format!("target task; its key {output}")
+    } else {
+        format!("generated on the target; its key {output}")
     }
 }
 
@@ -122,6 +235,9 @@ impl Setting {
     }
 }
 
+// One Mode lives at a time; boxing the approval would touch every match on
+// it for a few hundred bytes.
+#[allow(clippy::large_enum_variant)]
 #[derive(Eq, PartialEq)]
 pub enum Mode {
     Browse,
@@ -475,3 +591,15 @@ pub struct CommitDraft {
 
 /// A process from a secret request, for display.
 pub struct ProcessDisplay<'a>(pub &'a nix_secrets_core::secret_request::ProcessInfo);
+
+/// What a finished deployment did, counted, for its result notice.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeploySummary {
+    pub target: String,
+    pub sent: usize,
+    pub generated: usize,
+    /// Rows the operator unchecked.
+    pub left_out: Vec<String>,
+    /// Values that could not be deployed, with why.
+    pub missing: Vec<String>,
+}

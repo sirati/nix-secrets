@@ -192,6 +192,7 @@ fn approval_is_explicit_and_testable() {
         missing_kinds: Default::default(),
         host_default: vec![],
         allow_partial: false,
+        ..Default::default()
     };
     reduce(&mut model, UiEvent::Approval(request), &mut writer);
     assert_eq!(
@@ -242,6 +243,7 @@ fn task_approval_exposes_input_and_target_output_status() {
         missing_kinds: Default::default(),
         host_default: vec![],
         allow_partial: false,
+        ..Default::default()
     };
     assert_eq!(
         reduce(&mut model, UiEvent::Approval(request), &mut writer),

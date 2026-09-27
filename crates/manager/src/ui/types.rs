@@ -34,6 +34,9 @@ pub enum MouseTarget {
     CommitEditor,
     /// Commits.
     CommitSubmit,
+    /// A checkbox row of the deployment dialog, by its index in
+    /// [`crate::model::ApprovalRequest::rows`].
+    DeployRow(usize),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -111,6 +114,7 @@ pub enum Completion {
     Deployed {
         generated: Vec<String>,
         skipped: Vec<String>,
+        summary: Option<crate::model::DeploySummary>,
     },
     /// The backend queued a deployment of this host; it arrives as an
     /// approval.
@@ -174,6 +178,15 @@ pub trait SecretWriter {
     }
     fn approval(&mut self, _accepted: bool) -> Result<Option<ApprovalRequest>, String> {
         Ok(None)
+    }
+    /// Approves with the operator's choice: `unchecked` names the rows
+    /// left out.
+    fn approval_with(
+        &mut self,
+        accepted: bool,
+        _unchecked: &std::collections::BTreeSet<String>,
+    ) -> Result<Option<ApprovalRequest>, String> {
+        self.approval(accepted)
     }
     /// Asks the backend to deploy every deployable value of `host`; the
     /// request then arrives as an ordinary approval.

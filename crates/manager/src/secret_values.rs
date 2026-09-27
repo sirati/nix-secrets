@@ -37,6 +37,8 @@ pub fn load(
 ) -> Result<Batch, String> {
     let mut values = Vec::new();
     let mut records = Vec::new();
+    // The agent names each key by its title; listing asks nothing.
+    let agent = crate::key_names::AgentKeys::from_agent(None);
     for identifier in identifiers {
         let path =
             SecretPath::parse(identifier).map_err(|error| format!("{identifier}: {error}"))?;
@@ -62,7 +64,12 @@ pub fn load(
             .zip(keys)
             .enumerate()
             .map(|(index, (id, key))| {
-                let name = names.get(index).unwrap_or(id);
+                let name = names
+                    .get(index)
+                    .cloned()
+                    .or_else(|| crate::key_names::schema_name(schema, key))
+                    .unwrap_or_else(|| id.chars().take(12).collect());
+                let name = format!("{name} {}", crate::key_names::agent_title(&agent, key));
                 match ssh_key::PublicKey::from_openssh(key) {
                     Ok(key) => format!(
                         "{name}: {} {}",

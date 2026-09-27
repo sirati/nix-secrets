@@ -481,3 +481,18 @@ pub(super) fn verify_generators(
     }
     Ok(())
 }
+
+/// `right` names only identifiers of `left`, each once.
+pub(super) fn require_subset(
+    left: &[String],
+    right: &[String],
+    message: &'static str,
+) -> Result<(), DeploymentError> {
+    let left = left.iter().collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    if right.iter().all(|item| left.contains(item) && seen.insert(item)) {
+        Ok(())
+    } else {
+        Err(DeploymentError::Invalid(message))
+    }
+}

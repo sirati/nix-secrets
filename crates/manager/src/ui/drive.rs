@@ -226,11 +226,21 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             }
             model.inform("deployment request finished");
         }
-        Completion::Deployed { generated, skipped } => {
+        Completion::Deployed {
+            generated,
+            skipped,
+            summary,
+        } => {
             if matches!(model.mode, Mode::Approval(_)) {
                 model.mode = Mode::Browse;
             }
-            model.inform(deployed_notice(&generated, &skipped));
+            let mut notice = String::new();
+            if let Some(summary) = summary {
+                notice.push_str(&summary_line(&summary));
+                notice.push_str("\n\n");
+            }
+            notice.push_str(&deployed_notice(&generated, &skipped));
+            model.inform(notice);
         }
         Completion::DeploymentRequested(host) => {
             model.inform(format!(
@@ -314,4 +324,24 @@ pub(crate) fn deployed_notice(generated: &[String], skipped: &[String]) -> Strin
         ));
     }
     notice
+}
+
+/// `Deployed ns1: 12 sent · 2 generated · 1 left out · 3 missing`, the
+/// step 3/3 result.
+pub(crate) fn summary_line(summary: &crate::model::DeploySummary) -> String {
+    let mut line = format!(
+        "Deploy {} · step 3/3 done: {} sent · {} generated · {} left out · {} missing",
+        summary.target,
+        summary.sent,
+        summary.generated,
+        summary.left_out.len(),
+        summary.missing.len()
+    );
+    if !summary.left_out.is_empty() {
+        line.push_str(&format!(
+            "\nLeft out by you: {}",
+            summary.left_out.join(", ")
+        ));
+    }
+    line
 }

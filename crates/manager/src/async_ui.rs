@@ -28,6 +28,7 @@ enum Command {
     },
     GenerateKeypair(String),
     Approval(bool),
+    ApprovalWith(bool, std::collections::BTreeSet<String>),
     RequestDeployment(String),
     SaveProfile {
         name: String,
@@ -336,6 +337,15 @@ impl SecretWriter for AsyncWriter {
         Err(OPERATION_QUEUED.into())
     }
 
+    fn approval_with(
+        &mut self,
+        accepted: bool,
+        unchecked: &std::collections::BTreeSet<String>,
+    ) -> Result<Option<ApprovalRequest>, String> {
+        self.queue(Command::ApprovalWith(accepted, unchecked.clone()))?;
+        Err(OPERATION_QUEUED.into())
+    }
+
     fn request_deployment(&mut self, host: &str) -> Result<(), String> {
         self.queue(Command::RequestDeployment(host.to_owned()))
     }
@@ -449,7 +459,10 @@ fn activity(label: String, waits_for_one_password: bool) -> crate::model::Activi
 fn describe(command: &Command, one_password: bool) -> Option<crate::model::Activity> {
     let (label, decrypts) = match command {
         Command::Reveal(path) => (format!("Decrypting {path}"), true),
-        Command::Approval(true) => ("Decrypting values for deployment".into(), true),
+        Command::Approval(true) | Command::ApprovalWith(true, _) => {
+            ("Decrypting values for deployment".into(), true)
+        }
+        Command::ApprovalWith(false, _) => ("Rejecting deployment request".into(), false),
         Command::Approval(false) => ("Rejecting deployment request".into(), false),
         Command::RequestDeployment(host) => (format!("Requesting a deployment of {host}"), false),
         // Saving verifies private keys and task values by decrypting them.

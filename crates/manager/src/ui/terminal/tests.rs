@@ -301,7 +301,7 @@ fn long_success_notice_grows_instead_of_scrolling() {
     assert!(screen.contains("usual action and close"), "{screen}");
 }
 
-struct NoWriter;
+pub(super) struct NoWriter;
 
 impl SecretWriter for NoWriter {
     fn write(

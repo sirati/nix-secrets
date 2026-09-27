@@ -173,6 +173,8 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
                     footer: failure.then(|| hotkeys(model, area.width < 70)),
                     exclusive: true,
                     styled: None,
+                    min_width: 0,
+                    line_targets: None,
                 },
             );
             if !failure {
@@ -198,6 +200,8 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
                     footer: None,
                     exclusive: false,
                     styled: None,
+                    min_width: 0,
+                    line_targets: None,
                 },
             );
             hits.add(dialog, MouseTarget::Notice);
@@ -249,6 +253,18 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
                             width,
                         )
                     })),
+                    min_width: deploy_view::needed_width(request, model.approval_details) as u16 + 2,
+                    line_targets: Some(Box::new(move |width| {
+                        deploy_view::checkbox_lines(
+                            request,
+                            model.message_text(),
+                            model.approval_details,
+                            width,
+                        )
+                        .into_iter()
+                        .map(|(line, row)| (line, MouseTarget::DeployRow(row)))
+                        .collect()
+                    })),
                 },
             );
             return;
@@ -270,6 +286,8 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
             footer: Some(hotkeys(model, area.width < 70)),
             exclusive: true,
             styled: None,
+            min_width: 0,
+            line_targets: None,
         },
     );
 }
@@ -278,6 +296,9 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
 fn fixed<'a>(body: String) -> Box<dyn Fn(usize) -> String + 'a> {
     Box::new(move |_| body.clone())
 }
+
+/// Clickable body lines of a dialog at an inner width.
+type LineTargets<'a> = Box<dyn Fn(usize) -> Vec<(usize, MouseTarget)> + 'a>;
 
 struct Dialog<'a> {
     title: String,
@@ -296,6 +317,12 @@ struct Dialog<'a> {
     /// Coloured lines for the body; `body` then gives their plain text for
     /// measuring. See [`deploy_view`].
     styled: Option<Box<dyn Fn(usize) -> Vec<Line<'static>> + 'a>>,
+    /// The narrowest box, borders included, that shows the content without
+    /// cutting it; the dialog is never narrower when the screen allows it,
+    /// and scrolls vertically instead.
+    min_width: u16,
+    /// Clickable body lines at an inner width, and what a click on them does.
+    line_targets: Option<LineTargets<'a>>,
 }
 
 fn draw_dialog(
@@ -336,11 +363,27 @@ fn draw_dialog(
         .unwrap_or(0)
         .saturating_add(2)
         .min(u16::MAX as usize) as u16;
-    let box_area = dialog_area(area, natural_width, dialog.padded, |width| {
+    let height_at = |width: u16| {
         (layout_at(width).1 + chrome)
             .max(chrome + 1)
             .min(u16::MAX as usize) as u16
-    });
+    };
+    let mut box_area = dialog_area(area, natural_width, dialog.padded, height_at);
+    // Never narrower than the content needs: widen, within the screen, and
+    // let the body scroll vertically instead of cutting its lines.
+    let wanted = dialog.min_width.min(area.width);
+    if box_area.width < wanted {
+        let height = height_at(wanted)
+            .max(box_area.height)
+            .min(area.height.saturating_sub(if area.height > 14 { 2 } else { 0 }))
+            .max(1);
+        box_area = Rect {
+            x: area.x + (area.width - wanted) / 2,
+            y: area.y + (area.height - height) / 2,
+            width: wanted,
+            height,
+        };
+    }
     let (body, lines) = layout_at(box_area.width);
     frame.render_widget(Clear, box_area);
     let mut block = Block::default()
@@ -405,7 +448,18 @@ fn draw_dialog(
         // A checkbox line is clickable across its whole rendered width, label
         // included. Its row is found by wrapping the text before it the way
         // the paragraph does.
-        for (position, target) in checkbox_lines(model, &body) {
+        let mut clickable = checkbox_lines(model, &body);
+        if let Some(targets) = &dialog.line_targets {
+            let starts = std::iter::once(0)
+                .chain(body.match_indices('\n').map(|(index, _)| index + 1))
+                .collect::<Vec<_>>();
+            clickable.extend(
+                targets(body_area.width.max(1) as usize)
+                    .into_iter()
+                    .filter_map(|(line, target)| Some((*starts.get(line)?, target))),
+            );
+        }
+        for (position, target) in clickable {
             let rows_of = |line: &str| {
                 Paragraph::new(line)
                     .wrap(Wrap { trim: false })
@@ -555,6 +609,8 @@ fn render_secret_request(
             ]),
             exclusive: true,
             styled: None,
+            min_width: 0,
+            line_targets: None,
         },
     );
 }

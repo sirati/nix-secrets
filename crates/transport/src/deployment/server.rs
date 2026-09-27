@@ -1,4 +1,6 @@
-use super::validation::{require_same_set, select_state, validate_batch, validate_server_state};
+use super::validation::{
+    require_same_set, require_subset, select_state, validate_batch, validate_server_state,
+};
 use super::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::io::{Read, Write};
@@ -28,12 +30,19 @@ where
             "unsupported deployment batch version",
         ));
     }
-    require_same_set(
+    // Protocol 4: the operator may leave out values after reading the
+    // target's state, so the batch may request a subset of the selection.
+    let check = if batch.version >= NOT_DEPLOYED_PROTOCOL_VERSION {
+        require_subset
+    } else {
+        require_same_set
+    };
+    check(
         &selection.identifiers,
         &batch.requested_identifiers,
         "batch secret subset differs from selection",
     )?;
-    require_same_set(
+    check(
         &selection.task_identifiers,
         &batch.requested_tasks,
         "batch task subset differs from selection",
