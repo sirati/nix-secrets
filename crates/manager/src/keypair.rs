@@ -95,6 +95,16 @@ pub fn run(argv: &[OsString]) -> Result<Keypair, String> {
     let status = child
         .wait()
         .map_err(|error| format!("cannot wait for the generator: {error}"))?;
+    // An oversized pipe is closed after the bounded read. The generator may
+    // then exit on SIGPIPE, but the size limit is the useful failure to report.
+    if matches!(private, Err("exceeds its size limit")) {
+        return Err("generator private key on stdout exceeds its size limit".into());
+    }
+    if matches!(public, Err("exceeds its size limit")) {
+        return Err(format!(
+            "generator public key on descriptor {PUBLIC_KEY_FD} exceeds its size limit"
+        ));
+    }
     if !status.success() {
         return Err(if diagnostics.is_empty() {
             format!("generator failed with {status}")
