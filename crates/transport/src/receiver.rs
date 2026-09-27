@@ -99,8 +99,8 @@ fn relay_connected(
 ) -> Result<(), ReceiverError> {
     let response_stream = stream.try_clone()?;
     let shutdown_stream = stream.try_clone()?;
-    relay_streams(input, &mut output, stream, response_stream, move || {
-        shutdown_stream.shutdown(Shutdown::Write)
+    relay_streams(input, &mut output, stream, response_stream, move |how| {
+        shutdown_stream.shutdown(how)
     })
 }
 
@@ -109,7 +109,9 @@ fn relay_streams(
     mut output: impl Write + Send,
     mut request_stream: impl Write,
     mut response_stream: impl Read + Send,
-    close_request: impl FnOnce() -> io::Result<()>,
+    // Shuts the deployer socket down: for writing once the client is done,
+    // or both ways when the client is gone.
+    close_request: impl Fn(Shutdown) -> io::Result<()>,
 ) -> Result<(), ReceiverError> {
     Frame {
         kind: FrameKind::Data,
@@ -137,19 +139,31 @@ fn relay_streams(
             .write_to(&mut output)?;
             Ok(())
         });
-        loop {
-            let frame = Frame::read_from(input)?;
-            match frame.kind {
-                FrameKind::Data => request_stream.write_all(&frame.payload)?,
-                FrameKind::Close if frame.payload.is_empty() => break,
-                _ => return Err(ReceiverError::Arguments("invalid relay frame")),
+        let requests = (|| -> Result<(), ReceiverError> {
+            loop {
+                let frame = Frame::read_from(input)?;
+                match frame.kind {
+                    FrameKind::Data => request_stream.write_all(&frame.payload)?,
+                    FrameKind::Close if frame.payload.is_empty() => return Ok(()),
+                    _ => return Err(ReceiverError::Arguments("invalid relay frame")),
+                }
             }
-        }
-        close_request()?;
-        response
+        })();
+        // A client that is gone (its SSH session ended, so our stdin reached
+        // end of file) or broke the framing ends the transaction at once:
+        // shutting the socket down both ways gives the deployer end of file,
+        // so it rolls back and exits, and unblocks the response thread. The
+        // deployer otherwise waits for a batch that never comes.
+        let closed = match &requests {
+            Ok(()) => close_request(Shutdown::Write),
+            Err(_) => close_request(Shutdown::Both),
+        };
+        let response = response
             .join()
-            .map_err(|_| ReceiverError::Io(io::Error::other("relay thread panicked")))??;
-        Ok(())
+            .map_err(|_| ReceiverError::Io(io::Error::other("relay thread panicked")))?;
+        requests?;
+        closed?;
+        response
     })
 }
 
@@ -225,7 +239,7 @@ mod tests {
             &mut response,
             &mut service_request,
             &[9, 0, 8][..],
-            || Ok(()),
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(service_request, [0, 255, 7]);
@@ -287,5 +301,45 @@ mod tests {
             Some(&"requested-command".into())
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    /// The client's SSH session ends mid-transaction: the relay's stdin
+    /// reaches end of file before a Close frame. The deployer, which waits
+    /// for the batch and has written nothing, must see end of file at once,
+    /// and the relay must return instead of waiting for the deployer.
+    #[test]
+    fn a_vanished_client_ends_the_transaction_within_seconds() {
+        let (relay_side, mut deployer_side) = UnixStream::pair().unwrap();
+        let mut request = Vec::new();
+        Frame {
+            kind: FrameKind::Data,
+            payload: b"selection".to_vec(),
+        }
+        .write_to(&mut request)
+        .unwrap();
+        // No Close frame: the connection just ends.
+        let deployer = std::thread::spawn(move || {
+            deployer_side
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            let mut received = Vec::new();
+            let started = Instant::now();
+            std::io::Read::read_to_end(&mut deployer_side, &mut received).unwrap();
+            (received, started.elapsed())
+        });
+        let started = Instant::now();
+        let result = relay_connected(&mut request.as_slice(), Vec::new(), relay_side);
+        assert!(result.is_err(), "a truncated stream is an error");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let (received, waited) = deployer.join().unwrap();
+        assert_eq!(received, b"selection");
+        assert!(waited < Duration::from_secs(5), "{waited:?}");
     }
 }
