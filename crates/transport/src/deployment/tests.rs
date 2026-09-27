@@ -241,6 +241,7 @@ fn generation_batch(entries: Vec<DeployEntry>, generate: &[&str]) -> DeploymentB
             .map(|id| GenerateEntry {
                 identifier: (*id).into(),
                 client_contribution_base64: STANDARD.encode([1_u8; 32]),
+                shared: None,
             })
             .collect(),
         derive: vec![],

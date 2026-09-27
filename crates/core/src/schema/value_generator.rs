@@ -87,7 +87,7 @@ impl ValueGenerator {
 
 /// The generator a target uses for one leaf, including everything that
 /// determines the output format.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum DeployGenerator {
     #[serde(rename = "password")]

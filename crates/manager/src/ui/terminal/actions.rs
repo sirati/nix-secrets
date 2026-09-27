@@ -174,21 +174,24 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
         Mode::ProviderFailure { .. } => {
             vec![letter("r Retry", 'r'), key("Esc Cancel", Shortcut::Escape)]
         }
+        // Only actions that can happen: a refused request offers no Approve.
         Mode::Approval(request) => {
-            let mut buttons = vec![
-                letter("y Approve", 'y').enabled(request.host_key.is_some() || request.deployable()),
-                letter("n Reject", 'n'),
-            ];
-            if request.host_key.is_none() && request.partial_possible() {
-                buttons.push(letter(
-                    if request.allow_partial {
-                        "p Refuse partial"
-                    } else {
-                        "p Deploy rest, skip waiting"
-                    },
-                    'p',
-                ));
+            let mut buttons = Vec::new();
+            if request.host_key.is_some() {
+                buttons.push(letter("y Trust and connect", 'y'));
+                buttons.push(letter("n Cancel", 'n'));
+                return buttons;
             }
+            if request.deployable() {
+                buttons.push(letter("y Deploy", 'y'));
+                buttons.push(letter("n Reject", 'n'));
+            } else {
+                buttons.push(letter("n Dismiss", 'n'));
+            }
+            buttons.push(letter(
+                if model.approval_details { "d Summary" } else { "d Details" },
+                'd',
+            ));
             buttons
         }
         Mode::DeployHost { .. } => vec![

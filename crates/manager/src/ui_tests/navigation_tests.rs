@@ -34,6 +34,8 @@ fn lost_lease_drops_the_modal_and_reports_expiry() {
         missing: vec![],
         derived: vec![],
         skippable: vec![],
+        missing_kinds: Default::default(),
+        host_default: vec![],
         allow_partial: false,
     });
     drive(&mut frontend, &mut writer, &mut model).unwrap();
@@ -65,6 +67,8 @@ fn a_failed_approval_closes_the_dialog_for_good() {
         missing: vec![],
         derived: vec![],
         skippable: vec![],
+        missing_kinds: Default::default(),
+        host_default: vec![],
         allow_partial: false,
     };
     model.mode = Mode::Approval(request);

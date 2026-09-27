@@ -67,7 +67,7 @@ pub(super) fn validate_target(
 ) -> Result<(), DeploymentError> {
     if !matches!(
         state.protocol_version,
-        LEGACY_DEPLOYMENT_PROTOCOL_VERSION | DEPLOYMENT_PROTOCOL_VERSION
+        LEGACY_DEPLOYMENT_PROTOCOL_VERSION..=DEPLOYMENT_PROTOCOL_VERSION
     ) {
         return Err(DeploymentError::Invalid("unsupported deployment protocol"));
     }
@@ -236,7 +236,39 @@ fn validate_entries(
     .into_iter()
     .map(str::to_owned)
     .collect::<BTreeSet<_>>();
+    if batch.version < SHARED_SOURCE_PROTOCOL_VERSION
+        && batch.generate.iter().any(|item| item.shared.is_some())
+    {
+        return Err(DeploymentError::Invalid(
+            "shared sources need deployment protocol 3",
+        ));
+    }
     for item in &batch.generate {
+        if let Some(shared) = &item.shared {
+            validate_identifier(&item.identifier)?;
+            if available.iter().any(|secret| secret.identifier == item.identifier) {
+                return Err(DeploymentError::Invalid(
+                    "a shared source is a value of this target",
+                ));
+            }
+            if shared.generator.is_empty()
+                || shared.recipient_ids.is_empty()
+                || shared.recipient_ids.len() != shared.recipient_public_keys.len()
+            {
+                return Err(DeploymentError::Invalid("invalid shared source"));
+            }
+            let contribution = Zeroizing::new(
+                STANDARD
+                    .decode(&item.client_contribution_base64)
+                    .map_err(|_| DeploymentError::Invalid("invalid client contribution encoding"))?,
+            );
+            if contribution.len() != 32 {
+                return Err(DeploymentError::Invalid(
+                    "client contribution must be exactly 32 bytes",
+                ));
+            }
+            continue;
+        }
         if supplied.contains(&item.identifier) {
             return Err(DeploymentError::Invalid(
                 "a value is both supplied and generated",
@@ -295,7 +327,13 @@ fn validate_entries(
         entries
             .iter()
             .map(|item| &item.identifier)
-            .chain(batch.generate.iter().map(|item| &item.identifier))
+            .chain(
+                batch
+                    .generate
+                    .iter()
+                    .filter(|item| item.shared.is_none())
+                    .map(|item| &item.identifier),
+            )
             .chain(batch.derive.iter()),
         available.iter().map(|item| &item.identifier),
     )?;

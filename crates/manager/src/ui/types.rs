@@ -105,7 +105,7 @@ pub enum Completion {
         done: usize,
         total: usize,
     },
-    ApprovalDone(Option<ApprovalRequest>),
+    ApprovalDone(Option<Box<ApprovalRequest>>),
     /// A deployment finished; lists values its target generated and stored,
     /// and those a partial deployment skipped.
     Deployed {
@@ -174,11 +174,6 @@ pub trait SecretWriter {
     }
     fn approval(&mut self, _accepted: bool) -> Result<Option<ApprovalRequest>, String> {
         Ok(None)
-    }
-    /// Approves the open deployment and skips the values whose source on
-    /// another host is unset; see [`ApprovalRequest::skippable`].
-    fn approve_partial(&mut self) -> Result<Option<ApprovalRequest>, String> {
-        Err("partial deployment is unavailable".into())
     }
     /// Asks the backend to deploy every deployable value of `host`; the
     /// request then arrives as an ordinary approval.

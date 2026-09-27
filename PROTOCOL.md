@@ -286,10 +286,19 @@ sending it. The target frames it from the value it generated or adopted for
 the source and computes the same version. Every target secret reports its
 canonical `derived` description, which the frontend compares with its schema
 before deploying, so the target frames exactly as declared. A `derive` entry
-whose source is not generated in the same batch is rejected. Any other unset
-source refuses the
-deployment before connecting, naming the source and, when the source is
-generatable, the host whose deployment generates it.
+whose source is not generated in the same batch is rejected.
+
+Protocol 3 adds a shared source: a `generate` entry with `shared = {
+generator, recipient_ids, recipient_public_keys }` names a stored symmetric
+secret of another host, taken from the operator's schema. It is not part of
+the selection or `requested_identifiers`. The target accepts it only when a
+requested `derive` value of its own is framed from it, generates it fresh with
+that generator, encrypts it to those recipients, installs nothing for it, and
+returns its record, which the frontend checks against the source leaf and
+stores. Any other unset source leaves its derived value out of the selection;
+the frontend lists it and deploys the rest. `tomlPath` selects a string field
+of a TOML source before framing and is hashed into the version after the
+other parts, so versions without it are unchanged.
 
 ## Operator-only values
 

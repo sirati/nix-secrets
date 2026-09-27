@@ -100,7 +100,7 @@ on the target during deployment unless they set `externalInputRequired = true`
 or `generateOnDeploy = false`. See "Values generated at deployment" in the top
 level README for the `valueGenerator` format.
 
-`derivedFrom = { identifier; prefix; suffix; }` deploys another stored
+`derivedFrom = { identifier; prefix; suffix; tomlPath; }` deploys another stored
 secret's value, framed, instead of a value of its own; see "Values derived
 from another value" in the top level README.
 

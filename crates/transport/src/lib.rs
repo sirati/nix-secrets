@@ -12,8 +12,9 @@ pub use deployment::{
     DeploymentClient, DeploymentError, DeploymentResult, DeploymentSelection, Destination,
     ExpectedSecret, ExpectedTarget, ExpectedTask, GenerateEntry, GeneratedRecord,
     PreparedDeployment, PublicInfoAttestation, StorageBoxBootstrap, TargetSecret, TargetState,
-    TargetTask, TaskEntry, DEPLOYMENT_PROTOCOL_VERSION, LEGACY_DEPLOYMENT_PROTOCOL_VERSION,
-    LOCAL_SSH_KEY, STORAGE_BOX_SSH_KEY,
+    SharedSource, TargetTask, TaskEntry, DEPLOYMENT_PROTOCOL_VERSION, GENERATION_PROTOCOL_VERSION,
+    LEGACY_DEPLOYMENT_PROTOCOL_VERSION, LOCAL_SSH_KEY, SHARED_SOURCE_PROTOCOL_VERSION,
+    STORAGE_BOX_SSH_KEY,
 };
 pub use hostkey::{
     fingerprint, ChangedHostKey, Decision, HostIdentity, HostKeyDecision, HostKeyError,

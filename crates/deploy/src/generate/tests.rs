@@ -84,7 +84,9 @@ fn manifest(temp: &tempfile::TempDir) -> std::path::PathBuf {
             "external": leaf("external", json!({"valueType": "password", "externalInputRequired": true})),
             "opaque": leaf("opaque", json!({"valueType": "key"})),
             "framed": leaf("framed", json!({"valueType": "key", "derivedFrom": {
-                "identifier": "host.services.app.password", "prefix": "pw=", "suffix": "\n"}}))
+                "identifier": "host.services.app.password", "prefix": "pw=", "suffix": "\n"}})),
+            "knot": leaf("knot", json!({"valueType": "key", "derivedFrom": {
+                "identifier": "mail.services.stalwart.tsig", "prefix": "secret: ", "suffix": "\n"}}))
         }}
     }});
     let path = temp.path().join("manifest.json");
@@ -96,6 +98,7 @@ fn entry(identifier: &str) -> GenerateEntry {
     GenerateEntry {
         identifier: identifier.into(),
         client_contribution_base64: STANDARD.encode([5_u8; 32]),
+        shared: None,
     }
 }
 
@@ -255,6 +258,7 @@ fn target_frames_a_derived_value_from_the_source_it_generates() {
         identifier: "host.services.app.password".into(),
         prefix: "pw=".into(),
         suffix: "\n".into(),
+        toml_path: vec![],
     };
     assert_eq!(
         version,
@@ -271,4 +275,69 @@ fn target_frames_a_derived_value_from_the_source_it_generates() {
         &mut FakeHost::default(),
     )
     .is_err());
+}
+
+/// A symmetric secret of another host, generated here because this host is
+/// deployed first: encrypted to the owner leaf's recipients, never installed
+/// itself, and the derived file framed from the plaintext here.
+#[test]
+fn a_shared_source_is_encrypted_to_its_owner_and_frames_the_derived_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = manifest(&temp);
+    let provider = Recording::default();
+    let mut host = FakeHost::default();
+    let owner_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8eHRwbGhkYFxYVFBMSERAPDg0MCwoJCAcGBQQDAgEA";
+    let shared = |identifier: &str| GenerateEntry {
+        identifier: identifier.into(),
+        client_contribution_base64: STANDARD.encode([5_u8; 32]),
+        shared: Some(nix_secrets_transport::SharedSource {
+            generator: nix_secrets_core::DeployGenerator::Declared {
+                generator: nix_secrets_core::ValueGenerator::RandomBytes {
+                    bytes: 32,
+                    encoding: nix_secrets_core::RandomEncoding::Base64,
+                    prefix: String::new(),
+                    suffix: String::new(),
+                },
+            }
+            .fingerprint(),
+            recipient_ids: vec!["mail-operator".into()],
+            recipient_public_keys: vec![owner_key.into()],
+        }),
+    };
+    let result = run_value_generation(
+        &manifest,
+        "host",
+        &[shared("mail.services.stalwart.tsig")],
+        &["host.services.app.knot".into()],
+        &BTreeMap::new(),
+        &provider,
+        &mut host,
+    )
+    .unwrap();
+    // Only the derived file is installed here.
+    assert_eq!(result.deployments.len(), 1);
+    assert_eq!(result.deployments[0].identifier, "host.services.app.knot");
+    let installed = STANDARD.decode(&result.deployments[0].contents_base64).unwrap();
+    assert!(installed.starts_with(b"secret: ") && installed.ends_with(b"\n"));
+    // The source is returned only as a record to its owner's recipients.
+    let record = &result.records["mail.services.stalwart.tsig"];
+    assert_eq!(record.recipient_ids, ["mail-operator"]);
+    let calls = provider.calls.borrow();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, [owner_key]);
+    let secret = &installed[8..installed.len() - 1];
+    assert!(calls[0].1.ends_with(secret), "the record holds the framed secret");
+    // Without a derived value of this host framed from it, it is refused.
+    let error = run_value_generation(
+        &manifest,
+        "host",
+        &[shared("mail.services.stalwart.tsig")],
+        &[],
+        &BTreeMap::new(),
+        &provider,
+        &mut host,
+    )
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("no requested derived value"), "{error}");
 }

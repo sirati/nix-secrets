@@ -218,7 +218,7 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             if matches!(model.mode, Mode::Approval(_)) {
                 model.mode = Mode::Browse;
             }
-            model.offer_approval(request);
+            model.offer_approval(*request);
         }
         Completion::ApprovalDone(None) => {
             if matches!(model.mode, Mode::Approval(_)) {
@@ -308,10 +308,8 @@ pub(crate) fn deployed_notice(generated: &[String], skipped: &[String]) -> Strin
     };
     if !skipped.is_empty() {
         notice.push_str(&format!(
-            "\n\nSkipped {} value{} whose source host is not deployed yet; the target keeps waiting for {}:\n{}",
+            "\n\nNot deployed yet ({}); only their own services keep waiting:\n{}",
             skipped.len(),
-            if skipped.len() == 1 { "" } else { "s" },
-            if skipped.len() == 1 { "it" } else { "them" },
             skipped.join("\n")
         ));
     }

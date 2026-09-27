@@ -19,12 +19,24 @@ pub struct DerivedFrom {
     pub prefix: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub suffix: String,
+    /// Selects one string field of a TOML source instead of the whole
+    /// value, e.g. `["tsig", "secret_base64"]`.
+    #[serde(rename = "tomlPath", default, skip_serializing_if = "Vec::is_empty")]
+    pub toml_path: Vec<String>,
 }
 
 impl DerivedFrom {
     pub fn validate_definition(&self) -> Result<SecretPath, String> {
         let source = SecretPath::parse(&self.identifier)
             .map_err(|error| format!("derivedFrom.identifier is invalid: {error}"))?;
+        if self.toml_path.len() > 8
+            || self
+                .toml_path
+                .iter()
+                .any(|key| key.is_empty() || key.len() > 128 || key.contains('\0'))
+        {
+            return Err("derivedFrom.tomlPath must be at most 8 non-empty keys".into());
+        }
         for affix in [&self.prefix, &self.suffix] {
             if affix.len() > MAX_DERIVED_AFFIX_BYTES || affix.contains('\0') {
                 return Err(format!(
@@ -52,6 +64,12 @@ impl DerivedFrom {
             hasher.update((part.len() as u64).to_be_bytes());
             hasher.update(part);
         }
+        // Without a selector the version is unchanged from before it existed.
+        if !self.toml_path.is_empty() {
+            let path = self.toml_path.join("\0");
+            hasher.update((path.len() as u64).to_be_bytes());
+            hasher.update(path.as_bytes());
+        }
         let digest = hasher.finalize();
         let hex = digest[..16]
             .iter()
@@ -65,8 +83,44 @@ impl DerivedFrom {
         serde_json::to_string(self).expect("derivations serialize")
     }
 
-    /// The deployed bytes for a source value.
-    pub fn frame(&self, source: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
+    /// The deployed bytes for a source value, or why the source does not
+    /// hold the selected field.
+    pub fn frame(&self, source: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+        if self.toml_path.is_empty() {
+            return Ok(self.frame_bytes(source));
+        }
+        let field = self.select(source)?;
+        Ok(self.frame_bytes(field.as_bytes()))
+    }
+
+    /// The string at `toml_path` in a TOML source.
+    fn select(&self, source: &[u8]) -> Result<zeroize::Zeroizing<String>, String> {
+        let path = self.toml_path.join(".");
+        let text = std::str::from_utf8(source)
+            .map_err(|_| format!("{} is not UTF-8 TOML, so it has no {path}", self.identifier))?;
+        let document: toml::Table = toml::from_str(text)
+            .map_err(|_| format!("{} is not valid TOML, so it has no {path}", self.identifier))?;
+        let mut value: Option<&toml::Value> = None;
+        let mut table = &document;
+        for (index, key) in self.toml_path.iter().enumerate() {
+            let next = table
+                .get(key)
+                .ok_or_else(|| format!("{} has no field {path}", self.identifier))?;
+            if index + 1 == self.toml_path.len() {
+                value = Some(next);
+            } else {
+                table = next
+                    .as_table()
+                    .ok_or_else(|| format!("{} has no field {path}", self.identifier))?;
+            }
+        }
+        value
+            .and_then(toml::Value::as_str)
+            .map(|text| zeroize::Zeroizing::new(text.to_owned()))
+            .ok_or_else(|| format!("{}: {path} is not a string", self.identifier))
+    }
+
+    fn frame_bytes(&self, source: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
         let mut output = zeroize::Zeroizing::new(Vec::with_capacity(
             self.prefix.len() + source.len() + self.suffix.len(),
         ));
@@ -154,4 +208,48 @@ fn collect(
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod toml_tests {
+    use super::*;
+
+    fn knot() -> DerivedFrom {
+        DerivedFrom {
+            identifier: "ns1.services.dyndns-rfc2136.credentials".into(),
+            prefix: "key:\n  - id: dyndns-rfc2136\n    algorithm: hmac-sha256\n    secret: ".into(),
+            suffix: "\n".into(),
+            toml_path: vec!["tsig".into(), "secret_base64".into()],
+        }
+    }
+
+    const CREDENTIALS: &str = "[tsig]\nkey_name = \"dyndns-rfc2136\"\nsecret_base64 = \"c2VjcmV0\"\nalgorithm = \"hmac-sha256\"\n\n[[credentials]]\nusername = \"router\"\npassword = \"pw\"\n";
+
+    #[test]
+    fn frames_one_field_of_a_toml_source() {
+        let framed = knot().frame(CREDENTIALS.as_bytes()).unwrap();
+        assert!(framed.ends_with(b"secret: c2VjcmV0\n"));
+        assert!(!String::from_utf8_lossy(&framed).contains("password"));
+    }
+
+    #[test]
+    fn a_missing_or_non_string_field_is_named() {
+        let error = knot().frame(b"[tsig]\nkey_name = \"x\"\n").unwrap_err();
+        assert!(error.contains("has no field tsig.secret_base64"), "{error}");
+        let error = knot().frame(b"[tsig]\nsecret_base64 = 3\n").unwrap_err();
+        assert!(error.contains("tsig.secret_base64 is not a string"), "{error}");
+        let error = knot().frame(b"not = [toml").unwrap_err();
+        assert!(error.contains("is not valid TOML"), "{error}");
+    }
+
+    #[test]
+    fn the_selector_is_part_of_the_version_only_when_set() {
+        let mut plain = knot();
+        plain.toml_path.clear();
+        assert_ne!(knot().version(b"v"), plain.version(b"v"));
+        assert!(knot().validate_definition().is_ok());
+        let mut deep = knot();
+        deep.toml_path = vec!["".into()];
+        assert!(deep.validate_definition().is_err());
+    }
 }

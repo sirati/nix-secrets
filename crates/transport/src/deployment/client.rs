@@ -60,7 +60,12 @@ fn batch(
         requested_identifiers: entries
             .iter()
             .map(|item| item.identifier.clone())
-            .chain(generate.iter().map(|item| item.identifier.clone()))
+            .chain(
+                generate
+                    .iter()
+                    .filter(|item| item.shared.is_none())
+                    .map(|item| item.identifier.clone()),
+            )
             .chain(derive.iter().cloned())
             .collect(),
         requested_tasks: tasks.iter().map(|item| item.identifier.clone()).collect(),
@@ -107,7 +112,13 @@ impl PreparedDeployment {
 
     /// Whether the target can generate values (deployment protocol 2).
     pub fn supports_generation(&self) -> bool {
-        self.state.protocol_version >= DEPLOYMENT_PROTOCOL_VERSION
+        self.state.protocol_version >= GENERATION_PROTOCOL_VERSION
+    }
+
+    /// Whether the target can generate a shared source it does not own
+    /// (deployment protocol 3).
+    pub fn supports_shared_sources(&self) -> bool {
+        self.state.protocol_version >= SHARED_SOURCE_PROTOCOL_VERSION
     }
 
     pub fn deploy_with_generation(
@@ -122,11 +133,19 @@ impl PreparedDeployment {
                 "target runs deployment protocol 1 and cannot generate values; rebuild it first",
             ));
         }
+        if generate.iter().any(|item| item.shared.is_some()) && !self.supports_shared_sources() {
+            return Err(DeploymentError::Invalid(
+                "target runs deployment protocol 2 and cannot generate a shared source; rebuild it first",
+            ));
+        }
+        // A shared source is not in the target's manifest; its generator is
+        // the owner's, carried in the entry.
         verify_generators(
             &self.state,
             &self.expected,
             &generate
                 .iter()
+                .filter(|item| item.shared.is_none())
                 .map(|item| item.identifier.clone())
                 .collect::<Vec<_>>(),
         )?;
@@ -198,10 +217,9 @@ impl<'a> DeploymentClient<'a> {
 }
 
 fn reject_or_return(result: DeploymentResult) -> Result<DeploymentResult, DeploymentError> {
-    if matches!(result, DeploymentResult::Rejected { .. }) {
-        Err(DeploymentError::Rejected)
-    } else {
-        Ok(result)
+    match result {
+        DeploymentResult::Rejected { message } => Err(DeploymentError::Rejected(message)),
+        result => Ok(result),
     }
 }
 

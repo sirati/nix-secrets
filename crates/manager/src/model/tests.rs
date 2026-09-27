@@ -55,6 +55,8 @@ fn notices_are_acknowledged_in_order_before_pending_approval() {
         missing: vec![],
         derived: vec![],
         skippable: vec![],
+        missing_kinds: Default::default(),
+        host_default: vec![],
         allow_partial: false,
     });
     assert!(matches!(model.mode, Mode::Browse));

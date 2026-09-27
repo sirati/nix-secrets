@@ -63,8 +63,10 @@ impl Controller {
         // The one connection selects only what can be deployed: values that
         // wait for another host are left out, so a partial deployment needs
         // no second connection, and a full one is refused before sending.
+        // Unset public information with a host default is never sent either:
+        // the host keeps the default it installs.
         let skippable = unset::plan_unset(&self.schema, &request.secrets, &set)
-            .map(|plan| plan.skippable)
+            .map(|plan| plan.skippable.into_iter().chain(plan.host_default).collect::<Vec<_>>())
             .unwrap_or_default();
         let mut selected = request.clone();
         selected.secrets.retain(|identifier| !skippable.contains(identifier));
@@ -122,12 +124,8 @@ impl Controller {
         Ok(Some(details))
     }
 
-    pub(super) fn approval_inner(
-        &mut self,
-        accepted: bool,
-        allow_partial: bool,
-    ) -> Result<Option<UiApproval>, String> {
-        let result = self.answer_approval(accepted, allow_partial);
+    pub(super) fn approval_inner(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
+        let result = self.answer_approval(accepted);
         // A failure is final: the request is resolved with its reason and
         // never offered again. Retrying would open another authenticated
         // connection, and with it another agent or 1Password prompt.
@@ -144,11 +142,7 @@ impl Controller {
         result
     }
 
-    fn answer_approval(
-        &mut self,
-        accepted: bool,
-        allow_partial: bool,
-    ) -> Result<Option<UiApproval>, String> {
+    fn answer_approval(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
         if accepted {
             if !self
                 .active
@@ -170,10 +164,7 @@ impl Controller {
                     .approval_details(&request, state.as_ref(), &set)
                     .map(Some);
             }
-            // The dialog shows the requester's choice and the operator may
-            // change it; what they approved is what is deployed.
             let active = self.active.as_mut().expect("active approval exists");
-            active.request.allow_partial = allow_partial;
             let (id, lease_id) = (active.request.id.clone(), active.lease_id);
             if let Err(error) = self.client.renew_for(id, lease_id, 900_000) {
                 self.active.take();

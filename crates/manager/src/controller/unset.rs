@@ -24,15 +24,44 @@ pub(crate) struct UnsetPlan {
     /// Derived values the target frames itself, because their source is
     /// unset, on the same host, and generated in this deployment.
     pub derived_on_target: Vec<(String, String)>,
-    /// Derived values in `missing` whose unset source is on another host.
-    /// Only these may be skipped by a partial deployment; the target keeps
-    /// waiting for them until their source host is deployed.
+    /// Values in `missing` a partial deployment leaves out, which is every
+    /// missing value: the target keeps waiting for them.
     pub skippable: Vec<String>,
+    /// Why each value in `missing` is missing, for grouping in the dialog.
+    pub reasons: BTreeMap<String, MissingKind>,
+    /// Unset public information the host installs its declared default for;
+    /// never sent, so the installed default stays.
+    pub host_default: Vec<String>,
+    /// Unset symmetric sources on another host that this target generates
+    /// because it deploys first: identifier and generator label. Encrypted
+    /// there to the source leaf's recipients and stored here as ciphertext.
+    pub shared: Vec<(String, String)>,
+}
+
+/// Why a value cannot be deployed yet.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum MissingKind {
+    /// The operator must enter it.
+    NeedsInput,
+    /// A public-key inventory other hosts fill by registering their keys.
+    FilledByAnotherHost,
+    /// Derived from a value that is unset.
+    DerivedFromUnset,
+}
+
+impl MissingKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NeedsInput => "Needs input",
+            Self::FilledByAnotherHost => "Filled by another host",
+            Self::DerivedFromUnset => "Derived from unset source",
+        }
+    }
 }
 
 impl UnsetPlan {
     /// Whether a partial deployment can proceed: something is missing and
-    /// every missing value waits for another host.
+    /// every missing value can be left out.
     pub fn partial_possible(&self) -> bool {
         !self.missing.is_empty()
             && self
@@ -41,9 +70,14 @@ impl UnsetPlan {
                 .all(|(identifier, _)| self.skippable.contains(identifier))
     }
 
-    /// The refusal of a deployment that may skip `skippable` values, if
-    /// `allow_partial`. Values that cannot wait for another host are always
-    /// refused.
+    fn miss(&mut self, identifier: &str, kind: MissingKind, reason: String) {
+        self.missing.push((identifier.to_owned(), reason));
+        self.skippable.push(identifier.to_owned());
+        self.reasons.insert(identifier.to_owned(), kind);
+    }
+
+    /// The refusal of a deployment, or none when `allow_partial` lets it
+    /// deploy the rest and list the missing values as skipped.
     pub fn refusal_for(&self, allow_partial: bool) -> Option<String> {
         if allow_partial && self.partial_possible() {
             None
@@ -105,46 +139,96 @@ pub(crate) fn plan_unset(
                 if task.generated_secret.secret_type
                     != nix_secrets_core::GeneratedSecretType::LocalSshKey
                 {
-                    plan.missing
-                        .push((identifier.clone(), "task input".to_owned()));
+                    plan.miss(
+                        identifier,
+                        MissingKind::NeedsInput,
+                        "task input".to_owned(),
+                    );
                 }
                 continue;
             }
         };
         // `set` names public information whose shared value is stored.
         if matches!(spec.kind, SecretKind::PublicInfo) {
-            plan.missing.push((
-                identifier.clone(),
-                "public information is unset; enter it first".to_owned(),
-            ));
+            if spec.install_default_if_missing {
+                plan.host_default.push(identifier.clone());
+            } else {
+                plan.miss(
+                    identifier,
+                    MissingKind::NeedsInput,
+                    "public information is unset; enter it first".to_owned(),
+                );
+            }
+            continue;
+        }
+        // A public-key inventory is filled by the hosts that register keys
+        // into it when they are deployed.
+        let producers = schema.registration_producers(identifier);
+        if !producers.is_empty() {
+            let mut hosts = producers
+                .iter()
+                .filter_map(|producer| producer.split('.').next())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            hosts.dedup();
+            plan.miss(
+                identifier,
+                MissingKind::FilledByAnotherHost,
+                format!("filled when {} deploy", hosts.join(", ")),
+            );
             continue;
         }
         match deployment_generator(&spec) {
             Ok(generator) => plan.generate.push((identifier.clone(), generator.label())),
-            Err(reason) => plan
-                .missing
-                .push((identifier.clone(), reason.reason().to_owned())),
+            Err(reason) => plan.miss(
+                identifier,
+                MissingKind::NeedsInput,
+                reason.reason().to_owned(),
+            ),
         }
     }
     // An unset source generated in this same request is on the same host
     // (a request names one target), so that target frames the derived value
     // from what it generates, and both land in one atomic generation.
     for (identifier, source) in waiting {
+        let same_host = source.split('.').next() == identifier.split('.').next();
+        let shareable = !same_host && shared_generator(schema, &source).is_some();
         if plan
             .generate
             .iter()
+            .chain(&plan.shared)
             .any(|(generated, _)| generated == &source)
         {
             plan.derived_on_target.push((identifier, source));
+        } else if shareable {
+            // A symmetric secret of another host: generated here, the host
+            // deployed first, and stored under its own identifier.
+            let label = shared_generator(schema, &source).expect("checked").label();
+            plan.shared.push((source.clone(), label));
+            plan.derived_on_target.push((identifier, source));
         } else {
             let reason = source_first(schema, &source);
-            if source.split('.').next() != identifier.split('.').next() {
-                plan.skippable.push(identifier.clone());
-            }
-            plan.missing.push((identifier, reason));
+            plan.miss(&identifier, MissingKind::DerivedFromUnset, reason);
         }
     }
     Ok(plan)
+}
+
+/// The generator of a source another host may generate first: a stored,
+/// generatable symmetric secret. A private key is only ever generated on its
+/// own host, so key material with a content type is never shared this way.
+pub(crate) fn shared_generator(
+    schema: &Schema,
+    source: &str,
+) -> Option<nix_secrets_core::DeployGenerator> {
+    let path = SecretPath::parse(source).ok()?;
+    let LeafSpec::Stored(spec) = schema.leaf(&path).ok()? else {
+        return None;
+    };
+    if spec.destination.content_type.is_some() || matches!(spec.kind, SecretKind::PublicInfo) {
+        return None;
+    }
+    deployment_generator(&spec).ok()
 }
 
 /// Why a derived value's unset source blocks it, and what to do.
@@ -170,15 +254,37 @@ pub(crate) fn expected_generator(spec: &nix_secrets_core::SecretSpec) -> Option<
         .map(|generator| generator.fingerprint())
 }
 
-pub(crate) fn generate_entries(plan: &UnsetPlan) -> Result<Vec<GenerateEntry>, String> {
-    plan.generate
-        .iter()
-        .map(|(identifier, _)| {
+pub(crate) fn generate_entries(
+    schema: &Schema,
+    plan: &UnsetPlan,
+) -> Result<Vec<GenerateEntry>, String> {
+    let own = plan.generate.iter().map(|(identifier, _)| (identifier, None));
+    let shared = plan.shared.iter().map(|(identifier, _)| {
+        let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
+        let LeafSpec::Stored(spec) = schema.leaf(&path).map_err(|error| error.to_string())? else {
+            return Err(format!("{identifier} is not a stored value"));
+        };
+        let generator = shared_generator(schema, identifier)
+            .ok_or_else(|| format!("{identifier} cannot be generated on another host"))?;
+        Ok((
+            identifier,
+            Some(nix_secrets_transport::SharedSource {
+                generator: generator.fingerprint(),
+                recipient_ids: spec.recipient_ids,
+                recipient_public_keys: spec.recipient_public_keys,
+            }),
+        ))
+    });
+    own.map(Ok)
+        .chain(shared)
+        .map(|item| {
+            let (identifier, shared) = item?;
             let contribution = crate::task::fresh_contribution()
                 .map_err(|error| format!("OS randomness failed: {error}"))?;
             Ok(GenerateEntry {
                 identifier: identifier.clone(),
                 client_contribution_base64: STANDARD.encode(&contribution[..]),
+                shared,
             })
         })
         .collect()
@@ -257,7 +363,9 @@ impl Controller {
         };
         let value =
             decrypt_secret(source, &record, &self.provider).map_err(|error| error.to_string())?;
-        let framed = derived.frame(&value);
+        let framed = derived
+            .frame(&value)
+            .map_err(|error| format!("{identifier} cannot be derived: {error}"))?;
         Ok(DeployEntry {
             identifier: identifier.to_owned(),
             version_id: derived.version(&stored.version_id),

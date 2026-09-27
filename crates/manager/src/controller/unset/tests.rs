@@ -160,7 +160,7 @@ impl GenerationHost for Target {
 impl Target {
     /// Runs a deployment's generation step and installs the results.
     fn deploy(&mut self, fixture: &Fixture, plan: &UnsetPlan) -> BTreeMap<String, GeneratedRecord> {
-        let entries = generate_entries(plan).unwrap();
+        let entries = generate_entries(&fixture.schema, plan).unwrap();
         let versions = self.versions.clone();
         let derive = plan
             .derived_on_target
@@ -449,53 +449,42 @@ mod derived {
     const DERIVED: &str = "dns.services.app.update-key";
     const SOURCE: &str = "mail.services.app.dns-update-key";
 
+    /// A symmetric secret of another host, unset: the host deployed first
+    /// generates it with the source leaf's own generator, encrypts it to that
+    /// leaf's recipients, and frames its derived value from it.
     #[test]
-    fn an_unset_source_names_the_host_to_deploy_first() {
+    fn an_unset_shared_source_is_generated_on_the_host_deployed_first() {
         let (_temp, schema, _controller) = pair();
         let plan = plan_unset(&schema, &[DERIVED.to_string()], &BTreeSet::new()).unwrap();
-        let refusal = plan.refusal().unwrap();
-        assert!(
-            refusal.contains(&format!(
-                "{DERIVED} (derived from unset {SOURCE}; deploy mail first, which generates it)"
-            )),
-            "{refusal}"
-        );
-        assert!(plan.generate.is_empty());
+        assert!(plan.missing.is_empty(), "{:?}", plan.missing);
+        assert_eq!(plan.shared.len(), 1);
+        assert_eq!(plan.shared[0].0, SOURCE);
+        assert_eq!(plan.derived_on_target, [(DERIVED.to_string(), SOURCE.to_string())]);
+        let entries = generate_entries(&schema, &plan).unwrap();
+        let shared = entries[0].shared.as_ref().expect("a shared source entry");
+        assert_eq!(entries[0].identifier, SOURCE);
+        // The owner's generator and recipients, from the operator's schema.
+        let LeafSpec::Stored(owner) = schema.leaf(&SecretPath::parse(SOURCE).unwrap()).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(shared.recipient_ids, owner.recipient_ids);
+        assert_eq!(shared.generator, deployment_generator(&owner).unwrap().fingerprint());
     }
 
-    /// ns1's case: its update key derives from a value another host has not
-    /// generated yet. Without the partial choice the whole deployment is
-    /// refused; with it everything else deploys and the key is listed as
-    /// skipped.
+    /// Missing values never block: a manual value is listed with its reason
+    /// and the rest deploys.
     #[test]
-    fn a_partial_deployment_skips_only_values_waiting_for_another_host() {
+    fn missing_values_are_listed_and_never_block() {
         let (_temp, schema, _controller) = pair();
         let all = schema.deployable_identifiers("dns").unwrap();
         assert_eq!(all.len(), 3, "{all:?}");
-        let host_only = all
-            .iter()
-            .filter(|id| !id.ends_with("api-token"))
-            .cloned()
-            .collect::<Vec<_>>();
-        let plan = plan_unset(&schema, &host_only, &BTreeSet::new()).unwrap();
-        assert_eq!(plan.skippable, [DERIVED]);
-        assert_eq!(plan.generate.len(), 1);
-        assert!(plan.partial_possible());
-        // Without the choice the existing refusal stays.
-        let refusal = plan.refusal_for(false).unwrap();
-        assert!(refusal.contains("deploy mail first"), "{refusal}");
-        assert!(plan.refusal_for(true).is_none());
-        // A value that must be entered is never skipped.
         let plan = plan_unset(&schema, &all, &BTreeSet::new()).unwrap();
-        assert_eq!(plan.skippable, [DERIVED]);
-        assert!(!plan.partial_possible());
-        let refusal = plan.refusal_for(true).unwrap();
+        assert_eq!(plan.missing.len(), 1);
+        assert_eq!(plan.reasons["dns.services.app.api-token"], MissingKind::NeedsInput);
+        assert!(plan.refusal_for(true).is_none());
+        let refusal = plan.refusal_for(false).unwrap();
         assert!(refusal.contains("dns.services.app.api-token (external input)"), "{refusal}");
-        // A source on the same host is never skippable: it is generated in
-        // the same deployment or must be entered.
-        let fixture = fixture();
-        let plan = plan_unset(&fixture.schema, &Fixture::ids(&["knot"]), &BTreeSet::new()).unwrap();
-        assert!(plan.skippable.is_empty());
     }
 
     /// The deployment itself: the skipped value is left out of the target
@@ -512,7 +501,7 @@ mod derived {
         assert!(summary.contains("generated and stored: dns.services.app.transfer-key"));
         assert!(
             summary.contains(&format!(
-                "skipped until their source host is deployed (the target keeps waiting for them): {DERIVED}"
+                "not deployed yet, dns waits for: {DERIVED}"
             )),
             "{summary}"
         );
@@ -634,4 +623,97 @@ fn a_derived_value_and_its_unset_source_on_one_host_deploy_together() {
     // Without its source in the request, it still waits for the source.
     let plan = plan_unset(&fixture.schema, &Fixture::ids(&["knot"]), &BTreeSet::new()).unwrap();
     assert!(plan.refusal().unwrap().contains("deploy host first"));
+}
+
+/// ns1's deployment: a public default, a key inventory filled by other
+/// hosts, a value entered by hand, and a key derived from another host.
+mod ns1 {
+    use super::*;
+
+    fn ns1_schema() -> Schema {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+        let dest = |service: &str, name: &str| {
+            json!({"path": format!("/persistent/secrets/{service}/service/{name}"),
+                "category": "service", "owner": "root", "group": "root", "mode": "0400"})
+        };
+        let secret = |service: &str, name: &str, extra: serde_json::Value| {
+            let mut value = json!({"kind": "secret", "recipientPublicKeys": [key],
+                "recipientIds": ["operator"], "consumerUnits": [], "destination": dest(service, name)});
+            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            value
+        };
+        let host = |name: &str, services: serde_json::Value| {
+            json!({"metadata": {"socketPath": "/run/nix-secrets/backend.sock",
+                "deployment": {"host": name, "destination": format!("forward@{name}"), "port": 22}},
+                "services": services})
+        };
+        let mut known_hosts = dest("x", "y");
+        known_hosts["path"] = json!("/persistent/public-info/storage-box/known-hosts");
+        known_hosts["category"] = json!("public-info");
+        known_hosts["mode"] = json!("0644");
+        known_hosts["contentType"] = json!("ssh-known-hosts");
+        let mut inventory = dest("report-authorized", "fault");
+        inventory["contentType"] = json!("named-ssh-ed25519-public-keys");
+        inventory["authorizedForUser"] = json!("report");
+        let document = json!({
+            "ns1": host("ns1", json!({
+                "backup-public-info": {"storage-box-known-hosts": {
+                    "kind": "public-info", "sharedPublicId": "storage-box/known-hosts",
+                    "expectedSshHost": "box.example", "expectedSshPort": 23,
+                    "installDefaultIfMissing": true, "recipientPublicKeys": [], "recipientIds": [],
+                    "consumerUnits": [], "destination": known_hosts}},
+                "report-authorized": {"fault": {"kind": "secret", "recipientPublicKeys": [key],
+                    "recipientIds": ["operator"], "consumerUnits": [], "destination": inventory}},
+                "authoritative-dns": {
+                    "dyndns-update-key": secret("authoritative-dns", "dyndns-update-key",
+                        json!({"valueType": "key", "generateOnDeploy": false})),
+                    "update-key": secret("authoritative-dns", "update-key",
+                        json!({"valueType": "key", "derivedFrom":
+                            {"identifier": "hetzner2.services.stalwart.dns-update-key"}})),
+                    "transfer-key": secret("authoritative-dns", "transfer-key",
+                        json!({"valueType": "key", "valueGenerator":
+                            {"kind": "random-bytes", "bytes": 32, "encoding": "base64"}}))
+                }
+            })),
+            "hetzner2": host("hetzner2", json!({
+                "stalwart": {"dns-update-key": secret("stalwart", "dns-update-key",
+                    json!({"valueType": "key", "valueGenerator":
+                        {"kind": "random-bytes", "bytes": 32, "encoding": "base64"}}))},
+                "reporter": {"fault-key": {"kind": "generated", "recipientPublicKeys": [key],
+                    "recipientIds": ["operator"], "consumerUnits": [],
+                    "generatedSecret": {"type": "local-ssh-key", "output": dest("reporter", "fault-key"),
+                        "bootstrap": null, "registerAt": "ns1.services.report-authorized.fault"}}}
+            }))
+        });
+        Schema::from_json(&document.to_string()).unwrap()
+    }
+
+    #[test]
+    fn classifies_each_unset_value_and_deploys_the_rest_when_partial() {
+        let schema = ns1_schema();
+        let all = schema.deployable_identifiers("ns1").unwrap();
+        let plan = plan_unset(&schema, &all, &BTreeSet::new()).unwrap();
+        // 1. Public information with a host default is not missing: the
+        //    host keeps the default it installs.
+        assert_eq!(plan.host_default, ["ns1.services.backup-public-info.storage-box-known-hosts"]);
+        // 2. The inventory is filled by the hosts that register into it.
+        let fault = "ns1.services.report-authorized.fault";
+        assert_eq!(plan.reasons[fault], MissingKind::FilledByAnotherHost);
+        let reason = &plan.missing.iter().find(|(id, _)| id == fault).unwrap().1;
+        assert_eq!(reason, "filled when hetzner2 deploy");
+        // 3. A value entered by hand is listed, not blocking.
+        let manual = "ns1.services.authoritative-dns.dyndns-update-key";
+        assert_eq!(plan.reasons[manual], MissingKind::NeedsInput);
+        // 4. The symmetric TSIG secret of hetzner2 is generated on ns1,
+        //    which deploys first, and the Knot file is framed from it.
+        let source = "hetzner2.services.stalwart.dns-update-key";
+        assert_eq!(plan.shared.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), [source]);
+        assert!(plan
+            .derived_on_target
+            .contains(&("ns1.services.authoritative-dns.update-key".into(), source.into())));
+        assert_eq!(plan.missing.len(), 2, "{:?}", plan.missing);
+        assert!(plan.refusal_for(true).is_none());
+        // A private key is only ever generated on its own host.
+        assert!(shared_generator(&schema, "hetzner2.services.reporter.fault-key").is_none());
+    }
 }

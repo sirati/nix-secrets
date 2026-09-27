@@ -136,6 +136,24 @@ pub struct TaskEntry {
 pub struct GenerateEntry {
     pub identifier: String,
     pub client_contribution_base64: String,
+    /// Protocol 3: a secret this target shares but does not own, such as a
+    /// TSIG secret its derived value is framed from. The target generates it
+    /// with the owner's generator, encrypts it to the owner leaf's
+    /// recipients, and returns only the ciphertext. It installs nothing for
+    /// it; only the derived values framed from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<SharedSource>,
+}
+
+/// The owner leaf's generator and recipients, which the target's own
+/// manifest does not carry. The operator's schema is authoritative for them.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub struct SharedSource {
+    /// The canonical generator description, as the owner leaf's.
+    pub generator: String,
+    pub recipient_ids: Vec<String>,
+    pub recipient_public_keys: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Zeroize, ZeroizeOnDrop)]
@@ -200,7 +218,8 @@ pub enum DeploymentError {
     Json(serde_json::Error),
     Io(io::Error),
     Invalid(&'static str),
-    Rejected,
+    /// The target refused the batch; carries its reason.
+    Rejected(String),
 }
 
 impl fmt::Display for DeploymentError {
@@ -211,7 +230,7 @@ impl fmt::Display for DeploymentError {
             Self::Json(error) => error.fmt(f),
             Self::Invalid(message) => f.write_str(message),
             Self::Io(error) => error.fmt(f),
-            Self::Rejected => f.write_str("target rejected deployment"),
+            Self::Rejected(message) => write!(f, "the target rejected the deployment: {message}"),
         }
     }
 }

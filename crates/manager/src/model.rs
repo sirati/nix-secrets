@@ -42,10 +42,12 @@ pub struct ApprovalRequest {
     pub missing: Vec<(String, String)>,
     /// Values deployed from another secret: (identifier, source).
     pub derived: Vec<(String, String)>,
-    /// Derived values in `missing` whose source is unset on another host.
-    /// When every missing value is one of them, the operator may deploy the
-    /// rest and skip these; the target keeps waiting for them.
+    /// Values in `missing` a partial deployment leaves out.
     pub skippable: Vec<String>,
+    /// The group of each missing value, such as "Needs input".
+    pub missing_kinds: std::collections::BTreeMap<String, String>,
+    /// Unset public information the host installs its own default for.
+    pub host_default: Vec<String>,
     /// The operator chose to deploy without the `skippable` values.
     pub allow_partial: bool,
 }
@@ -61,9 +63,14 @@ impl ApprovalRequest {
                 .all(|(identifier, _)| self.skippable.contains(identifier))
     }
 
-    /// Whether approving deploys, rather than being refused as missing values.
+    /// Whether approving deploys anything. Missing values never block; only
+    /// a request with nothing deployable is refused.
     pub fn deployable(&self) -> bool {
-        self.missing.is_empty() || (self.allow_partial && self.partial_possible())
+        !self.create.is_empty()
+            || !self.replace.is_empty()
+            || !self.generate.is_empty()
+            || !self.tasks.is_empty()
+            || self.derived.iter().any(|(identifier, _)| !self.missing.iter().any(|(id, _)| id == identifier))
     }
 }
 
@@ -269,6 +276,8 @@ pub struct Model {
     /// Whether the secret-request modal shows full commands, fingerprints
     /// and descriptions instead of its summary.
     pub secret_details: bool,
+    /// The deployment dialog shows every identifier and reason (`d`).
+    pub approval_details: bool,
 }
 
 pub struct VisibleRow {
@@ -352,6 +361,7 @@ impl Model {
             secret_prompt: None,
             secret_scroll: 0,
             secret_details: false,
+            approval_details: false,
         };
         if structured {
             model.rebuild_tree();

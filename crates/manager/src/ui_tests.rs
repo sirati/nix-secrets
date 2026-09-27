@@ -189,6 +189,8 @@ fn approval_is_explicit_and_testable() {
         missing: vec![],
         derived: vec![],
         skippable: vec![],
+        missing_kinds: Default::default(),
+        host_default: vec![],
         allow_partial: false,
     };
     reduce(&mut model, UiEvent::Approval(request), &mut writer);
@@ -237,6 +239,8 @@ fn task_approval_exposes_input_and_target_output_status() {
         missing: vec![],
         derived: vec![],
         skippable: vec![],
+        missing_kinds: Default::default(),
+        host_default: vec![],
         allow_partial: false,
     };
     assert_eq!(
