@@ -128,7 +128,7 @@ fn decryption_runs_through_the_launcher_but_encryption_does_not() {
     let launcher = scripts.script(
         "launcher",
         &format!(
-            "echo \"launcher $2\" >> {log}\nshift\nexec \"$@\"",
+            "echo \"launcher $*\" >> {log}\nexit 1",
             log = log.display()
         ),
     );
@@ -141,7 +141,10 @@ fn decryption_runs_through_the_launcher_but_encryption_does_not() {
     let _ = encrypt_secret(IDENTIFIER, b"x", &recipients, &provider);
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
-        format!("launcher {}\nage --decrypt\nage --encrypt\n", age.display())
+        format!(
+            "launcher --flag --batch --one-key {} --decrypt\nage --encrypt\n",
+            age.display()
+        )
     );
 }
 

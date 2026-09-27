@@ -63,6 +63,44 @@ pub fn verify_ssh_recipient_header(
     Err(CryptoError::InvalidRecord)
 }
 
+/// The `(type, tag)` of every SSH recipient stanza in an age file's header,
+/// which names the keys that can decrypt it without decrypting anything.
+pub fn ssh_stanza_tags(ciphertext: &[u8]) -> Result<Vec<(String, String)>, CryptoError> {
+    let mut lines = ciphertext.split(|byte| *byte == b'\n');
+    if lines.next() != Some(HEADER_VERSION.as_bytes()) {
+        return Err(CryptoError::InvalidRecord);
+    }
+    let mut tags = Vec::new();
+    for (index, line) in lines.enumerate() {
+        if index > MAX_HEADER_LINES {
+            break;
+        }
+        let Ok(line) = std::str::from_utf8(line) else {
+            return Err(CryptoError::InvalidRecord);
+        };
+        if line.starts_with("--- ") {
+            return Ok(tags);
+        }
+        let Some(arguments) = line.strip_prefix("-> ") else {
+            continue;
+        };
+        let mut fields = arguments.split(' ');
+        if let (Some(kind @ ("ssh-ed25519" | "ssh-rsa")), Some(tag)) = (fields.next(), fields.next()) {
+            tags.push((kind.to_owned(), tag.to_owned()));
+        }
+    }
+    Err(CryptoError::InvalidRecord)
+}
+
+/// The age stanza tag of the key whose OpenSSH SHA-256 fingerprint is
+/// `fingerprint` (`SHA256:…`): both hash the public key blob.
+pub fn fingerprint_stanza_tag(fingerprint: &str) -> Option<String> {
+    let digest = STANDARD_NO_PAD
+        .decode(fingerprint.strip_prefix("SHA256:")?)
+        .ok()?;
+    (digest.len() == 32).then(|| STANDARD_NO_PAD.encode(&digest[..4]))
+}
+
 /// The type and tag of the age stanza that `ssh_public_key` receives.
 pub fn ssh_recipient_stanza(ssh_public_key: &str) -> Result<(String, String), CryptoError> {
     stanza_tag(ssh_public_key)

@@ -5,6 +5,7 @@
   age,
   openssh,
   util-linux,
+  perl,
 }:
 
 rustPlatform.buildRustPackage {
@@ -21,6 +22,8 @@ rustPlatform.buildRustPackage {
     openssh
     # `script` gives the pipe-secret test a real terminal to refuse.
     util-linux
+    # A stand-in for the 1Password launcher's batch framing in a unit test.
+    perl
   ];
 
   cargoBuildFlags = [

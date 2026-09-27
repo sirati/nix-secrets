@@ -15,4 +15,6 @@ pub use secret::{
 };
 
 mod header;
-pub use header::{ssh_recipient_stanza, verify_ssh_recipient_header};
+pub use header::{
+    fingerprint_stanza_tag, ssh_recipient_stanza, ssh_stanza_tags, verify_ssh_recipient_header,
+};

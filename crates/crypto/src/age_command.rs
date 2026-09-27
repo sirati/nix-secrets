@@ -198,6 +198,13 @@ impl CryptoProvider for AgeCommandProvider {
         if ciphertext.len() > MAX_CIPHERTEXT_SIZE {
             return Err(CryptoError::SecretTooLarge);
         }
+        if self.launcher.is_some() && self.uses_one_password() {
+            // The one-key path of the launcher reads only the matching key.
+            return self
+                .decrypt_batch(&[ciphertext])?
+                .pop()
+                .ok_or(CryptoError::AgeIo(std::io::Error::other("no output")));
+        }
         self.run_with(
             self.launcher.as_ref(),
             &self.decrypt_arguments(),
@@ -232,9 +239,18 @@ impl CryptoProvider for AgeCommandProvider {
         }
         let mut batch_prefix = prefix.clone();
         batch_prefix.push("--batch".into());
+        // With 1Password the launcher reads exactly the one key that
+        // decrypts the batch and hands it to age; age-plugin-1p would read
+        // every SSH key in the account.
+        let arguments = if self.uses_one_password() {
+            batch_prefix.push("--one-key".into());
+            vec![OsString::from("--decrypt")]
+        } else {
+            self.decrypt_arguments()
+        };
         let output = self.run_with(
             Some(&(launcher.clone(), batch_prefix)),
-            &self.decrypt_arguments(),
+            &arguments,
             &input,
             ciphertexts.len() * (MAX_PLAINTEXT_SIZE + 4),
         )?;

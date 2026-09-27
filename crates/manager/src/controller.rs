@@ -344,12 +344,22 @@ impl Controller {
             .iter()
             .cloned()
             .collect::<std::collections::BTreeMap<_, _>>();
+        // Every stored value this deployment sends, and every source of a
+        // derived value, decrypted in one batch: one 1Password authorization
+        // for the whole deployment.
+        let plaintexts = self.decrypt_for_deployment(
+            &identifiers,
+            &generating,
+            &derive_on_target,
+            &derived,
+            &entries,
+        )?;
         for identifier in &identifiers {
             if generating.contains(identifier.as_str()) || derive_on_target.contains(identifier) {
                 continue;
             }
             if let Some(source) = derived.get(identifier) {
-                deploy_entries.push(self.derived_entry(identifier, source, &entries)?);
+                deploy_entries.push(self.derived_entry(identifier, source, &entries, &plaintexts)?);
                 continue;
             }
             let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
@@ -401,19 +411,14 @@ impl Controller {
             let stored = entries
                 .get(identifier)
                 .ok_or_else(|| format!("required secret became unset: {identifier}"))?;
-            let record = EncryptedSecret {
-                format_version: stored.format_version,
-                version_id: stored.version_id.clone(),
-                recipient_ids: stored.recipient_ids.clone(),
-                age_ciphertext: stored.age_ciphertext.clone(),
-            };
-            let value = decrypt_secret(identifier, &record, &self.provider)
-                .map_err(|error| error.to_string())?;
+            let value = plaintexts
+                .get(identifier)
+                .ok_or_else(|| format!("{identifier} was not decrypted"))?;
             match spec {
                 LeafSpec::Stored(_) => deploy_entries.push(DeployEntry {
                     identifier: identifier.clone(),
                     version_id: STANDARD.encode(&stored.version_id),
-                    contents_base64: STANDARD.encode(&value),
+                    contents_base64: STANDARD.encode(value.as_slice()),
                 }),
                 LeafSpec::Operator(_) => {
                     return Err(format!(
@@ -426,7 +431,7 @@ impl Controller {
                     task_entries.push(TaskEntry {
                         identifier: identifier.clone(),
                         version_id: STANDARD.encode(&stored.version_id),
-                        password_base64: STANDARD.encode(&value),
+                        password_base64: STANDARD.encode(value.as_slice()),
                         client_contribution_base64: STANDARD.encode(&contribution[..]),
                     });
                 }
