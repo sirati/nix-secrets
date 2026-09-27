@@ -24,7 +24,7 @@ pub use generated::{
     GeneratedKind, GeneratedSecret, GeneratedSecretLeaf, GeneratedSecretType, StorageBoxBootstrap,
 };
 pub use identity::{SecretIdentity, SecretPresentation};
-pub use validation::validate_ssh_known_hosts;
+pub use validation::{known_hosts_keys, validate_ssh_known_hosts, MAX_KNOWN_HOSTS_BYTES};
 use validation::{validate_component, validate_namespace, validate_tree};
 pub use value::{ConsumerConstraints, ValueType};
 pub use value_generator::{
@@ -87,8 +87,17 @@ pub struct SecretLeaf {
     pub expected_ssh_host: Option<String>,
     #[serde(rename = "expectedSshPort", default)]
     pub expected_ssh_port: Option<u16>,
+    /// Further hosts the known_hosts value may name, such as one host per
+    /// Storage Box sub-account; together with `expected_ssh_host`.
+    #[serde(rename = "expectedSshHosts", default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_ssh_hosts: Vec<String>,
     #[serde(rename = "installDefaultIfMissing", default)]
     pub install_default_if_missing: bool,
+    /// Public information only: the value used while the store has none. The
+    /// host installs it when `installDefaultIfMissing` is set, and a
+    /// deployment sends it.
+    #[serde(rename = "defaultValue", default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(rename = "humanFacing", default)]
@@ -164,7 +173,7 @@ impl Schema {
     pub fn validate(&self) -> Result<(), SchemaError> {
         self.identity_index()?;
         self.validate_derived()?;
-        let mut public_specs = BTreeMap::<String, (String, u16)>::new();
+        let mut public_specs = BTreeMap::<String, (Vec<String>, u16)>::new();
         for (host_name, host) in &self.0 {
             validate_component(host_name)?;
             if !host.metadata.socket_path.starts_with('/') {
@@ -275,7 +284,9 @@ impl Schema {
                 shared_public_id: leaf.shared_public_id.clone(),
                 expected_ssh_host: leaf.expected_ssh_host.clone(),
                 expected_ssh_port: leaf.expected_ssh_port,
+                expected_ssh_hosts: leaf.expected_ssh_hosts.clone(),
                 install_default_if_missing: leaf.install_default_if_missing,
+                default_value: leaf.default_value.clone(),
                 description: leaf.description.clone(),
                 human_facing: leaf.human_facing,
                 external_input_required: leaf.external_input_required,

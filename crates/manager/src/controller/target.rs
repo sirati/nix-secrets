@@ -30,6 +30,7 @@ pub(super) fn expected_target(
                         shared_id,
                         expected_ssh_host: spec.expected_ssh_host.unwrap_or_default(),
                         expected_ssh_port: spec.expected_ssh_port.unwrap_or_default(),
+                        expected_ssh_hosts: spec.expected_ssh_hosts.clone(),
                     }),
             }),
             LeafSpec::Generated(spec) => tasks.push(ExpectedTask {

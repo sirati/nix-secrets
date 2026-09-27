@@ -227,7 +227,7 @@ fn public_information_gets_a_known_hosts_line_for_its_expected_endpoint() {
     .unwrap();
     let value = generate_stored("host.services.known.hosts", &leaf).unwrap();
     let text = std::str::from_utf8(&value).unwrap();
-    nix_secrets_core::schema::validate_ssh_known_hosts(text, "box.example", 23).unwrap();
+    nix_secrets_core::schema::validate_ssh_known_hosts(text, &["box.example"], 23).unwrap();
 }
 
 #[test]

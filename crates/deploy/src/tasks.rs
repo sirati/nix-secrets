@@ -22,6 +22,9 @@ const MAX_PRIVATE_KEY_BYTES: u64 = 64 * 1024;
 pub struct GeneratedTasks {
     pub deployments: Vec<SecretDeployment>,
     pub public_keys: BTreeMap<String, String>,
+    /// Tasks left out because a prerequisite is absent on this host, with
+    /// why. Everything else in the batch deploys.
+    pub not_deployed: BTreeMap<String, String>,
 }
 
 pub fn run_generated_tasks(
@@ -29,9 +32,38 @@ pub fn run_generated_tasks(
     hostname: &str,
     entries: &[TaskEntry],
 ) -> Result<GeneratedTasks, DeployError> {
+    run_generated_tasks_with(manifest, hostname, entries, &[])
+}
+
+/// Runs the tasks of a batch that also supplies `supplied` values. Public
+/// information among them is published in the same generation as the
+/// tasks' output, so a task reads its known_hosts from the batch.
+pub fn run_generated_tasks_with(
+    manifest: &Path,
+    hostname: &str,
+    entries: &[TaskEntry],
+    supplied: &[SecretDeployment],
+) -> Result<GeneratedTasks, DeployError> {
     let schema = load_schema(manifest)?;
+    let mut pending = BTreeMap::new();
+    for item in supplied {
+        let Ok(path) = SecretPath::parse(&item.identifier) else {
+            continue;
+        };
+        if let Ok(nix_secrets_core::LeafSpec::Stored(spec)) = schema.leaf(&path) {
+            if matches!(spec.kind, SecretKind::PublicInfo) {
+                let value = STANDARD
+                    .decode(&item.contents_base64)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .ok_or_else(|| invalid(format!("{} is not UTF-8 base64", item.identifier)))?;
+                pending.insert(spec.destination.path.clone(), value);
+            }
+        }
+    }
     let mut outputs = Vec::with_capacity(entries.len());
     let mut public_keys = BTreeMap::new();
+    let mut not_deployed = BTreeMap::new();
     for entry in entries {
         let path = SecretPath::parse(&entry.identifier)
             .map_err(|error| invalid(format!("invalid task identifier: {error}")))?;
@@ -55,7 +87,8 @@ pub fn run_generated_tasks(
             let mut entropy = DevUrandom::open().map_err(task_error)?;
             std::io::Write::write_all(&mut entropy, contribution.expose()).map_err(task_error)?;
             std::io::Write::flush(&mut entropy).map_err(task_error)?;
-            let existing = read_existing_key(Path::new(&generated.output.path))?;
+            let existing = read_existing_key(Path::new(&generated.output.path))
+                .map_err(|error| error.during(&format!("reading the installed key {} for task {}", generated.output.path, entry.identifier)))?;
             let key = match existing {
                 Some(value) => {
                     nix_secrets_storagebox_bootstrap::GeneratedKey::from_private_pem(&value)
@@ -86,7 +119,22 @@ pub fn run_generated_tasks(
             .bootstrap
             .ok_or_else(|| invalid("storage box bootstrap missing"))?;
         let pinned_host_keys = if let Some(file) = bootstrap.known_hosts_file.as_deref() {
-            read_attested_known_hosts(&schema, hostname, file, &bootstrap.host, bootstrap.port)?
+            match read_attested_known_hosts(
+                &schema,
+                &pending,
+                hostname,
+                &entry.identifier,
+                file,
+                &bootstrap.host,
+                bootstrap.port,
+            ) {
+                Ok(keys) => keys,
+                Err(DeployError::Missing(reason)) => {
+                    not_deployed.insert(entry.identifier.clone(), reason);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             bootstrap.host_public_keys
         };
@@ -106,7 +154,8 @@ pub fn run_generated_tasks(
                 mode,
             },
         };
-        let existing = read_existing_key(Path::new(&task.output.path))?;
+        let existing = read_existing_key(Path::new(&task.output.path))
+            .map_err(|error| error.during(&format!("reading the installed key {} for task {}", task.output.path, entry.identifier)))?;
         let mut engine = Engine {
             backend: RusshBackend,
             entropy: DevUrandom::open().map_err(task_error)?,
@@ -120,7 +169,12 @@ pub fn run_generated_tasks(
                 contribution,
                 existing.as_ref().map(|value| value.as_str()),
             )
-            .map_err(task_error)?;
+            .map_err(|error| {
+                invalid(format!(
+                    "task {}: Storage Box bootstrap on {}:{} failed: {error}",
+                    entry.identifier, task.storage_box_host, task.port
+                ))
+            })?;
         public_keys.insert(entry.identifier.clone(), key.public_key.clone());
         outputs.push(SecretDeployment {
             identifier: entry.identifier.clone(),
@@ -131,12 +185,15 @@ pub fn run_generated_tasks(
     Ok(GeneratedTasks {
         deployments: outputs,
         public_keys,
+        not_deployed,
     })
 }
 
 fn read_attested_known_hosts(
     schema: &Schema,
+    pending: &BTreeMap<String, String>,
     hostname: &str,
+    task: &str,
     file: &str,
     host: &str,
     port: u16,
@@ -145,59 +202,85 @@ fn read_attested_known_hosts(
         .0
         .get(hostname)
         .ok_or_else(|| invalid("host is absent from manifest"))?;
-    fn matching(node: &SecretNode, file: &str, host: &str, port: u16) -> bool {
+    // The public-info leaf whose destination is the file and whose
+    // known_hosts may name this host and port.
+    fn attesting<'a>(
+        node: &'a SecretNode,
+        file: &str,
+        host: &str,
+        port: u16,
+    ) -> Option<&'a nix_secrets_core::schema::SecretLeaf> {
         match node {
-            SecretNode::Secret(leaf) => {
-                matches!(leaf.kind, SecretKind::PublicInfo)
-                    && leaf.destination.path == file
-                    && leaf.expected_ssh_host.as_deref() == Some(host)
-                    && leaf.expected_ssh_port == Some(port)
-            }
+            SecretNode::Secret(leaf) => (matches!(leaf.kind, SecretKind::PublicInfo)
+                && leaf.destination.path == file
+                && leaf.ssh_hosts().contains(&host)
+                && leaf.expected_ssh_port == Some(port))
+            .then_some(leaf),
             SecretNode::Branch(children) => children
                 .values()
-                .any(|child| matching(child, file, host, port)),
-            SecretNode::Generated(_) | SecretNode::Operator(_) => false,
+                .find_map(|child| attesting(child, file, host, port)),
+            SecretNode::Generated(_) | SecretNode::Operator(_) => None,
         }
     }
-    if !host_schema
+    let leaf = host_schema
         .service_groups
         .values()
         .flat_map(|services| services.values())
-        .any(|node| matching(node, file, host, port))
-    {
-        return Err(invalid(
-            "knownHostsFile is not an attested public-info destination",
-        ));
+        .find_map(|node| attesting(node, file, host, port))
+        .ok_or_else(|| {
+            invalid(format!(
+                "task {task}: knownHostsFile {file} is not a public-info destination attesting [{host}]:{port}"
+            ))
+        })?;
+    let what = format!("reading the Storage Box known_hosts {file} for task {task}");
+    let hosts = leaf.ssh_hosts();
+    let keys_of = |value: &str| {
+        nix_secrets_core::schema::known_hosts_keys(value, &hosts, port, host)
+            .map_err(|error| invalid(format!("{what}: {error}")))
+            .and_then(|keys| {
+                if keys.is_empty() {
+                    Err(DeployError::Missing(format!(
+                        "{file} holds no key for [{host}]:{port}"
+                    )))
+                } else {
+                    Ok(keys)
+                }
+            })
+    };
+    if let Some(value) = pending.get(file) {
+        return keys_of(value);
     }
-    let mut handle = OpenOptions::new()
+    let mut handle = match OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(file)?;
-    let meta = handle.metadata()?;
+        .open(file)
+    {
+        Ok(handle) => handle,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(DeployError::Missing(format!(
+                "{file} is absent: its public information is not installed on this host yet"
+            )))
+        }
+        Err(error) => return Err(DeployError::context(&what, error)),
+    };
+    let meta = handle
+        .metadata()
+        .map_err(|error| DeployError::context(&what, error))?;
     if !meta.is_file()
         || meta.uid() != 0
         || meta.gid() != 0
         || meta.permissions().mode() & 0o777 != 0o644
-        || meta.len() > 4096
+        || meta.len() > nix_secrets_core::schema::MAX_KNOWN_HOSTS_BYTES as u64
     {
-        return Err(invalid(
-            "knownHostsFile has invalid ownership, mode, or length",
-        ));
+        return Err(invalid(format!(
+            "{what}: it has invalid ownership, mode, or length"
+        )));
     }
     let mut value = String::new();
-    handle.read_to_string(&mut value)?;
-    nix_secrets_core::schema::validate_ssh_known_hosts(&value, host, port)
-        .map_err(|error| invalid(error))?;
-    let line = value.trim_end_matches('\n');
-    let mut parts = line.split_ascii_whitespace();
-    let _host = parts.next();
-    let algorithm = parts
-        .next()
-        .ok_or_else(|| invalid("missing knownHostsFile algorithm"))?;
-    let encoded = parts
-        .next()
-        .ok_or_else(|| invalid("missing knownHostsFile key"))?;
-    Ok(vec![format!("{algorithm} {encoded}")])
+    handle
+        .read_to_string(&mut value)
+        .map_err(|error| DeployError::context(&what, error))?;
+    keys_of(&value)
 }
 
 fn decode_password(value: &str) -> Result<Zeroizing<Vec<u8>>, DeployError> {

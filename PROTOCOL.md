@@ -300,6 +300,17 @@ the frontend lists it and deploys the rest. `tomlPath` selects a string field
 of a TOML source before framing and is hashed into the version after the
 other parts, so versions without it are unchanged.
 
+Protocol 4 lets the target leave out a target task whose prerequisite is absent
+on it, such as a Storage Box `knownHostsFile` that is neither installed nor
+supplied in the same batch. The task is removed from the published
+`requested_identifiers` and `Applied.not_deployed` maps its identifier to the
+reason, naming the path; everything else in the batch is published. Public
+information may carry several known_hosts lines for any of the leaf's hosts
+(`expected_ssh_hosts` in its attestation, omitted when empty) with Ed25519,
+ECDSA or RSA keys. Public information supplied in a batch is visible to that
+batch's tasks before publication. Every target I/O error names the step and
+the path.
+
 ## Operator-only values
 
 A `kind = "operator"` leaf has recipients but no destination. The Nix module

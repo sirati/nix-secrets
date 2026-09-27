@@ -169,7 +169,7 @@ fn public_known_hosts_rejects_wrong_hosts_ports_and_tofu_syntax() {
     use nix_secrets_core::schema::validate_ssh_known_hosts;
     let key = KEY.split_ascii_whitespace().nth(1).unwrap();
     let valid = format!("[box.example]:23 ssh-ed25519 {key}\n");
-    assert!(validate_ssh_known_hosts(&valid, "box.example", 23).is_ok());
+    assert!(validate_ssh_known_hosts(&valid, &["box.example"], 23).is_ok());
     for value in [
         format!("[other.example]:23 ssh-ed25519 {key}"),
         format!("[box.example]:22 ssh-ed25519 {key}"),
@@ -179,8 +179,60 @@ fn public_known_hosts_rejects_wrong_hosts_ports_and_tofu_syntax() {
         format!("[box.example]:23  ssh-ed25519 {key}"),
     ] {
         assert!(
-            validate_ssh_known_hosts(&value, "box.example", 23).is_err(),
+            validate_ssh_known_hosts(&value, &["box.example"], 23).is_err(),
             "accepted {value:?}"
         );
     }
+}
+
+#[test]
+fn public_known_hosts_accepts_several_hosts_and_key_types() {
+    use nix_secrets_core::schema::{known_hosts_keys, validate_ssh_known_hosts};
+    let key = KEY.split_ascii_whitespace().nth(1).unwrap();
+    let rsa = "AAAAB3NzaC1yc2EAAAADAQABAAAAgQDfkeXdz7vYJcdhsniWhb8JWLd+//q+vYgJyJVU3nLMyp3DClVa31YTkQsM9+wLv9KqwIJpHpTPzJzpV5YqmsZFrjwnL9K1BZScifNcKxFYuAq9KYzhW+OKJHEr1CnqocwD2evN6FcNq5m7imWCvC1PuGamVGhU9Yrvqgbi6MP0GQ==";
+    let hosts = ["sub1.box.example", "sub2.box.example"];
+    let value = format!(
+        "[sub1.box.example]:23 ssh-ed25519 {key}\n[sub1.box.example]:23 ssh-rsa {rsa}\n[sub2.box.example]:23 ssh-ed25519 {key}\n"
+    );
+    {
+        validate_ssh_known_hosts(&value, &hosts, 23).unwrap();
+        assert_eq!(
+            known_hosts_keys(&value, &hosts, 23, "sub1.box.example").unwrap(),
+            [format!("ssh-ed25519 {key}"), format!("ssh-rsa {rsa}")]
+        );
+        assert!(validate_ssh_known_hosts(&value, &["sub1.box.example"], 23).is_err());
+    }
+    let repeated = format!("[sub1.box.example]:23 ssh-ed25519 {key}\n[sub1.box.example]:23 ssh-ed25519 {key}\n");
+    assert!(validate_ssh_known_hosts(&repeated, &hosts, 23).is_err());
+}
+
+#[test]
+fn a_public_default_value_must_match_the_declared_hosts() {
+    let key = KEY.split_ascii_whitespace().nth(1).unwrap();
+    let schema = |default: &str| {
+        serde_json::json!({"host": {
+            "metadata": {"socketPath": "/run/nix-secrets/backend.sock",
+                "deployment": {"host": "host", "destination": "secrets@host", "port": 22}},
+            "services": {"backup-public-info": {"storage-box-known-hosts": {
+                "kind": "public-info", "sharedPublicId": "storage-box/known-hosts",
+                "expectedSshHost": "box.example", "expectedSshHosts": ["sub1.box.example"],
+                "expectedSshPort": 23, "installDefaultIfMissing": true,
+                "defaultValue": default, "consumerUnits": [],
+                "destination": {"path": "/persistent/public-info/storage-box/known-hosts",
+                    "category": "public-info", "owner": "root", "group": "root",
+                    "mode": "0644", "contentType": "ssh-known-hosts"}}}}
+        }})
+        .to_string()
+    };
+    let good = format!("[box.example]:23 ssh-ed25519 {key}\n[sub1.box.example]:23 ssh-ed25519 {key}\n");
+    let parsed = nix_secrets_core::Schema::from_json(&schema(&good)).unwrap();
+    let path = nix_secrets_core::SecretPath::parse(
+        "host.services.backup-public-info.storage-box-known-hosts",
+    )
+    .unwrap();
+    let spec = parsed.secret(&path).unwrap();
+    assert_eq!(spec.default_value.as_deref(), Some(good.as_str()));
+    assert_eq!(spec.ssh_hosts(), ["box.example", "sub1.box.example"]);
+    let other = format!("[sub2.box.example]:23 ssh-ed25519 {key}\n");
+    assert!(nix_secrets_core::Schema::from_json(&schema(&other)).is_err());
 }

@@ -130,15 +130,20 @@ let
     else
       builtins.fromTOML (builtins.readFile cfg.publicInfoInventoryFile);
   publicRecords = inventory.public_info or { };
-  publicDefaults = builtins.filter (
-    entry: builtins.hasAttr entry.leaf.sharedPublicId publicRecords
-  ) publicEntries;
+  # The installed default: the store's record, else the leaf's own
+  # defaultValue, so a consumer that pins the value in Nix needs no record.
+  defaultOf =
+    entry:
+    if builtins.hasAttr entry.leaf.sharedPublicId publicRecords then
+      publicRecords.${entry.leaf.sharedPublicId}.value
+    else
+      entry.leaf.defaultValue or null;
+  publicDefaults = builtins.filter (entry: defaultOf entry != null) publicEntries;
   defaultUnit =
     entry:
     let
       hash = builtins.substring 0 16 (builtins.hashString "sha256" entry.identifier);
-      record = publicRecords.${entry.leaf.sharedPublicId};
-      value = record.value;
+      value = defaultOf entry;
       source = pkgs.writeText "nix-secrets-public-default-${hash}" value;
     in
     lib.nameValuePair "nix-secrets-public-default-${hash}" {

@@ -13,6 +13,7 @@ pub use deployment::{
     ExpectedSecret, ExpectedTarget, ExpectedTask, GenerateEntry, GeneratedRecord,
     PreparedDeployment, PublicInfoAttestation, StorageBoxBootstrap, TargetSecret, TargetState,
     SharedSource, TargetTask, TaskEntry, DEPLOYMENT_PROTOCOL_VERSION, GENERATION_PROTOCOL_VERSION,
+    NOT_DEPLOYED_PROTOCOL_VERSION,
     LEGACY_DEPLOYMENT_PROTOCOL_VERSION, LOCAL_SSH_KEY, SHARED_SOURCE_PROTOCOL_VERSION,
     STORAGE_BOX_SSH_KEY,
 };

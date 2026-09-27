@@ -47,7 +47,9 @@ let
         "sharedPublicId"
         "expectedSshHost"
         "expectedSshPort"
+        "expectedSshHosts"
         "installDefaultIfMissing"
+        "defaultValue"
         "destination"
         "recipientPublicKeys"
         "recipientNames"
@@ -71,6 +73,13 @@ let
     else if (node.kind or "secret") == "public-info" then
       if !(node ? sharedPublicId && node ? expectedSshHost && node ? expectedSshPort) then
         throw "public-info requires sharedPublicId, expectedSshHost, and expectedSshPort"
+      else if
+        node ? expectedSshHosts
+        && !(builtins.isList node.expectedSshHosts && builtins.all builtins.isString node.expectedSshHosts)
+      then
+        throw "public-info expectedSshHosts must be a list of host names"
+      else if node ? defaultValue && !(builtins.isString node.defaultValue && node.defaultValue != "") then
+        throw "public-info defaultValue must be a non-empty string"
       else if
         node ? recipientNames
         || node ? recipientPublicKeys
@@ -451,7 +460,7 @@ let
       record = (document.secrets or { }).${identifier} or null;
     in
     if leaf != null && (leaf.kind or null) == "public-info" then
-      (document.public_info or { }) ? ${leaf.sharedPublicId}
+      (document.public_info or { }) ? ${leaf.sharedPublicId} || leaf ? defaultValue
     else if leaf != null && isOperatorLeaf leaf && leaf ? generator then
       record != null && record ? public_key
     else

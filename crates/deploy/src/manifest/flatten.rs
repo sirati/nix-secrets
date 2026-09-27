@@ -33,6 +33,7 @@ pub(super) fn flatten(
                         shared_id: shared_id.clone(),
                         expected_ssh_host: leaf.expected_ssh_host.clone().unwrap_or_default(),
                         expected_ssh_port: leaf.expected_ssh_port.unwrap_or_default(),
+                        expected_ssh_hosts: leaf.expected_ssh_hosts.clone(),
                     }
                 }),
             };

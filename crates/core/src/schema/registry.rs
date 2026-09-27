@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn validate_shared_public_specs(
     host: &str,
     node: &SecretNode,
-    seen: &mut BTreeMap<String, (String, u16)>,
+    seen: &mut BTreeMap<String, (Vec<String>, u16)>,
 ) -> Result<(), SchemaError> {
     match node {
         SecretNode::Branch(children) => {
@@ -18,7 +18,7 @@ pub(super) fn validate_shared_public_specs(
                 .as_ref()
                 .expect("validated public-info ID");
             let value = (
-                leaf.expected_ssh_host.clone().expect("validated SSH host"),
+                leaf.ssh_hosts().into_iter().map(str::to_owned).collect(),
                 leaf.expected_ssh_port.expect("validated SSH port"),
             );
             if seen.get(id).is_some_and(|previous| previous != &value) {

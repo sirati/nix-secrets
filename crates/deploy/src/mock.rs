@@ -291,7 +291,7 @@ fn generate_stored(identifier: &str, leaf: &SecretLeaf) -> Result<Zeroizing<Vec<
             .map_err(|error| invalid(format!("{identifier}: {error}")));
     }
     if matches!(leaf.kind, SecretKind::PublicInfo) {
-        let host = leaf.expected_ssh_host.as_deref().unwrap_or_default();
+        let host = leaf.ssh_hosts().first().copied().unwrap_or_default();
         let port = leaf.expected_ssh_port.unwrap_or_default();
         return Ok(Zeroizing::new(
             format!("[{host}]:{port} {}\n", public_key()?).into_bytes(),
