@@ -40,6 +40,8 @@ pub(super) fn handle(
             | Mode::Profiles { .. }
             | Mode::ProfileSave { .. }
             | Mode::DeployHost { .. }
+            // The deployment dialog moves its row cursor instead.
+            | Mode::Approval(_)
     ) {
         match event {
             UiEvent::Up => {

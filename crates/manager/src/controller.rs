@@ -29,6 +29,8 @@ struct ActiveApproval {
     renewed_at: Instant,
     /// Why the last approval failed, reported if the operator then rejects.
     last_error: Option<String>,
+    /// Rows the operator unchecked in the dialog; never sent.
+    unchecked: BTreeSet<String>,
 }
 
 pub struct Controller {
@@ -46,6 +48,8 @@ pub struct Controller {
     last_generated: Vec<String>,
     /// Values the last deployment left out, with why.
     last_skipped: Vec<String>,
+    /// What the last deployment did, counted, for the result notice.
+    last_summary: Option<crate::model::DeploySummary>,
     /// Runs operator keypair generators; tests replace it.
     keypair_runner: KeypairRunner,
 }
@@ -85,6 +89,11 @@ impl Controller {
     pub fn take_skipped(&mut self) -> Vec<String> {
         std::mem::take(&mut self.last_skipped)
     }
+
+    /// What the last deployment did, for the result notice.
+    pub fn take_summary(&mut self) -> Option<crate::model::DeploySummary> {
+        self.last_summary.take()
+    }
 }
 
 impl Controller {
@@ -108,6 +117,7 @@ impl Controller {
             background_error: None,
             last_generated: Vec::new(),
             last_skipped: Vec::new(),
+            last_summary: None,
             keypair_runner: crate::keypair::generate,
         })
     }
@@ -225,11 +235,24 @@ impl Controller {
             host_default: plan.host_default.clone(),
             // Missing values never block: everything else is deployed.
             allow_partial: true,
+            login_key: self.login_key(&request.target).map(String::into_boxed_str),
+            unchecked: BTreeSet::new(),
+            cursor: 0,
             id: request.id.clone(),
             target: request.target.clone(),
             create,
             replace,
-            recipient_keys: keys.into_iter().collect(),
+            recipient_keys: {
+                // Named as the operator knows them: the schema's name, the
+                // agent's title for the key and a short fingerprint.
+                let agent = crate::key_names::AgentKeys::from_agent(None);
+                keys.iter()
+                    .map(|id| match crate::key_names::recipient_key(&self.schema, id) {
+                        Some(key) => crate::key_names::describe(&self.schema, &agent, &key),
+                        None => format!("unknown recipient {}", id.chars().take(12).collect::<String>()),
+                    })
+                    .collect()
+            },
             host_key: None,
             tasks,
             generate: plan
@@ -313,6 +336,52 @@ impl Controller {
             .request
             .target
             .clone();
+        // Rows the operator unchecked are not sent or generated. A derived
+        // value framed on the target needs its generated source: unchecking
+        // the source leaves it out too.
+        let unchecked = self
+            .active
+            .as_ref()
+            .expect("active approval exists")
+            .unchecked
+            .clone();
+        let mut left_out = identifiers
+            .iter()
+            .chain(plan.shared.iter().map(|(identifier, _)| identifier))
+            .filter(|identifier| unchecked.contains(*identifier))
+            .cloned()
+            .collect::<Vec<_>>();
+        plan.generate.retain(|(identifier, _)| !unchecked.contains(identifier));
+        plan.shared.retain(|(identifier, _)| !unchecked.contains(identifier));
+        let generated_sources = plan
+            .generate
+            .iter()
+            .chain(&plan.shared)
+            .map(|(identifier, _)| identifier.clone())
+            .collect::<BTreeSet<_>>();
+        for (identifier, source) in &plan.derived_on_target {
+            if !generated_sources.contains(source) && !left_out.contains(identifier) {
+                left_out.push(identifier.clone());
+            }
+        }
+        plan.derived_on_target
+            .retain(|(identifier, _)| !left_out.contains(identifier));
+        identifiers.retain(|identifier| !left_out.contains(identifier));
+        if identifiers.is_empty() && plan.shared.is_empty() {
+            return Err("every value was unchecked; nothing was sent".into());
+        }
+        let subset_ok = self
+            .active
+            .as_ref()
+            .and_then(|active| active.prepared.as_ref())
+            .is_some_and(|prepared| {
+                prepared.state().protocol_version >= nix_secrets_transport::NOT_DEPLOYED_PROTOCOL_VERSION
+            });
+        if !left_out.is_empty() && !subset_ok {
+            return Err(format!(
+                "{source_host} runs a receiver older than deployment protocol 4, which cannot leave out values after reading its state; check every row or update the host first. Nothing was sent."
+            ));
+        }
         let generating = plan
             .generate
             .iter()
@@ -444,6 +513,8 @@ impl Controller {
             .prepared
             .take()
             .expect("prepared above");
+        let deploy_entries_count = deploy_entries.len() + derive_on_target.len();
+        let task_entries_count = task_entries.len();
         let applied = deployment::deploy(
             prepared,
             deploy_entries,
@@ -475,6 +546,14 @@ impl Controller {
                 format!("{identifier} ({reason})")
             })
             .collect::<Vec<_>>();
+        let sent = deploy_entries_count + task_entries_count;
+        self.last_summary = Some(crate::model::DeploySummary {
+            target: source_host.clone(),
+            sent: sent.saturating_sub(applied.not_deployed.len()),
+            generated: applied.generated_records.len(),
+            left_out: left_out.clone(),
+            missing: skipped.clone(),
+        });
         let summary = deployment_summary(
             &source_host,
             stored.as_ref().map(Vec::as_slice).unwrap_or(&[]),
@@ -538,3 +617,26 @@ mod writer;
 
 mod target;
 use target::{expected_target, target_has_version, target_task_has_version};
+
+impl Controller {
+    /// The key the deployment's SSH login offers, named.
+    fn login_key(&self, target: &str) -> Option<String> {
+        let host = self.schema.0.get(target)?;
+        let keys = &host.metadata.deployment.identity_public_keys;
+        if keys.is_empty() {
+            return None;
+        }
+        let config = nix_secrets_transport::client_config(
+            &"ssh".into(),
+            &host.metadata.deployment.destination.clone().into(),
+            host.metadata.deployment.port,
+        );
+        let agent = crate::key_names::AgentKeys::from_agent(config.identity_agent.as_deref());
+        Some(
+            keys.iter()
+                .map(|key| crate::key_names::describe(&self.schema, &agent, key))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+}

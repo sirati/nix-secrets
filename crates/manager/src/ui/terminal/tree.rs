@@ -66,27 +66,11 @@ fn item(row: &Row, depth: usize, name: &str, collapsed: bool) -> ListItem<'stati
     ]))
 }
 
+
 fn set_status(set: bool) -> &'static str {
     if set {
         "set"
     } else {
         "unset"
-    }
-}
-
-pub(super) fn task_status(task: &crate::model::TaskApproval) -> String {
-    if task.requires_input {
-        format!(
-            "{} (bootstrap {}, output {})",
-            task.identifier,
-            set_status(task.input_is_set),
-            task.output_is_set.map(set_status).unwrap_or("unknown")
-        )
-    } else {
-        format!(
-            "{} (generated on target; output {})",
-            task.identifier,
-            task.output_is_set.map(set_status).unwrap_or("unknown")
-        )
     }
 }

@@ -291,7 +291,8 @@ fn an_approved_batch_reaches_the_command_with_one_authorization() {
         prompt.values[0].description.as_deref(),
         Some("NMBL generation signing key")
     );
-    assert!(prompt.values[1].recipients[0].starts_with("operator: ssh-ed25519 SHA256:"));
+    let recipient = &prompt.values[1].recipients[0];
+    assert!(recipient.starts_with("operator ") && recipient.contains(": ssh-ed25519 SHA256:"), "{recipient}");
     assert_eq!(prompt.identity, "test identity");
     assert_eq!(prompt.requester.pid, child.id());
     assert!(prompt

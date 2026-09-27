@@ -102,6 +102,7 @@ impl Controller {
                 prepared: None,
                 target_approved: true,
                 last_error: None,
+                unchecked: BTreeSet::new(),
                 renewed_at: Instant::now(),
             });
             return Ok(Some(details));
@@ -126,6 +127,7 @@ impl Controller {
             prepared: None,
             target_approved: known,
             last_error: None,
+            unchecked: BTreeSet::new(),
             renewed_at: Instant::now(),
         });
         if known {

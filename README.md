@@ -448,6 +448,22 @@ is final: the request is resolved with the reason, which `nix-secrets deploy
 known_hosts is reported with the host, both fingerprints, the known_hosts file
 and line, and the `ssh-keygen -R` command that removes the old key.
 
+The deployment dialog has three steps. Step 1/3, shown only for an unknown
+host key, trusts the key. It also names the login key: the schema's
+`recipientPublicKeys` name, the agent's title for it (the 1Password item,
+such as "IT Secrets") and a short fingerprint, or "not in your ssh-agent".
+Step 2/3 lists "Will be sent" (set, replaced, derived, public information and
+target tasks) and "Will be generated" (on the target), with a checkbox on
+every row, all checked at first. Space toggles the row under the cursor
+(↑↓), `a` its section, and a click on a row, label included, toggles it.
+Approving sends exactly the checked rows. Leaving rows out after the target
+was read needs deployment protocol 4 on the target. Values that cannot be
+deployed are listed under "Missing", grouped by why, without a checkbox. The
+decrypting key is named the same way as the login key. The dialog is as
+wide as its longest group header and identifier, as far as the screen
+allows, and scrolls vertically instead of cutting rows. Step 3/3 is the
+result: how many values were sent, generated, left out and missing.
+
 The operator starts a deployment. Press `D` in the tree to pick a host (the
 host of the selected row is preselected), or run from the backend host:
 

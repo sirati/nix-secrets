@@ -43,15 +43,14 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
             Ok(()) => Completion::KeypairGenerated(path),
             Err(error) => Completion::Failed(error),
         },
-        Command::Approval(accepted) => match controller.approval(accepted) {
-            Ok(None) if accepted => Completion::Deployed {
-                generated: controller.take_generated(),
-                skipped: controller.take_skipped(),
-            },
-            Ok(next) => Completion::ApprovalDone(next.map(Box::new)),
-            // A failed deployment is final; the dialog closes.
-            Err(error) => Completion::ApprovalLost(error),
-        },
+        Command::Approval(accepted) => {
+            let result = controller.approval(accepted);
+            approval_done(controller, accepted, result)
+        }
+        Command::ApprovalWith(accepted, unchecked) => {
+            let result = controller.approval_with(accepted, &unchecked);
+            approval_done(controller, accepted, result)
+        }
         Command::SaveProfile {
             name,
             profile,
@@ -78,5 +77,22 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
                 Err(error) => Completion::Failed(error),
             }
         }
+    }
+}
+
+fn approval_done(
+    controller: &mut Controller,
+    accepted: bool,
+    result: Result<Option<ApprovalRequest>, String>,
+) -> Completion {
+    match result {
+        Ok(None) if accepted => Completion::Deployed {
+            generated: controller.take_generated(),
+            skipped: controller.take_skipped(),
+            summary: controller.take_summary(),
+        },
+        Ok(next) => Completion::ApprovalDone(next.map(Box::new)),
+        // A failed deployment is final; the dialog closes.
+        Err(error) => Completion::ApprovalLost(error),
     }
 }

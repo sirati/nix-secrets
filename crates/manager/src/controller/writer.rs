@@ -265,6 +265,16 @@ impl SecretWriter for Controller {
     fn approval(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
         self.approval_inner(accepted)
     }
+    fn approval_with(
+        &mut self,
+        accepted: bool,
+        unchecked: &BTreeSet<String>,
+    ) -> Result<Option<UiApproval>, String> {
+        if let Some(active) = &mut self.active {
+            active.unchecked = unchecked.clone();
+        }
+        self.approval_inner(accepted)
+    }
     fn request_deployment(&mut self, host: &str) -> Result<(), String> {
         self.client
             .request_deployment(host, false)

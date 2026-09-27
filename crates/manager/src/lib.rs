@@ -10,6 +10,7 @@ pub mod deploy_command;
 pub mod deployment;
 pub mod editor;
 pub mod generator;
+pub mod key_names;
 pub mod keypair;
 pub mod model;
 pub mod operator_channel;
