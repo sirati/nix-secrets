@@ -9,7 +9,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// The groups of values that cannot be deployed yet, in display order.
-const BLOCKING: [&str; 3] = [
+const BLOCKING: [&str; 4] = [
+    "Cannot deploy",
     "Needs input",
     "Filled by another host",
     "Derived from unset source",

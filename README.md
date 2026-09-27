@@ -462,12 +462,31 @@ Missing values never block a deployment: two hosts that need each other's
 values could otherwise never be deployed. Everything that can be deployed is
 deployed, and the dialog and the result list every other value, grouped by
 why: it needs input, it is filled by another host (a public-key inventory
-that other hosts' `registerAt` keys fill), or it is derived from an unset
-source. Each service waits only for its own values, so a partial deployment
-is safe: a missing value keeps only its own consumers waiting.
-`--allow-partial` is accepted for compatibility and changes nothing. Public
-information with `installDefaultIfMissing` that is unset in the store is not
-sent; the host keeps the default it installs.
+that other hosts' `registerAt` keys fill), it is derived from an unset
+source, or the host cannot receive it yet. Each service waits only for its
+own values, so a partial deployment is safe: a missing value keeps only its
+own consumers waiting. `--allow-partial` is accepted for compatibility and
+changes nothing. Public information with `installDefaultIfMissing` that is
+unset in the store and has no `defaultValue` is not sent; the host keeps the
+default it installs.
+
+The backend holds the host's whole evaluated configuration, so "cannot
+deploy" is decided before the host-key scan, any SSH connection or any
+1Password prompt:
+
+- a Storage Box task whose `knownHostsFile` is not public information of the
+  host for its server, or has neither a stored value nor a `defaultValue`
+  holding a key for that server;
+- a value that needs a newer receiver than the host's
+  `deployment.protocolVersion`, which the module takes from its receiver
+  package: generation on the target (2), another host's shared secret or
+  `tomlPath` (3), public information with several hosts or lines (4);
+- a derived value whose source cannot be generated in this deployment.
+
+A forwarder key that is not an OpenSSH public key refuses the deployment
+before connecting. When nothing can be deployed the dialog opens without
+contacting the host. The target checks everything again and reports a
+missing prerequisite as "not deployed: <reason>" naming the path.
 
 The target validates the request again, stages the complete update, and then
 atomically publishes it below:

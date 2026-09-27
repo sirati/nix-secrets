@@ -47,6 +47,9 @@ pub enum MissingKind {
     FilledByAnotherHost,
     /// Derived from a value that is unset.
     DerivedFromUnset,
+    /// The host cannot receive it yet, found before connecting: a missing
+    /// prerequisite on the host or a receiver too old for it.
+    CannotDeploy,
 }
 
 impl MissingKind {
@@ -55,6 +58,7 @@ impl MissingKind {
             Self::NeedsInput => "Needs input",
             Self::FilledByAnotherHost => "Filled by another host",
             Self::DerivedFromUnset => "Derived from unset source",
+            Self::CannotDeploy => "Cannot deploy",
         }
     }
 }
@@ -70,7 +74,7 @@ impl UnsetPlan {
                 .all(|(identifier, _)| self.skippable.contains(identifier))
     }
 
-    fn miss(&mut self, identifier: &str, kind: MissingKind, reason: String) {
+    pub(crate) fn miss(&mut self, identifier: &str, kind: MissingKind, reason: String) {
         self.missing.push((identifier.to_owned(), reason));
         self.skippable.push(identifier.to_owned());
         self.reasons.insert(identifier.to_owned(), kind);
@@ -211,6 +215,8 @@ pub(crate) fn plan_unset(
             plan.miss(&identifier, MissingKind::DerivedFromUnset, reason);
         }
     }
+    // What the host's configuration shows it cannot receive yet.
+    super::preflight::check(schema, identifiers, set, &mut plan);
     Ok(plan)
 }
 
