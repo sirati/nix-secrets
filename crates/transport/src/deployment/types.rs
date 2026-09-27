@@ -86,6 +86,10 @@ pub struct PublicInfoAttestation {
     pub shared_id: String,
     pub expected_ssh_host: String,
     pub expected_ssh_port: u16,
+    /// Further hosts the value may name; empty for a single host, so an
+    /// older peer reads the same attestation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_ssh_hosts: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -197,6 +201,10 @@ pub enum DeploymentResult {
         generated_public_keys: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         generated_records: BTreeMap<String, GeneratedRecord>,
+        /// Protocol 4: values left out because a prerequisite is absent on
+        /// the target, with why. The rest was published.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        not_deployed: BTreeMap<String, String>,
     },
     Rejected {
         message: String,
@@ -209,6 +217,7 @@ pub struct AppliedOutput {
     pub versions: BTreeMap<String, String>,
     pub generated_public_keys: BTreeMap<String, String>,
     pub generated_records: BTreeMap<String, GeneratedRecord>,
+    pub not_deployed: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -254,5 +263,17 @@ impl From<serde_json::Error> for DeploymentError {
 impl From<io::Error> for DeploymentError {
     fn from(v: io::Error) -> Self {
         Self::Io(v)
+    }
+}
+
+impl PublicInfoAttestation {
+    /// Every host the known_hosts value may name.
+    pub fn hosts(&self) -> Vec<&str> {
+        let mut hosts = std::iter::once(self.expected_ssh_host.as_str())
+            .chain(self.expected_ssh_hosts.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        hosts.sort_unstable();
+        hosts.dedup();
+        hosts
     }
 }

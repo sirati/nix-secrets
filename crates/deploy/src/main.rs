@@ -3,7 +3,7 @@
 use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_deploy::{
     install_public_default, load_and_validate_manifest, load_mock_values, load_target_state,
-    mock_install, run_generated_tasks, run_value_generation, system_hostname, Deployer,
+    mock_install, run_generated_tasks_with, run_value_generation, system_hostname, Deployer,
     DeploymentBatch, SecretDeployment, SystemHost,
 };
 use nix_secrets_transport::{serve_deployment, AppliedOutput};
@@ -142,8 +142,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 contents_base64: std::mem::take(&mut entry.contents_base64),
             })
             .collect::<Vec<_>>();
-        let generated = run_generated_tasks(path, &hostname, &batch.tasks)
-            .map_err(|error| error.to_string())?;
+        let generated = run_generated_tasks_with(path, &hostname, &batch.tasks, &entries)
+            .map_err(|error| format!("running the target tasks: {error}"))?;
+        // A task whose prerequisite is absent here is left out; the rest of
+        // the batch deploys and the operator learns why.
+        requested_identifiers.retain(|identifier| !generated.not_deployed.contains_key(identifier));
         entries.extend(generated.deployments);
         let values = run_value_generation(
             path,
@@ -154,15 +157,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &AgeCommandProvider::new(age.clone()),
             &mut SystemHost,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("generating values: {error}"))?;
         entries.extend(values.deployments);
         let local = DeploymentBatch {
             version: u32::from(batch.version),
             requested_identifiers,
             entries,
         };
+        if local.requested_identifiers.is_empty() {
+            // Everything requested was left out: publish nothing.
+            return Ok(AppliedOutput {
+                versions: current_versions(&deployer, &public_deployer)?,
+                generated_public_keys: generated.public_keys,
+                generated_records: values.records,
+                not_deployed: generated.not_deployed,
+            });
+        }
         let resolved = load_and_validate_manifest(path, &hostname, &local)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("validating the batch against {}: {error}", path.display()))?;
         let audit_details = resolved.audit_details();
         let (secrets, public) = resolved.partition();
         let mut previous = std::collections::BTreeMap::new();
@@ -194,19 +206,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         eprintln!("nix-secrets-audit: {audit}");
-        let mut versions = deployer
-            .current_versions()
-            .map_err(|error| error.to_string())?;
-        versions.extend(
-            public_deployer
-                .current_versions()
-                .map_err(|error| error.to_string())?,
-        );
         Ok(AppliedOutput {
-            versions,
+            versions: current_versions(&deployer, &public_deployer)?,
             generated_public_keys: generated.public_keys,
             generated_records: values.records,
+            not_deployed: generated.not_deployed,
         })
     })?;
     Ok(())
+}
+
+fn current_versions(
+    deployer: &Deployer,
+    public_deployer: &Deployer,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let mut versions = deployer
+        .current_versions()
+        .map_err(|error| format!("reading the installed versions: {error}"))?;
+    versions.extend(
+        public_deployer
+            .current_versions()
+            .map_err(|error| format!("reading the installed public information: {error}"))?,
+    );
+    Ok(versions)
 }

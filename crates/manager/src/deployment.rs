@@ -201,6 +201,7 @@ pub fn deploy(
             versions,
             generated_public_keys,
             generated_records,
+            not_deployed,
         } => {
             if generated_records
                 .keys()
@@ -214,10 +215,11 @@ pub fn deploy(
                 versions,
                 generated_public_keys,
                 generated_records,
+                not_deployed,
             })
         }
         DeploymentResult::Rejected { message } => {
-            Err(format!("target rejected deployment: {message}"))
+            Err(format!("the target rejected the deployment: {message}"))
         }
     }
 }

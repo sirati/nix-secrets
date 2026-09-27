@@ -128,6 +128,7 @@ fn flatten_target(
                         shared_id: shared_id.clone(),
                         expected_ssh_host: leaf.expected_ssh_host.clone().unwrap_or_default(),
                         expected_ssh_port: leaf.expected_ssh_port.unwrap_or_default(),
+                        expected_ssh_hosts: leaf.expected_ssh_hosts.clone(),
                     }
                 }),
                 current_version_id: versions.get(&identifier).cloned(),
@@ -271,7 +272,7 @@ fn validate_manifest(
                 .map_err(|_| DeployError::Invalid("public-info value is not UTF-8".into()))?;
             nix_secrets_core::schema::validate_ssh_known_hosts(
                 text,
-                &public.expected_ssh_host,
+                &public.hosts(),
                 public.expected_ssh_port,
             )
             .map_err(|error| DeployError::Invalid(error.into()))?;

@@ -16,4 +16,4 @@ pub use manifest::{load_and_validate_manifest, load_target_state, system_hostnam
 pub use mock::{load_mock_values, mock_install, MockReport};
 pub use public_default::install_public_default;
 pub use schema::{AuditDetail, DeploymentBatch, ResolvedBatch, SecretClass, SecretDeployment};
-pub use tasks::run_generated_tasks;
+pub use tasks::{run_generated_tasks, run_generated_tasks_with};

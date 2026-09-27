@@ -8,7 +8,9 @@ pub struct SecretSpec {
     pub shared_public_id: Option<String>,
     pub expected_ssh_host: Option<String>,
     pub expected_ssh_port: Option<u16>,
+    pub expected_ssh_hosts: Vec<String>,
     pub install_default_if_missing: bool,
+    pub default_value: Option<String>,
     pub description: Option<String>,
     pub human_facing: bool,
     pub external_input_required: bool,
@@ -67,4 +69,25 @@ impl LeafSpec {
             Self::Operator(spec) => &spec.recipient_names,
         }
     }
+}
+
+impl SecretSpec {
+    /// Every host a public-info known_hosts value may name.
+    pub fn ssh_hosts(&self) -> Vec<&str> {
+        ssh_hosts(self.expected_ssh_host.as_deref(), &self.expected_ssh_hosts)
+    }
+}
+
+impl super::SecretLeaf {
+    /// Every host a public-info known_hosts value may name.
+    pub fn ssh_hosts(&self) -> Vec<&str> {
+        ssh_hosts(self.expected_ssh_host.as_deref(), &self.expected_ssh_hosts)
+    }
+}
+
+fn ssh_hosts<'a>(single: Option<&'a str>, more: &'a [String]) -> Vec<&'a str> {
+    let mut hosts = single.into_iter().chain(more.iter().map(String::as_str)).collect::<Vec<_>>();
+    hosts.sort_unstable();
+    hosts.dedup();
+    hosts
 }

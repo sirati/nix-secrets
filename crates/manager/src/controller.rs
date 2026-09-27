@@ -371,17 +371,19 @@ impl Controller {
                         .shared_public_id
                         .as_deref()
                         .ok_or("public info has no shared ID")?;
-                    let record = self
+                    // The stored value, else the leaf's own defaultValue.
+                    let record = match self
                         .client
                         .get_public_info(id)
                         .map_err(|error| error.to_string())?
-                        .ok_or_else(|| format!("required public info is unset: {identifier}"))?;
+                    {
+                        Some(record) => record,
+                        None => public_info::default_record(public)
+                            .ok_or_else(|| format!("required public info is unset: {identifier}"))?,
+                    };
                     nix_secrets_core::schema::validate_ssh_known_hosts(
                         &record.value,
-                        public
-                            .expected_ssh_host
-                            .as_deref()
-                            .ok_or("missing expected SSH host")?,
+                        &public.ssh_hosts(),
                         public
                             .expected_ssh_port
                             .ok_or("missing expected SSH port")?,
@@ -459,6 +461,14 @@ impl Controller {
         let stored = self.store_generated(&applied.generated_records);
         let registered = self.register_public_keys(&source_host, &applied.generated_public_keys);
         let active = self.active.take().expect("approval remains active");
+        // Values the target left out because a prerequisite is absent there.
+        skipped.extend(applied.not_deployed.keys().cloned());
+        plan.missing.extend(
+            applied
+                .not_deployed
+                .iter()
+                .map(|(identifier, reason)| (identifier.clone(), format!("not deployed: {reason}"))),
+        );
         let skipped = skipped
             .iter()
             .map(|identifier| {

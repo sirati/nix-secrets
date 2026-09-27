@@ -25,6 +25,8 @@ pub(super) fn validate_tree(
                 SecretKind::Secret => {
                     if leaf.shared_public_id.is_some()
                         || leaf.expected_ssh_host.is_some()
+                        || !leaf.expected_ssh_hosts.is_empty()
+                        || leaf.default_value.is_some()
                         || leaf.expected_ssh_port.is_some()
                         || leaf.install_default_if_missing
                     {
@@ -119,49 +121,100 @@ fn validate_public_destination(
             "public-info destination must be its root-owned 0644 known-hosts path",
         ));
     }
-    let host = leaf
-        .expected_ssh_host
-        .as_deref()
-        .ok_or_else(|| invalid(path, "expectedSshHost is required"))?;
-    if host.is_empty()
-        || host.len() > 253
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+    if leaf.expected_ssh_host.is_none() {
+        return Err(invalid(path, "expectedSshHost is required"));
+    }
+    let hosts = leaf.ssh_hosts();
+    if hosts.len() > 64
+        || hosts.iter().any(|host| {
+            host.is_empty()
+                || host.len() > 253
+                || !host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+        })
         || leaf.expected_ssh_port.unwrap_or(0) == 0
     {
         return Err(invalid(path, "invalid expected SSH host or port"));
     }
+    if let Some(value) = &leaf.default_value {
+        validate_ssh_known_hosts(value, &hosts, leaf.expected_ssh_port.unwrap_or(0))
+            .map_err(|error| invalid(path, &format!("invalid defaultValue: {error}")))?;
+    }
     Ok(())
 }
 
-pub fn validate_ssh_known_hosts(value: &str, host: &str, port: u16) -> Result<(), &'static str> {
-    if value.len() > 4096 || value.contains('\r') {
+/// The largest public-info known_hosts value.
+pub const MAX_KNOWN_HOSTS_BYTES: usize = 64 * 1024;
+const MAX_KNOWN_HOSTS_LINES: usize = 256;
+
+/// Checks a public-info known_hosts value: one or more canonical lines
+/// `[host]:port algorithm key`, each naming one of `hosts` on `port`, with an
+/// Ed25519, ECDSA or RSA key, no markers, wildcards, host lists or duplicates.
+pub fn validate_ssh_known_hosts(value: &str, hosts: &[&str], port: u16) -> Result<(), &'static str> {
+    known_hosts_lines(value, hosts, port).map(|_| ())
+}
+
+/// The `algorithm key` pins a validated known_hosts value holds for `host`.
+pub fn known_hosts_keys(
+    value: &str,
+    hosts: &[&str],
+    port: u16,
+    host: &str,
+) -> Result<Vec<String>, &'static str> {
+    Ok(known_hosts_lines(value, hosts, port)?
+        .into_iter()
+        .filter(|(name, _)| *name == host)
+        .map(|(_, key)| key)
+        .collect())
+}
+
+fn known_hosts_lines<'a>(
+    value: &'a str,
+    hosts: &[&str],
+    port: u16,
+) -> Result<Vec<(&'a str, String)>, &'static str> {
+    if value.len() > MAX_KNOWN_HOSTS_BYTES || value.contains('\r') {
         return Err("known_hosts value is too large or contains carriage return");
     }
-    let line = value.strip_suffix('\n').unwrap_or(value);
-    if line.contains('\n') {
-        return Err("known_hosts must contain exactly one key line");
+    let body = value.strip_suffix('\n').unwrap_or(value);
+    if body.is_empty() {
+        return Err("known_hosts value is empty");
     }
-    let parts = line.split_ascii_whitespace().collect::<Vec<_>>();
-    if parts.len() != 3 || parts[0] != format!("[{host}]:{port}") || parts[1] != "ssh-ed25519" {
-        return Err("known_hosts host, port, or key type does not match the schema");
+    let mut seen = std::collections::BTreeSet::new();
+    let mut lines = Vec::new();
+    for line in body.split('\n') {
+        if lines.len() == MAX_KNOWN_HOSTS_LINES {
+            return Err("known_hosts value has too many lines");
+        }
+        if line.contains(['*', '?', ',', '@', '|', '#']) {
+            return Err("known_hosts markers, wildcards, and host lists are forbidden");
+        }
+        let parts = line.split_ascii_whitespace().collect::<Vec<_>>();
+        if parts.len() != 3 || line != format!("{} {} {}", parts[0], parts[1], parts[2]) {
+            return Err("known_hosts must use canonical `[host]:port algorithm key` lines");
+        }
+        let host = hosts
+            .iter()
+            .copied()
+            .find(|host| parts[0] == format!("[{host}]:{port}"))
+            .ok_or("known_hosts host or port does not match the schema")?;
+        let host = &parts[0][1..1 + host.len()];
+        let key = ssh_key::PublicKey::from_openssh(&format!("{} {}", parts[1], parts[2]))
+            .map_err(|_| "invalid known_hosts key")?;
+        if !matches!(
+            key.algorithm(),
+            ssh_key::Algorithm::Ed25519 | ssh_key::Algorithm::Ecdsa { .. } | ssh_key::Algorithm::Rsa { .. }
+        ) || key.algorithm().as_str() != parts[1]
+        {
+            return Err("known_hosts key must be Ed25519, ECDSA or RSA");
+        }
+        if !seen.insert((parts[0], parts[2])) {
+            return Err("known_hosts value repeats a line");
+        }
+        lines.push((host, format!("{} {}", parts[1], parts[2])));
     }
-    if parts
-        .iter()
-        .any(|part| part.contains(['*', '?', ',', '@', '|', '#']))
-    {
-        return Err("known_hosts markers, wildcards, and host lists are forbidden");
-    }
-    if line != format!("{} {} {}", parts[0], parts[1], parts[2]) {
-        return Err("known_hosts must use one canonical line");
-    }
-    let key = ssh_key::PublicKey::from_openssh(&format!("ssh-ed25519 {}", parts[2]))
-        .map_err(|_| "invalid Ed25519 known_hosts key")?;
-    if key.algorithm() != ssh_key::Algorithm::Ed25519 {
-        return Err("known_hosts key is not Ed25519");
-    }
-    Ok(())
+    Ok(lines)
 }
 
 fn validate_description(path: &SecretPath, description: Option<&str>) -> Result<(), SchemaError> {

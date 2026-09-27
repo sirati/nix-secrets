@@ -20,13 +20,12 @@ impl Controller {
         let spec = self.public_spec(path)?.ok_or("not a public-info leaf")?;
         let id = spec
             .shared_public_id
+            .clone()
             .ok_or("public-info has no shared ID")?;
         let text = std::str::from_utf8(value).map_err(|_| "public info is not UTF-8")?;
         nix_secrets_core::schema::validate_ssh_known_hosts(
             text,
-            spec.expected_ssh_host
-                .as_deref()
-                .ok_or("missing expected SSH host")?,
+            &spec.ssh_hosts(),
             spec.expected_ssh_port.ok_or("missing expected SSH port")?,
         )
         .map_err(str::to_owned)?;
@@ -118,10 +117,11 @@ impl Controller {
                 continue;
             };
             if let Ok(LeafSpec::Stored(spec)) = self.schema.leaf(&path) {
-                if spec
-                    .shared_public_id
-                    .as_ref()
-                    .is_some_and(|id| public.contains_key(id))
+                if spec.default_value.is_some()
+                    || spec
+                        .shared_public_id
+                        .as_ref()
+                        .is_some_and(|id| public.contains_key(id))
                 {
                     set.insert(identifier.clone());
                 }
@@ -129,4 +129,17 @@ impl Controller {
         }
         Ok(set)
     }
+}
+
+/// A public-info leaf's `defaultValue` as a record. Its version is the
+/// SHA-256 of the value, as the host's default-install unit names it, so a
+/// host that installed the default is not sent it again.
+pub(super) fn default_record(
+    spec: &nix_secrets_core::SecretSpec,
+) -> Option<nix_secrets_core::PublicInfoRecord> {
+    use sha2::Digest;
+    let value = spec.default_value.clone()?;
+    let digest = sha2::Sha256::digest(value.as_bytes());
+    let version_id = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    Some(nix_secrets_core::PublicInfoRecord { version_id, value })
 }

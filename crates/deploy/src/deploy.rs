@@ -22,6 +22,29 @@ const RETAINED_GENERATIONS: usize = 3;
 pub enum DeployError {
     Invalid(String),
     Io(io::Error),
+    /// An I/O failure with the step and path it happened in.
+    Context(String, io::Error),
+    /// A prerequisite of one value is absent on this host, such as a
+    /// known_hosts file that is not installed yet. That value is left out
+    /// and reported; the rest of the batch deploys.
+    Missing(String),
+}
+
+impl DeployError {
+    /// `reading /path for task X: No such file or directory`.
+    pub fn context(step: &str, error: io::Error) -> Self {
+        Self::Context(step.to_owned(), error)
+    }
+
+    /// Adds the step to an error that does not name one yet.
+    pub fn during(self, step: &str) -> Self {
+        match self {
+            Self::Io(error) => Self::Context(step.to_owned(), error),
+            Self::Context(inner, error) => Self::Context(format!("{step}: {inner}"), error),
+            Self::Invalid(message) => Self::Invalid(format!("{step}: {message}")),
+            missing @ Self::Missing(_) => missing,
+        }
+    }
 }
 
 impl fmt::Display for DeployError {
@@ -29,6 +52,8 @@ impl fmt::Display for DeployError {
         match self {
             Self::Invalid(message) => formatter.write_str(message),
             Self::Io(error) => error.fmt(formatter),
+            Self::Context(step, error) => write!(formatter, "{step}: {error}"),
+            Self::Missing(message) => write!(formatter, "not deployed: {message}"),
         }
     }
 }
@@ -91,7 +116,9 @@ impl Deployer {
         &self,
         batch: &ResolvedBatch,
     ) -> Result<BTreeMap<String, String>, DeployError> {
-        self.deploy_inner(batch, None)
+        self.deploy_inner(batch, None).map_err(|error| {
+            error.during(&format!("publishing a generation under {}", self.root.display()))
+        })
     }
 
     fn deploy_inner(

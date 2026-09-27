@@ -18,19 +18,21 @@ impl SecretStore {
         value: PublicInfoRecord,
         expected_version: Option<&str>,
     ) -> Result<(), StoreError> {
+        let spec = schema.secret(path)?;
         let crate::schema::SecretSpec {
             kind: SecretKind::PublicInfo,
             shared_public_id: Some(id),
-            expected_ssh_host: Some(host),
+            expected_ssh_host: Some(_),
             expected_ssh_port: Some(port),
             ..
-        } = schema.secret(path)?
+        } = spec.clone()
         else {
             return Err(StoreError::InvalidPublicInfo);
         };
+        let hosts = spec.ssh_hosts();
         if value.version_id.len() != 32
             || !value.version_id.bytes().all(|b| b.is_ascii_hexdigit())
-            || validate_ssh_known_hosts(&value.value, &host, port).is_err()
+            || validate_ssh_known_hosts(&value.value, &hosts, port).is_err()
         {
             return Err(StoreError::InvalidPublicInfo);
         }

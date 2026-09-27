@@ -62,6 +62,7 @@ where
             versions: output.versions,
             generated_public_keys: output.generated_public_keys,
             generated_records: output.generated_records,
+            not_deployed: output.not_deployed,
         },
         Err(message) => DeploymentResult::Rejected { message },
     };

@@ -46,7 +46,7 @@ pub fn install_public_default(
         return Ok(());
     }
     let metadata = fs::metadata(source)?;
-    if !metadata.is_file() || metadata.len() > 4096 {
+    if !metadata.is_file() || metadata.len() > nix_secrets_core::schema::MAX_KNOWN_HOSTS_BYTES as u64 {
         return Err(DeployError::Invalid(
             "public default source is invalid".into(),
         ));
