@@ -535,6 +535,7 @@ mod background;
 mod generate;
 mod metadata;
 mod operator;
+mod preflight;
 mod public_info;
 mod registration;
 mod ssh_validation;

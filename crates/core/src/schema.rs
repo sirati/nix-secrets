@@ -58,6 +58,10 @@ pub struct DeploymentMetadata {
     /// not cut off by the server's MaxAuthTries before the right one.
     #[serde(rename = "identityPublicKeys", default, skip_serializing_if = "Vec::is_empty")]
     pub identity_public_keys: Vec<String>,
+    /// The deployment protocol the host's receiver speaks, when known from
+    /// its configuration.
+    #[serde(rename = "protocolVersion", default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

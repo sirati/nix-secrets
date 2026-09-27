@@ -52,6 +52,13 @@ impl Controller {
                 return Err("target host is absent from schema".into());
             }
         };
+        // Refused from the host's configuration alone, before connecting.
+        if let Some(error) = super::super::preflight::refusal(&self.schema, &request.target) {
+            self.client
+                .resolve(request.id, lease_id, false, Some(error.clone()))
+                .map_err(|e| e.to_string())?;
+            return Err(error);
+        }
         let connection = Connection {
             name: request.target.clone(),
             identity_public_keys: host.metadata.deployment.identity_public_keys.clone(),
@@ -79,6 +86,26 @@ impl Controller {
                 return Err(error);
             }
         };
+        // Nothing can be deployed: show why without scanning or connecting.
+        if selected.secrets.is_empty() {
+            self.active = Some(ActiveApproval {
+                request,
+                lease_id,
+                connection,
+                expected,
+                identity: HostIdentity {
+                    host: String::new(),
+                    port: 0,
+                    keys: vec![],
+                    other_names_with_keys: vec![],
+                },
+                prepared: None,
+                target_approved: true,
+                last_error: None,
+                renewed_at: Instant::now(),
+            });
+            return Ok(Some(details));
+        }
         let host_key = match deployment::preflight(&connection) {
             Ok(preflight) => preflight,
             Err(error) => {

@@ -64,8 +64,8 @@ let
       defaultRecipientPublicKeys
       recipientPublicKeys
       defaultRecipientNames
-      deployment
       ;
+    deployment = lib.filterAttrs (_: value: value != null) cfg.deployment;
     services = normalizeServiceSet cfg.services;
     userServices = lib.mapAttrs (_: normalizeServiceSet) cfg.userServices;
     serviceDisplayPaths = {
@@ -215,6 +215,18 @@ in
           must be the keys the forwarder authorizes; the frontend asks its
           ssh-agent to sign with one of them, so an agent holding many keys is
           not cut off by sshd's MaxAuthTries before reaching the right one.
+        '';
+      };
+      protocolVersion = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = cfg.receiver.package.passthru.deploymentProtocolVersion or null;
+        defaultText = lib.literalExpression "the receiver package's deployment protocol";
+        description = ''
+          The deployment protocol this host's receiver speaks, from the
+          package it is built with. The frontend checks before connecting
+          that the host supports every feature a deployment uses; values that
+          need a newer receiver are listed as not deployed. null: unknown,
+          checked only after connecting.
         '';
       };
     };
