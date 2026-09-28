@@ -24,10 +24,7 @@ fn main() {
         .is_some()
     {
         with_secrets(arguments.collect())
-    } else if arguments
-        .next_if(|argument| argument == "deploy")
-        .is_some()
-    {
+    } else if arguments.next_if(|argument| argument == "deploy").is_some() {
         deploy(arguments.collect())
     } else {
         run(arguments.collect()).map(|()| 0)
@@ -66,7 +63,11 @@ fn pipe_secret(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Erro
             let home = home()?;
             let stream =
                 with_secrets::connect_backend(&invocation.options, &runtime_directory(&home))?;
-            let session = with_secrets::request(stream, std::slice::from_ref(identifier))?;
+            let session = with_secrets::request(
+                stream,
+                std::slice::from_ref(identifier),
+                invocation.options.reason.as_deref(),
+            )?;
             let value = nix_secrets_core::secret_session::fetch(&session.socket, identifier);
             session.end()?;
             value.map_err(|error| format!("{identifier}: {error}"))?
@@ -122,7 +123,11 @@ fn with_secrets(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Err
     }
     let home = home()?;
     let stream = with_secrets::connect_backend(&invocation.options, &runtime_directory(&home))?;
-    let session = with_secrets::request(stream, &invocation.identifiers)?;
+    let session = with_secrets::request(
+        stream,
+        &invocation.identifiers,
+        invocation.options.reason.as_deref(),
+    )?;
     let status = command.env(SESSION_ENVIRONMENT, &session.socket).status();
     let ended = session.end();
     let status = status.map_err(|error| format!("cannot run {program:?}: {error}"))?;
@@ -147,11 +152,17 @@ fn deploy(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
             0
         }
         Outcome::Rejected(reason) => {
-            eprintln!("nix-secrets: deployment of {} not done: {reason}", invocation.host);
+            eprintln!(
+                "nix-secrets: deployment of {} not done: {reason}",
+                invocation.host
+            );
             1
         }
         Outcome::Cancelled => {
-            eprintln!("nix-secrets: the deployment request of {} was cancelled", invocation.host);
+            eprintln!(
+                "nix-secrets: the deployment request of {} was cancelled",
+                invocation.host
+            );
             1
         }
     })

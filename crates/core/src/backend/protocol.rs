@@ -124,6 +124,8 @@ pub enum Request {
     /// socket until [`Request::EndSecretSession`] or a disconnect.
     RequestSecrets {
         identifiers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     EndSecretSession,
     /// Asks the registered frontends to deploy every deployable value of

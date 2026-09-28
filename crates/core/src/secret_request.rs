@@ -10,6 +10,7 @@ use zeroize::Zeroize;
 
 /// Most identifiers one request may name.
 pub const MAX_REQUEST_IDENTIFIERS: usize = 256;
+pub const MAX_REQUEST_REASON_BYTES: usize = 4096;
 /// Longest argv shown for a process; the rest is cut.
 const MAX_ARGV_BYTES: usize = 16 * 1024;
 const MAX_ARGUMENTS: usize = 256;
@@ -92,6 +93,9 @@ pub fn is_same_or_descendant(pid: u32, ancestor: u32) -> bool {
 pub struct SecretRequest {
     pub id: String,
     pub identifiers: Vec<String>,
+    /// Requester-supplied explanation, not verified by the backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// The process that connected to the backend, read from `/proc`.
     pub requester: ProcessInfo,
     /// Its parent, which is usually the program that wants the values.

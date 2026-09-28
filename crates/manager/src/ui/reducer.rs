@@ -39,7 +39,9 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         (Mode::Browse, UiEvent::Character('T')) => model.mode = Mode::TreeOrder { selected: 0 },
         (Mode::Browse, UiEvent::Character('C')) => commit::open(model, writer),
         (Mode::Browse, UiEvent::Character('D')) => model.open_deploy_picker(),
-        (Mode::DeployHost { selected }, event) => deploy_host::reduce(model, writer, selected, event),
+        (Mode::DeployHost { selected }, event) => {
+            deploy_host::reduce(model, writer, selected, event)
+        }
         (mode @ Mode::Commit { .. }, event) => commit::reduce(model, writer, mode, event),
         (Mode::Browse, UiEvent::Character('S')) => model.mode = Mode::Profiles { selected: 0 },
         (
@@ -262,12 +264,21 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
             let scroll = match event {
                 UiEvent::Up => model.scrolled(scroll, false),
                 UiEvent::Down => model.scrolled(scroll, true),
-                UiEvent::Character('c') => {
-                    report(model, writer.copy(&value).map(|()| "value copied".into()));
+                UiEvent::Character('c') | UiEvent::Enter => {
+                    let result = writer.copy(&value);
+                    let accepted = result.is_ok()
+                        || matches!(&result, Err(error) if error == OPERATION_QUEUED);
+                    report(model, result.map(|()| "value copied".into()));
+                    if event == UiEvent::Enter && accepted {
+                        if let Some(dialog) = underneath {
+                            model.mode = *dialog;
+                        }
+                        return Action::Continue;
+                    }
                     scroll
                 }
                 // Closing returns to the dialog it was opened from, if any.
-                UiEvent::Escape | UiEvent::Enter => {
+                UiEvent::Escape => {
                     if let Some(dialog) = underneath {
                         model.mode = *dialog;
                     }

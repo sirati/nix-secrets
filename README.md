@@ -57,7 +57,10 @@ asked. The TUI shows a modal over whatever is open: a table of the values
 and their kinds, the recipient and its short fingerprint, where the private
 key comes from, the requesting command, its directory and parent, and a
 countdown. `d` or the Details button shows full descriptions, fingerprints
-and command lines. Only Ctrl+Shift+Y or the Yes button sends; n, Enter and
+and process information. Descriptions and command lines wrap in the summary.
+Both commands accept `--reason TEXT`, shown as "Requestor provides unvalidated
+reason"; this explanation comes from the caller, while process identity is
+read by the backend from the kernel. Only Ctrl+Shift+Y or the Yes button sends; n, Enter and
 Esc deny, and after 120 seconds the request is denied. On approval the TUI
 decrypts the whole batch with one 1Password authorization and returns the
 values over its authenticated backend connection.

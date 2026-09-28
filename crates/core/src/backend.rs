@@ -152,8 +152,11 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
             }
             // The connection becomes the TUI's operator channel for good.
             Request::AttachOperator => return secrets::attach(&mut stream, operators, session),
-            Request::RequestSecrets { identifiers } => {
-                secrets::request(&mut stream, operators, peer_pid, identifiers)?;
+            Request::RequestSecrets {
+                identifiers,
+                reason,
+            } => {
+                secrets::request(&mut stream, operators, peer_pid, identifiers, reason)?;
                 continue;
             }
             request => request,

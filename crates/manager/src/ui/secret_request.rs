@@ -5,7 +5,6 @@
 //! Only Ctrl+Shift+Y or the Yes button approves. n, Esc and Enter deny; d
 //! toggles the details. After [`crate::operator_channel::DECISION_TIMEOUT`]
 //! the channel denies on its own and the modal closes.
-use super::terminal::ellipsize;
 use super::*;
 use crate::operator_channel::SecretPrompt;
 use nix_secrets_core::secret_request::ProcessInfo;
@@ -176,19 +175,23 @@ pub(crate) fn remaining_seconds(prompt: &SecretPrompt) -> u64 {
         .as_secs()
 }
 
-/// The modal body for an inner width of `width` columns. The summary keeps
-/// every line within `width`; the details wrap.
+/// The modal body. Long descriptions and commands wrap in the dialog.
 pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String {
     let source = key_source(&prompt.identity);
-    let fit = |line: String| ellipsize(&line, width);
     let mut lines = vec![
-        fit(format!("Approve to decrypt these once with {source}.")),
+        format!("Approve to decrypt these once with {source}."),
+        String::new(),
+        "Requestor provides unvalidated reason:".into(),
+        prompt
+            .reason
+            .clone()
+            .unwrap_or_else(|| "(none supplied)".into()),
         String::new(),
     ];
     if details {
         return details_body(prompt, lines);
     }
-    // Identifier and kind always show; the description only with room left.
+    // Descriptions get their own lines so none are lost on narrow screens.
     let id_width = prompt
         .values
         .iter()
@@ -197,42 +200,13 @@ pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String
         .max()
         .unwrap_or(0)
         .min(width * 3 / 5);
-    let kind_width = prompt
-        .values
-        .iter()
-        .map(|value| UnicodeWidthStr::width(value.kind.as_str()))
-        .chain([UnicodeWidthStr::width("Kind")])
-        .max()
-        .unwrap_or(0);
-    let rest = width.saturating_sub(id_width + kind_width + 4);
-    let with_description = rest >= 12
-        && prompt
-            .values
-            .iter()
-            .any(|value| value.description.is_some());
-    let row = |identifier: &str, kind: &str, description: &str| {
-        let mut line = format!(
-            "{}  {}",
-            pad(&ellipsize(identifier, id_width), id_width),
-            pad(kind, kind_width)
-        );
-        if with_description {
-            line.push_str("  ");
-            line.push_str(&ellipsize(description, rest));
-        }
-        fit(line.trim_end().to_owned())
-    };
-    lines.push(row(
-        "Identifier",
-        "Kind",
-        if with_description { "Description" } else { "" },
-    ));
+    let row = |identifier: &str, kind: &str| format!("{}  {kind}", pad(identifier, id_width));
+    lines.push(row("Identifier", "Kind"));
     for value in &prompt.values {
-        lines.push(row(
-            &value.identifier,
-            &value.kind,
-            value.description.as_deref().unwrap_or(""),
-        ));
+        lines.push(row(&value.identifier, &value.kind));
+        if let Some(description) = &value.description {
+            lines.push(format!("  Description: {description}"));
+        }
     }
     lines.push(String::new());
     let mut recipients: Vec<String> = Vec::new();
@@ -247,24 +221,20 @@ pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String
     } else {
         "Recipients"
     };
-    lines.push(fit(format!("{label:<10} {}", recipients.join(", "))));
-    lines.push(fit(format!("{:<10} {source}", "Key")));
+    lines.push(format!("{label:<10} {}", recipients.join(", ")));
+    lines.push(format!("{:<10} {source}", "Key"));
     let requester = &prompt.requester;
-    lines.push(fit(format!(
-        "{:<10} {}",
-        "Command",
-        requester.argv.join(" ")
-    )));
+    lines.push(format!("{:<10} {}", "Command", requester.argv.join(" ")));
     if let Some(cwd) = &requester.cwd {
-        lines.push(fit(format!("{:<10} {cwd}", "Cwd")));
+        lines.push(format!("{:<10} {cwd}", "Cwd"));
     }
     if let Some(parent) = &prompt.parent {
-        lines.push(fit(format!(
+        lines.push(format!(
             "{:<10} via {} ({})",
             "Parent",
             program_name(parent),
             parent.pid
-        )));
+        ));
     }
     lines.join("\n")
 }

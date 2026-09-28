@@ -209,6 +209,7 @@ impl Fixture {
     fn with_secrets(&self, identifiers: &[&str], script: &str) -> std::process::Child {
         Command::new(env!("CARGO_BIN_EXE_nix-secrets"))
             .arg("with-secrets")
+            .args(["--reason", "Sign the requested ns1 boot generation."])
             .arg("--backend-socket")
             .arg(&self.socket)
             .args(identifiers)
@@ -292,9 +293,16 @@ fn an_approved_batch_reaches_the_command_with_one_authorization() {
         Some("NMBL generation signing key")
     );
     let recipient = &prompt.values[1].recipients[0];
-    assert!(recipient.starts_with("operator ") && recipient.contains(": ssh-ed25519 SHA256:"), "{recipient}");
+    assert!(
+        recipient.starts_with("operator ") && recipient.contains(": ssh-ed25519 SHA256:"),
+        "{recipient}"
+    );
     assert_eq!(prompt.identity, "test identity");
     assert_eq!(prompt.requester.pid, child.id());
+    assert_eq!(
+        prompt.reason.as_deref(),
+        Some("Sign the requested ns1 boot generation.")
+    );
     assert!(prompt
         .requester
         .argv
