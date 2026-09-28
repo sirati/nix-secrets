@@ -159,6 +159,10 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                 secrets::request(&mut stream, operators, peer_pid, identifiers, reason)?;
                 continue;
             }
+            Request::RequestSshSignature { request, reason } => {
+                secrets::request_signature(&mut stream, operators, peer_pid, request, reason)?;
+                continue;
+            }
             request => request,
         };
         let update = event_after_success(&request, schema);
@@ -340,7 +344,8 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
             Request::SubscribeChanges
             | Request::Commit { .. }
             | Request::AttachOperator
-            | Request::RequestSecrets { .. } => unreachable!("handled above"),
+            | Request::RequestSecrets { .. }
+            | Request::RequestSshSignature { .. } => unreachable!("handled above"),
         }
         .unwrap_or_else(|error| Response::Error {
             message: error.to_string(),

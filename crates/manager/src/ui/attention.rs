@@ -118,6 +118,7 @@ mod tests {
     fn prompt(id: &str, executable: &str) -> SecretPrompt {
         SecretPrompt {
             id: id.into(),
+            ssh_signature: false,
             reason: None,
             values: vec![RequestedValue {
                 identifier: "host.services.a.key".into(),

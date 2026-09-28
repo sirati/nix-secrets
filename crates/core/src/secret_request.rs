@@ -96,6 +96,8 @@ pub struct SecretRequest {
     /// Requester-supplied explanation, not verified by the backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_signature: Option<crate::ssh_auth::SignatureRequest>,
     /// The process that connected to the backend, read from `/proc`.
     pub requester: ProcessInfo,
     /// Its parent, which is usually the program that wants the values.
@@ -130,6 +132,7 @@ impl std::fmt::Debug for SecretValue {
 #[serde(tag = "answer", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SecretAnswer {
     Approved { values: Vec<SecretValue> },
+    Signed { reply: Vec<u8> },
     Denied { reason: String },
 }
 

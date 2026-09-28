@@ -125,6 +125,17 @@ impl AgentProxy {
         done: &Receiver<T>,
         mut forward: impl FnMut(&[u8]) -> io::Result<Vec<u8>>,
     ) -> io::Result<T> {
+        self.serve_until_filtered(done, |message| permitted(message).is_ok(), &mut forward)
+    }
+
+    /// A separately scoped protocol may supply a stricter request filter.
+    /// Existing Git callers retain the Git-only policy in `serve_until`.
+    pub fn serve_until_filtered<T>(
+        &self,
+        done: &Receiver<T>,
+        permitted: impl Fn(&[u8]) -> bool,
+        mut forward: impl FnMut(&[u8]) -> io::Result<Vec<u8>>,
+    ) -> io::Result<T> {
         loop {
             match done.try_recv() {
                 Ok(result) => return Ok(result),
@@ -134,7 +145,7 @@ impl AgentProxy {
                 Err(TryRecvError::Empty) => {}
             }
             match self.socket.accept()? {
-                Some(stream) => self.serve_connection(stream, &mut forward)?,
+                Some(stream) => self.serve_connection(stream, &permitted, &mut forward)?,
                 None => std::thread::sleep(Duration::from_millis(10)),
             }
         }
@@ -143,12 +154,13 @@ impl AgentProxy {
     fn serve_connection(
         &self,
         mut stream: UnixStream,
+        permitted: &impl Fn(&[u8]) -> bool,
         forward: &mut impl FnMut(&[u8]) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         // A broken client connection only ends that connection.
         while let Ok(Some(message)) = read_message(&mut stream) {
-            let reply = if permitted(&message).is_ok() {
+            let reply = if permitted(&message) {
                 forward(&message)?
             } else {
                 FAILURE[4..].to_vec()

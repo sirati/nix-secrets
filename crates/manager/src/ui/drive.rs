@@ -277,6 +277,12 @@ fn apply_completion(model: &mut Model, completion: Completion) {
         Completion::SecretRequestFinished { requester, result } => {
             super::secret_request::finished(model, requester, result)
         }
+        Completion::SshSignatureFinished { requester, result } => {
+            match result {
+                Ok(()) => model.inform(format!("Returned one SSH authentication signature to {requester}; the private key stayed on this client.")),
+                Err(error) => { model.secret_prompt = None; model.fail(format!("SSH authentication for {requester} failed: {error}")); }
+            }
+        }
     }
     model.show_pending_approval();
 }

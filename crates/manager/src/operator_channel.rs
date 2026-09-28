@@ -31,6 +31,7 @@ pub struct SecretPrompt {
     pub requester: ProcessInfo,
     pub parent: Option<ProcessInfo>,
     pub reason: Option<String>,
+    pub ssh_signature: bool,
     /// When the request denies itself.
     pub deadline: Instant,
 }
@@ -63,6 +64,10 @@ pub enum ChannelEvent {
         requester: String,
         result: Result<usize, String>,
     },
+    SignatureFinished {
+        requester: String,
+        result: Result<(), String>,
+    },
     /// The channel stopped; requests can no longer reach this TUI.
     Lost(String),
 }
@@ -83,6 +88,19 @@ pub fn run(
     identity: &str,
     events: &Sender<ChannelEvent>,
     decisions: &Receiver<Decision>,
+) -> io::Result<()> {
+    run_with_agent(socket, schema, provider, identity, events, decisions, None)
+}
+
+/// An embedding client may select its own local agent explicitly.
+pub fn run_with_agent(
+    socket: &Path,
+    schema: &Schema,
+    provider: &impl CryptoProvider,
+    identity: &str,
+    events: &Sender<ChannelEvent>,
+    decisions: &Receiver<Decision>,
+    agent: Option<&Path>,
 ) -> io::Result<()> {
     let mut stream = connect_verified(socket)?;
     let mut client = BackendClient::new(connect_verified(socket)?);
@@ -118,6 +136,7 @@ pub fn run(
             identity,
             events,
             decisions,
+            agent,
         );
         write_json_sensitive(
             &mut stream,
@@ -140,7 +159,11 @@ fn handle(
     identity: &str,
     events: &Sender<ChannelEvent>,
     decisions: &Receiver<Decision>,
+    agent: Option<&Path>,
 ) -> (SecretAnswer, ChannelEvent) {
+    if let Some(signature) = &request.ssh_signature {
+        return handle_signature(request, signature, schema, events, decisions, agent);
+    }
     let prompt_for = |values| SecretPrompt {
         id: request.id.clone(),
         values,
@@ -148,6 +171,7 @@ fn handle(
         requester: request.requester.clone(),
         parent: request.parent.clone(),
         reason: request.reason.clone(),
+        ssh_signature: false,
         deadline: Instant::now() + DECISION_TIMEOUT,
     };
     let label = prompt_for(Vec::new()).requester_label();
@@ -212,4 +236,114 @@ fn handle(
         }
         Err(error) => deny(format!("decryption failed: {error}")),
     }
+}
+
+fn handle_signature(
+    request: &SecretRequest,
+    signature: &nix_secrets_core::ssh_auth::SignatureRequest,
+    schema: &Schema,
+    events: &Sender<ChannelEvent>,
+    decisions: &Receiver<Decision>,
+    agent: Option<&Path>,
+) -> (SecretAnswer, ChannelEvent) {
+    let agent_names = crate::key_names::AgentKeys::from_agent(agent.and_then(|path| path.to_str()));
+    let key_name = crate::key_names::describe(schema, &agent_names, &signature.public_key);
+    let mut prompt = SecretPrompt {
+        id: request.id.clone(),
+        values: vec![RequestedValue {
+            identifier: signature.destination.clone(), kind: "SSH authentication".into(),
+            description: Some(format!("Signing key: {key_name}. The destination is declared by the requester and cannot be verified from an agent challenge.")),
+            recipients: vec![],
+        }],
+        identity: "client SSH agent".into(), requester: request.requester.clone(),
+        parent: request.parent.clone(), reason: request.reason.clone(), ssh_signature: true,
+        deadline: Instant::now() + DECISION_TIMEOUT,
+    };
+    let label = prompt.requester_label();
+    let deny = |reason: String| {
+        (
+            SecretAnswer::Denied {
+                reason: reason.clone(),
+            },
+            ChannelEvent::SignatureFinished {
+                requester: label.clone(),
+                result: Err(reason),
+            },
+        )
+    };
+    if !request.identifiers.is_empty() {
+        return deny("SSH signatures cannot request secret values".into());
+    }
+    if let Err(error) = signature.validate() {
+        return deny(error);
+    }
+    let socket = match signature_agent(&signature.public_key, agent) {
+        Ok(socket) => socket,
+        Err(error) => return deny(error),
+    };
+    prompt.identity = if socket.ends_with(".1password/agent.sock") {
+        "1Password SSH agent on this client".into()
+    } else {
+        "SSH agent on this client".into()
+    };
+    let deadline = prompt.deadline;
+    while decisions.try_recv().is_ok() {}
+    if events.send(ChannelEvent::Prompt(prompt)).is_err() {
+        return deny("the TUI closed".into());
+    }
+    loop {
+        match decisions.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(decision) if decision.id == request.id => {
+                if !decision.approved {
+                    return deny("the operator denied SSH authentication".into());
+                }
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return deny("the operator did not approve SSH authentication in time".into())
+            }
+        }
+    }
+    match nix_secrets_core::ssh_auth::sign(&socket, signature) {
+        Ok(reply) => (
+            SecretAnswer::Signed { reply },
+            ChannelEvent::SignatureFinished {
+                requester: label,
+                result: Ok(()),
+            },
+        ),
+        Err(error) => deny(error),
+    }
+}
+
+fn signature_agent(
+    public_key: &str,
+    selected: Option<&Path>,
+) -> Result<std::path::PathBuf, String> {
+    let mut sockets = Vec::new();
+    if let Some(selected) = selected {
+        sockets.push(selected.to_owned());
+    } else {
+        if let Some(home) = std::env::var_os("HOME") {
+            sockets.push(std::path::PathBuf::from(home).join(".1password/agent.sock"));
+        }
+        if let Some(socket) = std::env::var_os("SSH_AUTH_SOCK") {
+            sockets.push(socket.into());
+        }
+    }
+    let key = nix_secrets_core::ssh_auth::key_blob(public_key)?;
+    for socket in sockets {
+        if let Ok(keys) = nix_secrets_transport::agent_keys(Some(&socket.to_string_lossy())) {
+            if keys.iter().any(|line| {
+                nix_secrets_core::ssh_auth::key_blob(line).is_ok_and(|blob| blob == key)
+            }) {
+                return Ok(socket);
+            }
+        }
+    }
+    Err(format!(
+        "the SSH key {} is absent from this client's agents",
+        crate::key_names::short_fingerprint(public_key)
+    ))
 }
