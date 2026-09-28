@@ -40,6 +40,7 @@ fn prompt(id: &str, deadline: Instant) -> SecretPrompt {
     };
     SecretPrompt {
         id: id.into(),
+        ssh_signature: false,
         reason: Some("Sign and deploy the ns1 boot generation, then reboot the server.".into()),
         values: vec![RequestedValue {
             identifier: "host.services.nmbl.generation-key".into(),
@@ -348,4 +349,36 @@ fn d_shows_the_details_and_hides_them_again() {
     writer.prompts.push(detailed_prompt());
     crate::ui::secret_request_tick_for_tests(&mut model, &mut writer);
     assert!(!model.secret_details);
+}
+
+#[test]
+fn ssh_approval_explains_signature_only_and_unvalidated_destination() {
+    let mut model = model(true);
+    let mut writer = Requests::default();
+    let mut request = prompt("ssh", Instant::now() + Duration::from_secs(120));
+    request.ssh_signature = true;
+    request.identity = "1Password SSH agent on this client".into();
+    request.values[0].identifier = "update@ns1.lamk.eu".into();
+    request.values[0].kind = "SSH authentication".into();
+    request.values[0].description = Some("Signing key: Server Updater SHA256:ZM4zdVjE. The destination cannot be verified from an agent challenge.".into());
+    writer.prompts.push(request);
+    crate::ui::secret_request_tick_for_tests(&mut model, &mut writer);
+    let summary = render(&model, 120, 40);
+    assert!(summary.contains("SSH authentication request"), "{summary}");
+    assert!(summary.contains("Server Updater"), "{summary}");
+    assert!(
+        summary.contains("Requestor provides unvalidated reason"),
+        "{summary}"
+    );
+    assert!(!summary.contains("Approve to decrypt"), "{summary}");
+    reduce(&mut model, UiEvent::Character('d'), &mut writer);
+    let details = render(&model, 120, 40);
+    assert!(
+        details.contains("private SSH key stays on this client"),
+        "{details}"
+    );
+    assert!(
+        !details.contains("The values go to the backend"),
+        "{details}"
+    );
 }

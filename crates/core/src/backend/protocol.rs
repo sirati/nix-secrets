@@ -128,6 +128,10 @@ pub enum Request {
         reason: Option<String>,
     },
     EndSecretSession,
+    RequestSshSignature {
+        request: crate::ssh_auth::SignatureRequest,
+        reason: Option<String>,
+    },
     /// Asks the registered frontends to deploy every deployable value of
     /// `target`. The backend builds the [`ApprovalRequest`] from its schema
     /// and answers [`Response::DeploymentRequested`]; the requester follows
@@ -213,6 +217,9 @@ pub enum Response {
         socket: std::path::PathBuf,
     },
     SecretSessionEnded,
+    SshSignature {
+        reply: Vec<u8>,
+    },
     /// The deployment request is queued for the frontends.
     DeploymentRequested {
         request: ApprovalRequest,

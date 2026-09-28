@@ -11,6 +11,7 @@ pub mod profiles;
 pub mod schema;
 pub mod secret_request;
 pub mod secret_session;
+pub mod ssh_auth;
 pub mod store;
 
 pub use approval::{ApprovalBroker, BrokerError};

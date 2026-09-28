@@ -24,3 +24,4 @@ pub mod ui;
 #[cfg(test)]
 mod ui_tests;
 pub mod with_secrets;
+pub mod with_ssh_agent;

@@ -24,6 +24,11 @@ fn main() {
         .is_some()
     {
         with_secrets(arguments.collect())
+    } else if arguments
+        .next_if(|argument| argument == "with-ssh-agent")
+        .is_some()
+    {
+        with_ssh_agent(arguments.collect())
     } else if arguments.next_if(|argument| argument == "deploy").is_some() {
         deploy(arguments.collect())
     } else {
@@ -36,6 +41,13 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn with_ssh_agent(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    let invocation = nix_secrets_manager::with_ssh_agent::parse(arguments, env::current_dir()?)?;
+    let status =
+        nix_secrets_manager::with_ssh_agent::run(invocation, &runtime_directory(&home()?))?;
+    Ok(exit_code(status))
 }
 
 /// Hands one value to a command's stdin, or to a non-terminal stdout.

@@ -137,6 +137,10 @@ pub enum Completion {
         requester: String,
         result: Result<usize, String>,
     },
+    SshSignatureFinished {
+        requester: String,
+        result: Result<(), String>,
+    },
     /// A commit failed; carries git's full error output.
     CommitFailed(String),
 }

@@ -423,6 +423,30 @@ package expects compatible `age` and OpenSSH programs already in `PATH`.
 
 ## Deployment
 
+### SSH authentication from backend commands
+
+`with-ssh-agent` gives a backend command a temporary agent socket exposing only
+the specified Ed25519 public key. An SSH login signature opens an approval in
+the attached client TUI. After approval, the client asks its local agent
+(including the standard 1Password socket) and returns only the signature.
+The private SSH key stays on the client. No private key is fetched or exported.
+
+```sh
+nix-secrets with-ssh-agent --public-key ./update.pub \
+  --destination update@ns1.lamk.eu \
+  --reason 'Upload the approved signed ns1 generation.' -- \
+  ssh -o IdentityAgent=SSH_AUTH_SOCK -o IdentitiesOnly=yes -i ./update.pub \
+  -o StrictHostKeyChecking=yes update@ns1.lamk.eu nmbl-erofs-receive
+```
+
+Only user-authentication challenges for that key and username are allowed;
+agent mutations, extensions and Git signatures are refused. The existing Git
+relay still accepts only Git signatures. The TUI labels the caller's reason
+as unvalidated: the claimed hostname cannot be verified from an agent challenge.
+The SSH command remains responsible for strict host-key verification.
+
+### Secret deployment
+
 The TUI establishes the SSH connection to the final target through the
 backend and deployment relay as a byte-transparent path. The TUI performs host
 key verification against its own `known_hosts`: a changed key is rejected and

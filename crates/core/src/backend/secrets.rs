@@ -230,38 +230,11 @@ fn approved_values(
             return Err(format!("{identifier} is requested twice"));
         }
     }
-    // At most one request waits for the operator at a time.
-    let _pending = operators.claim()?;
-    let operator = operators.latest().ok_or(NO_OPERATOR)?;
-    let mut random = [0_u8; 8];
-    getrandom::fill(&mut random).map_err(|error| error.to_string())?;
-    let request = SecretRequest {
-        id: format!(
-            "secret-{}-{}",
-            operators.next_request.fetch_add(1, Ordering::Relaxed),
-            random
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        ),
-        identifiers,
-        reason,
-        requester: ProcessInfo::read(peer),
-        parent: parent_pid(peer).map(ProcessInfo::read),
-    };
-    let (reply, answer) = mpsc::channel();
-    operator
-        .send(Job {
-            request: request.clone(),
-            reply,
-        })
-        .map_err(|_| NO_OPERATOR.to_owned())?;
-    let answer = answer
-        .recv_timeout(ANSWER_TIMEOUT + Duration::from_secs(10))
-        .map_err(|_| "the nix-secrets TUI did not answer in time".to_owned())??;
+    let answer = request_operator(operators, peer, identifiers, reason, None)?;
     let values = match &answer {
         SecretAnswer::Denied { reason } => return Err(reason.clone()),
         SecretAnswer::Approved { values } => values,
+        SecretAnswer::Signed { .. } => return Err("the TUI returned an unasked signature".into()),
     };
     let mut decoded = BTreeMap::new();
     for value in values {
@@ -285,4 +258,76 @@ fn approved_values(
         return Err("the TUI did not return every requested value".into());
     }
     Ok(decoded)
+}
+
+fn request_operator(
+    operators: &Operators,
+    peer: u32,
+    identifiers: Vec<String>,
+    reason: Option<String>,
+    ssh_signature: Option<crate::ssh_auth::SignatureRequest>,
+) -> Result<SecretAnswer, String> {
+    if reason
+        .as_ref()
+        .is_some_and(|r| r.len() > crate::secret_request::MAX_REQUEST_REASON_BYTES)
+    {
+        return Err("request reason exceeds 4096 bytes".into());
+    }
+    // At most one request waits for the operator at a time.
+    let _pending = operators.claim()?;
+    let operator = operators.latest().ok_or(NO_OPERATOR)?;
+    let mut random = [0_u8; 8];
+    getrandom::fill(&mut random).map_err(|error| error.to_string())?;
+    let request = SecretRequest {
+        id: format!(
+            "secret-{}-{}",
+            operators.next_request.fetch_add(1, Ordering::Relaxed),
+            random
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ),
+        identifiers,
+        reason,
+        ssh_signature,
+        requester: ProcessInfo::read(peer),
+        parent: parent_pid(peer).map(ProcessInfo::read),
+    };
+    let (reply, answer) = mpsc::channel();
+    operator
+        .send(Job {
+            request: request.clone(),
+            reply,
+        })
+        .map_err(|_| NO_OPERATOR.to_owned())?;
+    answer
+        .recv_timeout(ANSWER_TIMEOUT + Duration::from_secs(10))
+        .map_err(|_| "the nix-secrets TUI did not answer in time".to_owned())?
+}
+
+pub(super) fn request_signature(
+    stream: &mut UnixStream,
+    operators: &Operators,
+    peer: u32,
+    request: crate::ssh_auth::SignatureRequest,
+    reason: Option<String>,
+) -> io::Result<()> {
+    let result = request
+        .validate()
+        .and_then(|()| request_operator(operators, peer, Vec::new(), reason, Some(request)))
+        .and_then(|answer| match answer {
+            SecretAnswer::Signed { reply } => {
+                crate::ssh_auth::validate_reply(&reply)?;
+                Ok(reply)
+            }
+            SecretAnswer::Denied { reason } => Err(reason),
+            SecretAnswer::Approved { .. } => Err("the TUI returned unasked secret values".into()),
+        });
+    write_json(
+        stream,
+        &match result {
+            Ok(reply) => Response::SshSignature { reply },
+            Err(message) => Response::Error { message },
+        },
+    )
 }

@@ -432,3 +432,32 @@ secret set. No global dependency is added to `multi-user.target`. SSH starts
 without secrets so initial deployment and repair remain possible. A machine is
 not considered boot-successful while required application units remain
 unhealthy.
+
+## Client SSH authentication signatures
+
+`with-ssh-agent --public-key FILE --destination USER@HOST [--reason TEXT] -- CMD`
+runs CMD with a private temporary agent. The agent lists only the selected
+public key. A signing request becomes `RequestSshSignature { request, reason }`;
+the backend fills in the requester and parent from kernel peer credentials and
+sends a `SecretRequested` with `ssh_signature` set and no secret identifiers.
+
+Both backend and client validate the exact Ed25519 key, zero signing flags,
+SSH user-authentication message, selected username, publickey method, and absence
+of trailing bytes. Git signatures and other agent operations are refused.
+The normal Git relay keeps its independent Git-only policy.
+
+Both ordinary publickey and OpenSSH's
+[host-bound publickey](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL#L319)
+authentication messages are accepted; the latter must include a well-formed
+server host key.
+
+The client shows an SSH authentication approval, key name/fingerprint, caller
+identity and explicitly unvalidated reason. The claimed host cannot be verified
+from an agent challenge; strict SSH host-key verification remains the calling
+SSH process's responsibility. On approval the client requests one signature from
+its local agent and answers `Signed { reply }`. Only a correctly framed Ed25519
+signature becomes `SshSignature { reply }` on the requester connection. No
+decryption provider, secret session, or private-key transfer is used.
+
+The temporary agent socket is removed when the child exits. Refusal or a missing
+client agent fails authentication and never falls back to the backend's agent.

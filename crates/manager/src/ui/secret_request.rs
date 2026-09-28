@@ -56,7 +56,12 @@ pub(super) fn intercept(
         _ => return true,
     };
     let id = prompt.id.clone();
-    let count = prompt.values.len();
+    // SSH authentication returns a signature and zero secret values.
+    let count = if prompt.ssh_signature {
+        0
+    } else {
+        prompt.values.len()
+    };
     model.secret_prompt = None;
     model.secret_scroll = 0;
     model.secret_details = false;
@@ -135,7 +140,12 @@ fn program_name(process: &ProcessInfo) -> String {
 /// The modal title: who asked.
 pub(crate) fn title(prompt: &SecretPrompt) -> String {
     format!(
-        "Secret request from {} (pid {})",
+        "{} from {} (pid {})",
+        if prompt.ssh_signature {
+            "SSH authentication request"
+        } else {
+            "Secret request"
+        },
         program_name(&prompt.requester),
         prompt.requester.pid
     )
@@ -145,6 +155,8 @@ pub(crate) fn title(prompt: &SecretPrompt) -> String {
 fn key_source(identity: &str) -> &str {
     if identity.starts_with("1Password") {
         "1Password"
+    } else if identity.starts_with("SSH agent") {
+        "SSH agent"
     } else if identity.starts_with("identity file") {
         "identity-file"
     } else {
@@ -179,7 +191,11 @@ pub(crate) fn remaining_seconds(prompt: &SecretPrompt) -> u64 {
 pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String {
     let source = key_source(&prompt.identity);
     let mut lines = vec![
-        format!("Approve to decrypt these once with {source}."),
+        if prompt.ssh_signature {
+            "Approve one SSH authentication signature using this client's agent. The private SSH key stays on this client.".into()
+        } else {
+            format!("Approve to decrypt these once with {source}.")
+        },
         String::new(),
         "Requestor provides unvalidated reason:".into(),
         prompt
@@ -221,7 +237,9 @@ pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String
     } else {
         "Recipients"
     };
-    lines.push(format!("{label:<10} {}", recipients.join(", ")));
+    if !prompt.ssh_signature {
+        lines.push(format!("{label:<10} {}", recipients.join(", ")));
+    }
     lines.push(format!("{:<10} {source}", "Key"));
     let requester = &prompt.requester;
     lines.push(format!("{:<10} {}", "Command", requester.argv.join(" ")));
@@ -262,11 +280,15 @@ fn details_body(prompt: &SecretPrompt, mut lines: Vec<String>) -> String {
         ));
     }
     lines.push(String::new());
-    lines.push(format!("Decrypted with: {}", prompt.identity));
-    lines.push(
-        "The values go to the backend, which hands them only to this program until it exits."
-            .into(),
-    );
+    if prompt.ssh_signature {
+        lines.push("Only this SSH authentication signature is returned. The private SSH key stays on this client.".into());
+    } else {
+        lines.push(format!("Decrypted with: {}", prompt.identity));
+        lines.push(
+            "The values go to the backend, which hands them only to this program until it exits."
+                .into(),
+        );
+    }
     lines.join("\n")
 }
 
