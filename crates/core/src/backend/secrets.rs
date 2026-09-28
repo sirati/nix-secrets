@@ -11,22 +11,22 @@
 //! the session or disconnects. Without an attached TUI the request fails; it
 //! is never decrypted anywhere else.
 use super::{Request, Response};
-use crate::SecretPath;
 use crate::framing::{read_json, read_json_sensitive, write_json};
 use crate::private_socket::runtime_directory;
 use crate::secret_request::{
-    MAX_REQUEST_IDENTIFIERS, ProcessInfo, SecretAnswer, SecretRequest, parent_pid,
+    parent_pid, ProcessInfo, SecretAnswer, SecretRequest, MAX_REQUEST_IDENTIFIERS,
 };
 use crate::secret_session::SecretSession;
-use base64::Engine;
+use crate::SecretPath;
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use rustix::net::RecvFlags;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -164,8 +164,9 @@ pub(super) fn request(
     operators: &Operators,
     peer: u32,
     identifiers: Vec<String>,
+    reason: Option<String>,
 ) -> io::Result<()> {
-    let values = match approved_values(operators, peer, identifiers) {
+    let values = match approved_values(operators, peer, identifiers, reason) {
         Ok(values) => values,
         Err(message) => return write_json(stream, &Response::Error { message }),
     };
@@ -209,7 +210,14 @@ fn approved_values(
     operators: &Operators,
     peer: u32,
     identifiers: Vec<String>,
+    reason: Option<String>,
 ) -> Result<BTreeMap<String, Zeroizing<Vec<u8>>>, String> {
+    if reason
+        .as_ref()
+        .is_some_and(|reason| reason.len() > crate::secret_request::MAX_REQUEST_REASON_BYTES)
+    {
+        return Err("secret request reason exceeds 4096 bytes".into());
+    }
     if identifiers.is_empty() || identifiers.len() > MAX_REQUEST_IDENTIFIERS {
         return Err(format!(
             "a secret request names between 1 and {MAX_REQUEST_IDENTIFIERS} identifiers"
@@ -237,6 +245,7 @@ fn approved_values(
                 .collect::<String>()
         ),
         identifiers,
+        reason,
         requester: ProcessInfo::read(peer),
         parent: parent_pid(peer).map(ProcessInfo::read),
     };

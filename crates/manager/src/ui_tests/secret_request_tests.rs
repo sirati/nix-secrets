@@ -40,6 +40,7 @@ fn prompt(id: &str, deadline: Instant) -> SecretPrompt {
     };
     SecretPrompt {
         id: id.into(),
+        reason: Some("Sign and deploy the ns1 boot generation, then reboot the server.".into()),
         values: vec![RequestedValue {
             identifier: "host.services.nmbl.generation-key".into(),
             kind: "operator key".into(),
@@ -232,7 +233,7 @@ fn render(model: &Model, width: u16, height: u16) -> String {
 }
 
 #[test]
-fn the_modal_summarises_the_request_in_about_4_to_3_at_every_size() {
+fn the_modal_wraps_complete_descriptions_commands_and_unvalidated_reasons() {
     let mut model = model(true);
     model.secret_prompt = Some(detailed_prompt());
     for (width, height, aspect) in [
@@ -263,14 +264,8 @@ fn the_modal_summarises_the_request_in_about_4_to_3_at_every_size() {
             "Secret request from nix-secrets (pid 42)",
             "Approve to decrypt these once with 1Password.",
             "Identifier",
-            "host.services.nmbl.generation-key",
-            "operator key",
-            "host.services.storage-box.password",
-            "primary SHA256:abcdefgh",
             "1Password",
-            "nix-secrets with-secrets",
-            "/home/op/config",
-            "via nmbl-install (41)",
+            "Requestor provides unvalidated reason:",
             "denies in 8",
             "Ctrl+Shift+Y Yes, send",
             "n Deny",
@@ -279,17 +274,34 @@ fn the_modal_summarises_the_request_in_about_4_to_3_at_every_size() {
         ] {
             assert!(screen.contains(expected), "missing {expected:?} at {size}");
         }
-        // Full fingerprints and argv wait behind Details; no prose paragraph.
-        for hidden in [FINGERPRINT, "--generation-key-command", "hands them only"] {
+        // Only full fingerprints and protocol details wait behind Details.
+        for hidden in [FINGERPRINT, "hands them only"] {
             assert!(!screen.contains(hidden), "{hidden:?} shown at {size}");
         }
-        // Each summary line fits on one row: nothing wraps.
-        let cwd_rows = screen.lines().filter(|row| row.contains("Cwd")).count();
-        assert_eq!(cwd_rows, 1, "{size}");
+        let body = crate::ui::secret_request::body(
+            model.secret_prompt.as_ref().unwrap(),
+            false,
+            width as usize,
+        );
+        for expected in [
+            "every boot generation of dns-vps",
+            "--generation-key-command",
+            "Sign and deploy the ns1 boot generation, then reboot the server.",
+        ] {
+            assert!(body.contains(expected), "summary discarded {expected:?}");
+        }
     }
-    // With room, the description is shown; on a narrow screen it is not.
+    // With room, the complete description and command are visible together.
     assert!(render(&model, 200, 60).contains("every boot generation of dns-vps"));
-    assert!(!render(&model, 60, 20).contains("NMBL generation"));
+    assert!(render(&model, 200, 60).contains("--generation-key-command"));
+    // Narrow screens preserve the description and command below the scroll.
+    let mut narrow = String::new();
+    for scroll in 0..50 {
+        model.secret_scroll = scroll;
+        narrow.push_str(&render(&model, 60, 20));
+    }
+    assert!(narrow.contains("NMBL generation"));
+    assert!(narrow.contains("--generation-key-command"));
 }
 
 #[test]
@@ -305,9 +317,9 @@ fn d_shows_the_details_and_hides_them_again() {
         let screen = render(&model, width, height);
         modal_box(&screen);
         assert!(screen.contains("d Summary"), "{screen}");
-        assert!(screen.contains("Requester: PID 42"), "{screen}");
         assert!(screen.contains("denies in"), "{screen}");
         if height >= 40 {
+            assert!(screen.contains("Requester: PID 42"), "{screen}");
             // Nothing is cut off where the screen has room; it wraps.
             let flat: String = screen.split(['│', '\n']).map(str::trim).collect();
             for expected in [

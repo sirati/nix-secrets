@@ -221,15 +221,20 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
         Mode::Reveal { value, scroll, .. } => (
             "Reveal",
             format!(
-                "{}\n\nEsc: hide · c: copy",
-                std::str::from_utf8(value).unwrap_or("<binary value: use c to copy>")
+                "{}\n\nEnter: copy · Esc: cancel",
+                std::str::from_utf8(value).unwrap_or("<binary value: press Enter to copy>")
             ),
             *scroll,
         ),
         Mode::Approval(request) => {
             let failure = model.message_text().map(str::to_owned);
             let styled = move |width: usize| {
-                deploy_view::approval_lines(request, failure.as_deref(), model.approval_details, width)
+                deploy_view::approval_lines(
+                    request,
+                    failure.as_deref(),
+                    model.approval_details,
+                    width,
+                )
             };
             draw_dialog(
                 frame,
@@ -253,7 +258,8 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
                             width,
                         )
                     })),
-                    min_width: deploy_view::needed_width(request, model.approval_details) as u16 + 2,
+                    min_width: deploy_view::needed_width(request, model.approval_details) as u16
+                        + 2,
                     line_targets: Some(Box::new(move |width| {
                         deploy_view::checkbox_lines(
                             request,
@@ -375,7 +381,10 @@ fn draw_dialog(
     if box_area.width < wanted {
         let height = height_at(wanted)
             .max(box_area.height)
-            .min(area.height.saturating_sub(if area.height > 14 { 2 } else { 0 }))
+            .min(
+                area.height
+                    .saturating_sub(if area.height > 14 { 2 } else { 0 }),
+            )
             .max(1);
         box_area = Rect {
             x: area.x + (area.width - wanted) / 2,
@@ -538,9 +547,9 @@ fn modal_title(mode: &Mode) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod deploy_view_tests;
+#[cfg(test)]
+mod tests;
 
 /// The byte offsets of clickable checkbox lines in a dialog body.
 fn checkbox_lines(model: &Model, body: &str) -> Vec<(usize, MouseTarget)> {

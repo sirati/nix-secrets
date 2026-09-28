@@ -137,7 +137,10 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
             Button::new("Ctrl+E Open in editor", MouseTarget::CommitEditor),
             key("Esc Cancel", Shortcut::Escape),
         ],
-        Mode::Reveal { .. } => vec![key("Esc Hide", Shortcut::Escape), letter("c Copy", 'c')],
+        Mode::Reveal { .. } => vec![
+            key("Enter Copy", Shortcut::Enter),
+            key("Esc Cancel", Shortcut::Escape),
+        ],
         Mode::Edit { path, .. } => {
             let mut buttons = vec![
                 key("Enter Save", Shortcut::Enter),
@@ -189,7 +192,11 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                 buttons.push(letter("n Dismiss", 'n'));
             }
             buttons.push(letter(
-                if model.approval_details { "d Summary" } else { "d Details" },
+                if model.approval_details {
+                    "d Summary"
+                } else {
+                    "d Details"
+                },
                 'd',
             ));
             buttons

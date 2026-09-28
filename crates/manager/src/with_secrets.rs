@@ -33,6 +33,8 @@ pub struct Options {
     pub shared_session: bool,
     /// Read the evaluated schema from this JSON file instead of `nix eval`.
     pub schema_file: Option<PathBuf>,
+    /// Requester-provided explanation, shown as unvalidated in the TUI.
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,7 +47,7 @@ pub struct Invocation {
 pub const USAGE: &str =
     "usage: nix-secrets with-secrets [--repository PATH] [--backend-socket PATH] \
 [--local [--secret-identity PATH] [--1password-shared-session] [--schema-file PATH]] \
-IDENTIFIER... -- COMMAND [ARGUMENT...]";
+[--reason TEXT] IDENTIFIER... -- COMMAND [ARGUMENT...]";
 
 /// Reads one option shared with `pipe-secret`. Returns whether it was one.
 pub fn parse_option(
@@ -53,6 +55,16 @@ pub fn parse_option(
     arguments: &mut impl Iterator<Item = OsString>,
     options: &mut Options,
 ) -> Result<bool, String> {
+    if argument == "--reason" {
+        options.reason = Some(
+            arguments
+                .next()
+                .ok_or("--reason requires text")?
+                .into_string()
+                .map_err(|_| "--reason must be UTF-8")?,
+        );
+        return Ok(true);
+    }
     let mut path = |name: &str| {
         arguments
             .next()
@@ -73,6 +85,11 @@ pub fn parse_option(
 
 /// Checks that local-only options come with `--local`.
 pub fn check_options(options: &Options) -> Result<(), String> {
+    if options.reason.as_ref().is_some_and(|reason| {
+        reason.len() > nix_secrets_core::secret_request::MAX_REQUEST_REASON_BYTES
+    }) {
+        return Err("--reason exceeds 4096 bytes".into());
+    }
     if !options.local
         && (options.identity.is_some() || options.shared_session || options.schema_file.is_some())
     {
@@ -181,12 +198,17 @@ pub struct BackendSession {
 
 /// Asks the TUI behind `stream` for `identifiers`; blocks until the
 /// operator answers.
-pub fn request(mut stream: UnixStream, identifiers: &[String]) -> Result<BackendSession, String> {
+pub fn request(
+    mut stream: UnixStream,
+    identifiers: &[String],
+    reason: Option<&str>,
+) -> Result<BackendSession, String> {
     let io = |error: io::Error| format!("backend connection failed: {error}");
     write_json(
         &mut stream,
         &Request::RequestSecrets {
             identifiers: identifiers.to_vec(),
+            reason: reason.map(str::to_owned),
         },
     )
     .map_err(io)?;
@@ -226,6 +248,8 @@ mod tests {
             os(&[
                 "--repository",
                 "/repo",
+                "--reason",
+                "Sign the new boot generation.",
                 "a.b.c.d",
                 "a.b.c.e",
                 "--",
@@ -237,6 +261,10 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.options.repository, PathBuf::from("/repo"));
         assert!(!parsed.options.local);
+        assert_eq!(
+            parsed.options.reason.as_deref(),
+            Some("Sign the new boot generation.")
+        );
         assert_eq!(parsed.identifiers, ["a.b.c.d", "a.b.c.e"]);
         assert_eq!(parsed.command, os(&["sign", "--key-command"]));
         assert!(parse(os(&["a.b.c.d"]), "/".into()).is_err(), "no command");
@@ -264,5 +292,15 @@ mod tests {
         .unwrap();
         assert!(local.options.local);
         assert_eq!(local.options.identity, Some(PathBuf::from("/k")));
+    }
+
+    #[test]
+    fn request_reasons_are_bounded() {
+        let options = Options {
+            reason: Some("x".repeat(4097)),
+            ..Options::default()
+        };
+        assert!(check_options(&options).unwrap_err().contains("4096"));
+        assert!(parse(os(&["--reason"]), "/".into()).is_err());
     }
 }

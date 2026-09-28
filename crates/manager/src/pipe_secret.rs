@@ -33,7 +33,7 @@ pub struct PipeInvocation {
 pub const USAGE: &str =
     "usage: nix-secrets pipe-secret [--repository PATH] [--backend-socket PATH] \
 [--local [--secret-identity PATH] [--1password-shared-session] [--schema-file PATH]] \
-IDENTIFIER [-- COMMAND [ARGUMENT...]]";
+[--reason TEXT] IDENTIFIER [-- COMMAND [ARGUMENT...]]";
 
 pub fn parse(
     arguments: impl IntoIterator<Item = OsString>,

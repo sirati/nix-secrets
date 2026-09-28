@@ -118,6 +118,7 @@ mod tests {
     fn prompt(id: &str, executable: &str) -> SecretPrompt {
         SecretPrompt {
             id: id.into(),
+            reason: None,
             values: vec![RequestedValue {
                 identifier: "host.services.a.key".into(),
                 kind: "secret".into(),

@@ -30,6 +30,7 @@ pub struct SecretPrompt {
     pub identity: String,
     pub requester: ProcessInfo,
     pub parent: Option<ProcessInfo>,
+    pub reason: Option<String>,
     /// When the request denies itself.
     pub deadline: Instant,
 }
@@ -146,6 +147,7 @@ fn handle(
         identity: identity.to_owned(),
         requester: request.requester.clone(),
         parent: request.parent.clone(),
+        reason: request.reason.clone(),
         deadline: Instant::now() + DECISION_TIMEOUT,
     };
     let label = prompt_for(Vec::new()).requester_label();

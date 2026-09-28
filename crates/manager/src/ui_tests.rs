@@ -116,6 +116,24 @@ fn model(set: bool) -> Model {
 }
 
 #[test]
+fn enter_copies_a_revealed_value_and_escape_cancels() {
+    for event in [UiEvent::Enter, UiEvent::Escape] {
+        let mut model = model(true);
+        let mut writer = writer();
+        reduce(&mut model, UiEvent::Character('r'), &mut writer);
+        assert!(matches!(model.mode, Mode::Reveal { .. }));
+        let copy = event == UiEvent::Enter;
+        reduce(&mut model, event, &mut writer);
+        assert!(matches!(model.mode, Mode::Browse));
+        if copy {
+            assert_eq!(writer.copies, [b"stored-value".to_vec()]);
+        } else {
+            assert!(writer.copies.is_empty());
+        }
+    }
+}
+
+#[test]
 fn browse_copy_secret_and_public_key_use_distinct_actions() {
     let mut model = model(true);
     let mut writer = writer();
