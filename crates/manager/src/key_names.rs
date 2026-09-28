@@ -19,15 +19,47 @@ pub struct AgentKeys {
 }
 
 impl AgentKeys {
-    /// Lists the agent's keys (`ssh-add -L`); this never asks 1Password.
+    /// Lists public key names from the selected agent and the standard
+    /// 1Password socket. Listing keys never asks 1Password for approval.
     pub fn from_agent(socket: Option<&str>) -> Self {
-        match nix_secrets_transport::agent_keys(socket) {
+        let primary = nix_secrets_transport::agent_keys(socket);
+        let fallback = std::env::var_os("HOME")
+            .map(|home| std::path::PathBuf::from(home).join(".1password/agent.sock"));
+        let selected = socket
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("SSH_AUTH_SOCK").map(std::path::PathBuf::from));
+        let fallback = fallback.filter(|path| {
+            socket != Some("none") && path.exists() && selected.as_ref() != Some(path)
+        });
+        Self::from_agents(
+            primary,
+            fallback.map(|path| {
+                nix_secrets_transport::agent_keys(Some(&path.to_string_lossy()))
+            }),
+        )
+    }
+
+    fn from_agents(
+        primary: Result<Vec<String>, String>,
+        fallback: Option<Result<Vec<String>, String>>,
+    ) -> Self {
+        let mut keys = match primary {
             Ok(lines) => Self::from_lines(&lines),
             Err(error) => Self {
                 comments: BTreeMap::new(),
                 error: Some(error),
             },
+        };
+        if let Some(Ok(lines)) = fallback {
+            for (key, comment) in Self::from_lines(&lines).comments {
+                let existing = keys.comments.entry(key).or_default();
+                if existing.is_empty() {
+                    *existing = comment;
+                }
+            }
+            keys.error = None;
         }
+        keys
     }
 
     pub fn from_lines(lines: &[String]) -> Self {
@@ -184,6 +216,25 @@ mod tests {
         assert!(text.starts_with("primary · \"IT Secrets\" (SHA256:"), "{text}");
         let text = describe(&schema, &AgentKeys::from_lines(&[]), KEY);
         assert!(text.starts_with("primary · not in your ssh-agent (SHA256:"), "{text}");
+    }
+
+    #[test]
+    fn onepassword_names_are_found_when_the_environment_agent_lacks_the_key() {
+        for primary in [Ok(vec![]), Err("agent unavailable".into())] {
+            let agent = AgentKeys::from_agents(primary, Some(Ok(vec![format!("{KEY} IT Secrets")])));
+            assert_eq!(agent_title(&agent, KEY), "\"IT Secrets\"");
+        }
+    }
+
+    #[test]
+    fn fallback_preserves_existing_names_and_fills_empty_comments() {
+        let fallback = Some(Ok(vec![format!("{KEY} IT Secrets")]));
+        let named = AgentKeys::from_agents(Ok(vec![format!("{KEY} Existing name")]), fallback.clone());
+        assert_eq!(agent_title(&named, KEY), "\"Existing name\"");
+        let unnamed = AgentKeys::from_agents(Ok(vec![KEY.into()]), fallback);
+        assert_eq!(agent_title(&unnamed, KEY), "\"IT Secrets\"");
+        let absent = AgentKeys::from_agents(Ok(vec![]), Some(Err("missing socket".into())));
+        assert_eq!(agent_title(&absent, KEY), "not in your ssh-agent");
     }
 
     #[test]
