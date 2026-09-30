@@ -175,7 +175,10 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
             key("Esc Discard", Shortcut::Escape),
         ],
         Mode::ProviderFailure { .. } => {
-            vec![letter("r Retry", 'r'), key("Esc Cancel", Shortcut::Escape)]
+            vec![
+                key("Enter Retry", Shortcut::Enter),
+                key("Esc Edit", Shortcut::Escape),
+            ]
         }
         // Only actions that can happen: a refused request offers no Approve.
         Mode::Approval(request) => {

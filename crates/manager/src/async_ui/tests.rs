@@ -166,3 +166,128 @@ fn slow_commands_describe_their_activity_until_completion() {
     let identity_file = describe(&Command::Reveal("x".into()), false).unwrap();
     assert!(!identity_file.waits_for_one_password);
 }
+
+#[test]
+fn deployment_and_failed_save_keep_the_draft_until_retry_succeeds() {
+    use crate::model::Mode;
+    use crate::ui::{drive, Frontend};
+    use std::collections::VecDeque;
+    use std::io;
+
+    let (commands, incoming) = mpsc::channel();
+    let (outgoing, events) = mpsc::channel();
+    let mut writer = AsyncWriter {
+        commands,
+        events,
+        rows: None,
+        profiles: None,
+        approvals: vec![],
+        completions: vec![],
+        busy: false,
+        activity: None,
+        one_password: true,
+        socket: None,
+        channel: None,
+        decisions: None,
+        secret_prompts: vec![],
+        secret_activity: None,
+    };
+    assert!(writer.approval(true).is_err());
+    assert!(matches!(incoming.recv().unwrap(), Command::Approval(true)));
+    let path = "host.services.test.password";
+    let mut model = Model::new(vec![Row {
+        depth: 0,
+        name: "password".into(),
+        display_segments: vec![],
+        path: Some(path.into()),
+        is_set: false,
+        is_task: false,
+        can_generate: false,
+        can_copy_public: false,
+        output_is_set: None,
+        description: None,
+        category: RowCategory::Password,
+        human_facing: false,
+        external_input_required: true,
+        required_for_install: false,
+        identity: None,
+        presentation: None,
+    }]);
+    model.settings.autosave_unset_on_paste = false;
+    struct Terminal {
+        events: VecDeque<UiEvent>,
+        incoming: Receiver<Command>,
+        outgoing: Sender<Event>,
+        ticks: usize,
+    }
+    impl Frontend for Terminal {
+        fn draw(&mut self, _: &Model) -> io::Result<()> {
+            Ok(())
+        }
+        fn read(&mut self, _: Duration) -> io::Result<UiEvent> {
+            let event = self.events.pop_front().expect("scripted UI event");
+            if event == UiEvent::Tick {
+                let completion = match self.ticks {
+                    0 => {
+                        assert!(
+                            self.incoming.try_recv().is_err(),
+                            "busy saves must not execute"
+                        );
+                        Completion::Deployed {
+                            generated: vec![],
+                            skipped: vec![],
+                            summary: None,
+                        }
+                    }
+                    1 | 2 => {
+                        let Command::Write { path, value } = self.incoming.recv().unwrap() else {
+                            panic!("retry must queue the save")
+                        };
+                        assert!(value.as_slice() == b"draft!", "draft must survive errors");
+                        if self.ticks == 1 {
+                            Completion::SaveFailed {
+                                path,
+                                value,
+                                message: "provider unavailable".into(),
+                            }
+                        } else {
+                            Completion::Saved(path)
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                self.outgoing.send(Event::Completion(completion)).unwrap();
+                self.ticks += 1;
+            }
+            Ok(event)
+        }
+    }
+    let mut terminal = Terminal {
+        events: VecDeque::from([
+            UiEvent::Paste(b"draft".to_vec()),
+            UiEvent::Enter,
+            // Dismiss the busy failure and continue editing the same value.
+            UiEvent::Escape,
+            UiEvent::Character('!'),
+            UiEvent::Enter,
+            UiEvent::Tick,
+            // Dismiss deployment notice, then retry the retained value.
+            UiEvent::Enter,
+            UiEvent::Enter,
+            UiEvent::Tick,
+            // Provider failure also returns to the draft on Escape.
+            UiEvent::Escape,
+            UiEvent::Enter,
+            UiEvent::Tick,
+            UiEvent::Escape,
+            UiEvent::Escape,
+        ]),
+        incoming,
+        outgoing,
+        ticks: 0,
+    };
+    drive(&mut terminal, &mut writer, &mut model).unwrap();
+    assert_eq!(terminal.ticks, 3);
+    assert!(model.rows[0].is_set);
+    assert!(matches!(model.mode, Mode::Browse));
+}
