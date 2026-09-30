@@ -24,7 +24,7 @@ impl Controller {
                     .as_ref()
                     .is_some_and(|value| value.public_key != canonical)
                 {
-                    return Err("generated public key changed unexpectedly".into());
+                    return Err(format!("generated public key changed unexpectedly for {path}"));
                 }
                 let value = GeneratedPublicKey {
                     version_id: "local-generated-v1".into(),
@@ -55,7 +55,7 @@ impl Controller {
                     .as_ref()
                     .is_some_and(|value| value != &canonical)
                 {
-                    return Err("generated public key changed unexpectedly".into());
+                    return Err(format!("generated public key changed unexpectedly for {path}"));
                 }
                 self.client
                     .set_public_key_if_version(path, canonical.clone(), old.version_id.clone())
