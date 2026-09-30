@@ -29,7 +29,7 @@ let
   entryData =
     entry:
     let
-      leaves = builtins.filter (leaf: leaf.kind != "public-info" && leaf.kind != "operator") (
+      leaves = builtins.filter (leaf: leaf.kind != "public-info" && leaf.kind != "operator" && !(leaf.optional or false)) (
         secretsLib.collectLeaves entry.tree
       );
       destinations = map (

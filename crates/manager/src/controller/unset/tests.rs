@@ -815,3 +815,29 @@ print $out;
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
     helper
 }
+
+#[test]
+fn optional_values_skip_generation_and_inventories_name_missing_producers() {
+    let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+    let optional = leaf(key, "password", json!({"optional": true, "valueType": "password"}));
+    let inventory = leaf(key, "inventory", json!({}));
+    let mut inventory = inventory;
+    inventory["destination"]["contentType"] = json!("named-ssh-ed25519-public-keys");
+    inventory["destination"]["authorizedForUser"] = json!("updatealert");
+    let schema = Schema::from_json(&json!({"host": {
+        "metadata": {"socketPath": "/run/s", "deployment": {"host":"host", "destination":"secrets@host", "port":22}},
+        "services": {"app": {"password": optional, "inventory": inventory}},
+        "user-alice-services": {}
+    }}).to_string()).unwrap();
+    let identifiers = schema.deployable_identifiers("host").unwrap();
+    let plan = plan_unset(&schema, &identifiers, &BTreeSet::new()).unwrap();
+    assert!(plan.generate.is_empty());
+    let optional_only = plan_unset(&schema, &["host.services.app.password".into()], &BTreeSet::new()).unwrap();
+    assert!(optional_only.refusal_for(false).is_none());
+    assert_eq!(plan.reasons["host.services.app.password"], MissingKind::Optional);
+    assert_eq!(plan.reasons["host.services.app.inventory"], MissingKind::FilledByAnotherHost);
+    assert!(plan.missing.iter().any(|(_, reason)| reason.contains("no reporting-key producers configured")));
+    let set = BTreeSet::from(["host.services.app.password".into()]);
+    let plan = plan_unset(&schema, &identifiers, &set).unwrap();
+    assert!(!plan.skippable.contains(&"host.services.app.password".into()));
+}

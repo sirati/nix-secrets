@@ -43,6 +43,8 @@ pub(crate) struct UnsetPlan {
 pub enum MissingKind {
     /// The operator must enter it.
     NeedsInput,
+    /// Intentionally not required by consumers.
+    Optional,
     /// A public-key inventory other hosts fill by registering their keys.
     FilledByAnotherHost,
     /// Derived from a value that is unset.
@@ -56,6 +58,7 @@ impl MissingKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::NeedsInput => "Needs input",
+            Self::Optional => "Optional; not provided",
             Self::FilledByAnotherHost => "Filled by another host",
             Self::DerivedFromUnset => "Derived from unset source",
             Self::CannotDeploy => "Cannot deploy",
@@ -93,10 +96,11 @@ impl UnsetPlan {
     /// Also refuses a derived value whose source is unset: its source must be
     /// set, or deployed to its own host first when that host generates it.
     pub fn refusal(&self) -> Option<String> {
-        (!self.missing.is_empty()).then(|| {
+        let required = self.missing.iter().filter(|(id, _)| self.reasons.get(id) != Some(&MissingKind::Optional)).collect::<Vec<_>>();
+        (!required.is_empty()).then(|| {
             format!(
                 "Missing values that must be entered: {}. Nothing was generated or written.",
-                self.missing
+                required
                     .iter()
                     .map(|(id, reason)| format!("{id} ({reason})"))
                     .collect::<Vec<_>>()
@@ -121,6 +125,20 @@ pub(crate) fn plan_unset(
     let mut waiting = Vec::new();
     for identifier in identifiers {
         let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
+        let leaf = schema.leaf(&path).map_err(|error| error.to_string())?;
+        let optional = match &leaf {
+            LeafSpec::Stored(spec) => spec.optional,
+            LeafSpec::Generated(spec) => spec.optional,
+            LeafSpec::Operator(_) => false,
+        };
+        let provided = match &leaf {
+            LeafSpec::Stored(spec) => spec.derived_from.as_ref().map_or(set.contains(identifier), |source| set.contains(&source.identifier)),
+            _ => set.contains(identifier),
+        };
+        if optional && !provided {
+            plan.miss(identifier, MissingKind::Optional, "optional; not provided".into());
+            continue;
+        }
         if let Ok(LeafSpec::Stored(spec)) = schema.leaf(&path) {
             if let Some(derived) = &spec.derived_from {
                 let source = &derived.identifier;
@@ -168,6 +186,12 @@ pub(crate) fn plan_unset(
         // A public-key inventory is filled by the hosts that register keys
         // into it when they are deployed.
         let producers = schema.registration_producers(identifier);
+        if producers.is_empty() && spec.destination.content_type.as_deref() == Some("named-ssh-ed25519-public-keys") {
+            plan.miss(identifier, MissingKind::FilledByAnotherHost,
+                "no reporting-key producers configured; inventory has no registered senders".into());
+            continue;
+        }
+
         if !producers.is_empty() {
             let mut hosts = producers
                 .iter()

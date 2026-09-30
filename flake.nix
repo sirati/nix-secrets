@@ -107,6 +107,12 @@
               secretsLib = self.lib;
             };
             pkgs.runCommand "operator-leaf-test" { } "touch $out";
+          optional-module =
+            assert import ./nix/tests/optional-module.nix {
+              inherit nixpkgs system;
+              module = self.nixosModules.default;
+            };
+            pkgs.runCommand "optional-module-test" { } "touch $out";
           required-for-install =
             assert import ./nix/tests/required-for-install.nix {
               secretsLib = self.lib;

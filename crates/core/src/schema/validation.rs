@@ -20,6 +20,9 @@ pub(super) fn validate_tree(
         }
         SecretNode::Secret(leaf) => {
             let path = leaf_path(host, namespace, service, parents);
+            if leaf.optional && leaf.required_for_install {
+                return Err(invalid(&path, "optional conflicts with requiredForInstall"));
+            }
             validate_description(&path, leaf.description.as_deref())?;
             match leaf.kind {
                 SecretKind::Secret => {
@@ -78,6 +81,9 @@ pub(super) fn validate_tree(
             Ok(())
         }
         SecretNode::Generated(leaf) => {
+            if leaf.optional && leaf.required_for_install {
+                return Err(invalid(&leaf_path(host, namespace, service, parents), "optional conflicts with requiredForInstall"));
+            }
             validate_description(
                 &leaf_path(host, namespace, service, parents),
                 leaf.description.as_deref(),

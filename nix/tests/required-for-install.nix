@@ -91,4 +91,7 @@ assert fails (
     };
   }
 );
+assert (service { maybe = token // { requiredForInstall = false; optional = true; }; }).maybe.optional;
+assert fails (service { bad = token // { optional = true; }; });
+assert fails (service { bad = token // { requiredForInstall = false; optional = "yes"; }; });
 true
