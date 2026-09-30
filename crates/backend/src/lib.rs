@@ -31,7 +31,14 @@ pub fn run(arguments: Arguments) -> Result<(), Box<dyn Error>> {
     let schema = Schema::from_json(&input)?;
     reject_non_file_store(&repository.join("nix-secrets.toml"))?;
     let store = SecretStore::new(repository.join("nix-secrets.toml"));
-    let backend = Backend::bind(arguments.socket, schema, store)?;
+    let manifest = arguments.manifest.clone();
+    let backend = Backend::bind(arguments.socket, schema, store)?.with_schema_loader(move || {
+        let input = match &manifest {
+            Some(path) => load_manifest(path),
+            None => evaluate_manifest(&repository),
+        }.map_err(|error| error.to_string())?;
+        Schema::from_json(&input).map_err(|error| error.to_string())
+    });
     // Keep the lock for the entire lifetime of this backend. A second launch
     // attaches to this socket instead of replacing its approval broker.
     let _lease = lease;

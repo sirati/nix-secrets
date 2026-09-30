@@ -27,6 +27,7 @@ pub struct Backend {
     socket_path: PathBuf,
     listener: UnixListener,
     schema: Arc<Schema>,
+    schema_loader: Option<Arc<dyn Fn() -> Result<Schema, String> + Send + Sync>>,
     store: Arc<SecretStore>,
     profiles: Arc<ProfileStore>,
     broker: Arc<Mutex<ApprovalBroker>>,
@@ -54,6 +55,7 @@ impl Backend {
             socket_path,
             listener,
             schema: Arc::new(schema),
+            schema_loader: None,
             store: Arc::new(store),
             profiles: Arc::new(profiles),
             broker: Arc::new(Mutex::new(ApprovalBroker::default())),
@@ -61,6 +63,14 @@ impl Backend {
             feed: Arc::new(Feed::default()),
             operators: Arc::new(secrets::Operators::default()),
         })
+    }
+
+    /// Reload trusted repository metadata before validating a store mutation.
+    /// The client cannot supply the schema used to authorize its write.
+    pub fn with_schema_loader<F>(mut self, loader: F) -> Self
+    where F: Fn() -> Result<Schema, String> + Send + Sync + 'static {
+        self.schema_loader = Some(Arc::new(loader));
+        self
     }
 
     pub fn serve(self) -> io::Result<()> {
@@ -72,6 +82,7 @@ impl Backend {
                 continue;
             }
             let schema = Arc::clone(&self.schema);
+            let schema_loader = self.schema_loader.clone();
             let store = Arc::clone(&self.store);
             let profiles = Arc::clone(&self.profiles);
             let broker = Arc::clone(&self.broker);
@@ -82,6 +93,7 @@ impl Backend {
             thread::spawn(move || {
                 let context = Context {
                     schema: &schema,
+                    schema_loader: schema_loader.as_deref(),
                     store: &store,
                     profiles: &profiles,
                     broker: &broker,
@@ -106,6 +118,7 @@ impl Backend {
 
 struct Context<'a> {
     schema: &'a Schema,
+    schema_loader: Option<&'a (dyn Fn() -> Result<Schema, String> + Send + Sync)>,
     store: &'a SecretStore,
     profiles: &'a ProfileStore,
     broker: &'a Mutex<ApprovalBroker>,
@@ -119,6 +132,7 @@ struct Context<'a> {
 fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()> {
     let Context {
         schema,
+        schema_loader,
         store,
         profiles,
         broker,
@@ -165,6 +179,25 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
             }
             request => request,
         };
+        let fresh_schema = if matches!(request,
+            Request::Set { .. } | Request::SetIfVersion { .. }
+            | Request::Remove { .. } | Request::RemoveIfVersion { .. }
+            | Request::SetGeneratedPublicKeyIfVersion { .. }
+            | Request::SetPublicKeyIfVersion { .. }
+            | Request::SetPublicInfoIfVersion { .. }
+            | Request::RemovePublicInfoIfVersion { .. }
+        ) {
+            match schema_loader.map(|load| load()).transpose() {
+                Ok(schema) => schema,
+                Err(message) => {
+                    write_json(&mut stream, &Response::Error {
+                        message: format!("reloading repository schema failed: {message}"),
+                    })?;
+                    continue;
+                }
+            }
+        } else { None };
+        let schema = fresh_schema.as_ref().unwrap_or(schema);
         let update = event_after_success(&request, schema);
         let response = match request {
             Request::Get { path } => store
