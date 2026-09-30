@@ -10,11 +10,12 @@ are rejected.
 - **TUI** evaluates the repository, accepts user input, encrypts and decrypts
   values, asks for deployment consent, and authenticates the final SSH target.
 - **Backend** coordinates frontends and atomically manages
-  `nix-secrets.toml`. It stores ciphertext only.
+  `nix-secrets.toml`. It stores ciphertext and public metadata. Approved secret requests also
+  place the requested plaintext in backend memory for the command lifetime.
 - **Deployment relay** carries a byte stream between the TUI and target. It
   does not terminate the target SSH session.
-- **Target receiver** validates its requirements and atomically installs an
-  user-selected password or passphrase generation.
+- **Target receiver** validates its requirements and atomically installs the
+  selected secret generation.
 - **Readiness waiter** checks declared paths by metadata without opening secret
   files. Only consuming units depend on it.
 

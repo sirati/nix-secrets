@@ -16,47 +16,16 @@ separately administered system, such as a password set in a hosting provider's
 control panel. The TUI's **Required** view shows only leaves with this flag.
 It does not infer this property from password type, generator availability, or
 whether the value is currently set. The default is `false`.
-Each normalized leaf also has a semantic `identity` with `host`, `scope`,
-`user`, `service`, `responsibility`, `namespace`, and `name`. The first three
-come from the enclosing host and system/user service declaration. A leaf may
-override the other four:
+Use `destination.contentType` for format validation (`openssh-private-key`,
+`openssh-public-key` or `named-ssh-ed25519-public-keys`). A stored OpenSSH
+private key keeps its public half beside the ciphertext, so the TUI can copy
+it without decryption.
 
-```nix
-identity = {
-  service = "mail";
-  responsibility = "backup";
-  namespace = "shared"; # omit for a value without a namespace
-  name = "passphrase";
-};
-presentation = {
-  explanation = "Passphrase for the mail backup repository";
-  facing = "generated"; # external, human, or another label
-  type = "passphrase"; # private-key, public-key, or another label
-};
-```
-
-The identity is unique across the evaluated inventory. `presentation` is
-optional and defaults from the existing description, facing flags, and value
-type. The dotted identifier from the existing Nix declaration remains the
-stable storage and deployment key, so changing the semantic identity or tree
-ordering does not rewrite encrypted TOML entries or target paths. Keep an
-existing declaration at its current path when adding these attributes.
-In the TUI, `F` opens attribute filters; `T` chooses and orders tree attributes;
-`P` shows all attributes of the selected value. Any attribute can be filtered
-whether it is in the tree or filter-only.
-Set
-`destination.contentType = "openssh-private-key"` or `"openssh-public-key"`
-when the consumer requires that format; the frontend and target both reject
-malformed key material. `named-ssh-ed25519-public-keys` remains available for
-the authorized-key inventory.
-Set `services.<name>.displayPath = [ "mail" "backup" ];` to group a service in
-the TUI. This changes presentation only: the service name remains the secret
-identifier and keeps its own readiness gate and consumer units. The same option
-is available on `userServices.<user>.<name>`.
-For a stored OpenSSH private key, the TUI derives its public half when setting
-the value and saves that public key beside the ciphertext in TOML. The `p`
-hotkey copies the public key without decrypting the private key. Target-generated
-keys save their returned public metadata after a compare-and-set and read-back.
+Presentation does not change identifiers or deployed paths. A service's
+`displayPath` groups it in the TUI; leaf `identity` overrides semantic
+`service`, `responsibility`, `namespace` and `name`, while `host`, `scope` and
+`user` come from the declaration. `presentation` optionally supplies
+`explanation`, `facing` and `type`. Semantic identities must be unique.
 
 ```nix
 {
@@ -97,22 +66,19 @@ keys save their returned public metadata after a compare-and-set and read-back.
 
 Unset password leaves, and leaves declaring `valueGenerator`, are generated
 on the target during deployment unless they set `externalInputRequired = true`
-or `generateOnDeploy = false`. See "Values generated at deployment" in the top
-level README for the `valueGenerator` format.
+or `generateOnDeploy = false`. See [Generation](#generation) for the `valueGenerator` format.
 
 `derivedFrom = { identifier; prefix; suffix; tomlPath; }` deploys another stored
-secret's value, framed, instead of a value of its own; see "Values derived
-from another value" in the top level README.
+secret's value, framed, instead of a value of its own; see [Derived values](#derived-values).
 
 `kind = "operator"` declares an operator-only value with an optional
 `generator = { installable; args; }`; it is never deployed. `lib.operatorPublicKey
 STORE IDENTIFIER` returns its stored public key as base64, or null. See
-"Operator-only secrets" in the top level README.
+[Operator-only values](#operator-only-values).
 
 `requiredForInstall = true` makes evaluation fail, naming the identifier,
 while the leaf has no value in `storeFile`; `requiredBeforeInstall` adds
-identifiers declared elsewhere. See "Values required before install" in the
-top level README.
+identifiers declared elsewhere. See [Install prerequisites](#install-prerequisites).
 
 Only consumer compatibility limits belong in `consumerConstraints`. For example,
 if a program rejects values longer than 64 characters, declare
@@ -171,20 +137,21 @@ Public information uses a leaf with `kind = "public-info"`,
 `sharedPublicId = "storage-box/known-hosts"`, `expectedSshHost`, and
 `expectedSshPort`. Its destination is the corresponding
 `/persistent/public-info/storage-box/known-hosts`, owned by root with mode
-`0644` and `contentType = "ssh-known-hosts"`. The value is one exact Ed25519
-`[host]:port` known-hosts line, stored in plaintext under
+`0644` and `contentType = "ssh-known-hosts"`. The value contains pinned known-hosts lines, stored in plaintext under
 `[public_info."storage-box/known-hosts"]` in `nix-secrets.toml`. The same value
 can be deployed to multiple hosts; each target checks the host, port, key
 format, and destination again. Public-info leaves never create a
-secrets-readiness waiter.
+secrets-readiness waiter. `expectedSshHosts` allows additional hostnames and
+Multiple host-key pins are allowed. All leaves sharing an ID must
+agree on their validation settings. These features need receiver protocol 4.
 
 Set `installDefaultIfMissing = true` on a public-info leaf and
 `publicInfoInventoryFile = "/absolute/path/to/nix-secrets.toml"` to embed only
 that public value as a first-boot default. Evaluation reads the TOML file and
 copies the selected public value into a small store file. A Rust one-shot
 installs it into a managed public-info generation only when the destination is
-absent; later NixOS switches leave deployed rotations intact. If the TOML
-entry is unset, no default unit is generated. The inventory path must be
+absent; later NixOS switches leave deployed rotations intact. A declared `defaultValue` is used when the stored public value is missing.
+Without either value, no default unit is generated. The inventory path must be
 readable during Nix evaluation.
 
 The normalized public inventory is available as
@@ -198,14 +165,140 @@ tree. It creates one waiter per service. Only units named by `consumerUnits`
 receive `Requires=` and `After=` edges. It does not add a dependency to
 `multi-user.target` or SSH.
 
-The TUI can save named view profiles with `S`. Profiles live in the repository's
-`nix-secrets-profiles.toml`, separately from encrypted secrets. They preserve
-the ordered tree attributes, attribute filters, type filter, and audience
-filter. Search text is transient and is never written to a profile. Opening
-the profile list leaves the current view intact; selecting a profile loads it.
-The status pane marks a loaded profile as modified when its view settings
-change. `n` saves under a new name, `s` confirms overwriting the selected
-profile, and `d` confirms deletion. These controls also work by mouse.
-The backend owns the file, writes it atomically, rejects malformed files and
-symlinks, and notifies other connected clients when profiles change. A stale
-client must reload before writing over another client's update.
+
+## Generation
+
+A deployment never stops on the first unset value. When a requested value is
+unset in `nix-secrets.toml`, the target generates it itself, installs it, and
+returns only an age ciphertext for its recipients. The TUI verifies the
+recipients without decrypting and stores the record through the normal
+conditional write. The approval dialog lists these values as "will generate N
+values on the target", and a notice lists them after deployment. Values that
+already exist are never regenerated.
+
+A leaf is generated when it is unset and:
+
+- has `valueType = "password"`: a 32-character password, or the length and
+  alphabet its `consumerConstraints` allow; or
+- declares `valueGenerator`, which fixes the exact bytes:
+
+```nix
+# prefix + encode(<bytes> random bytes) + suffix, byte for byte.
+valueGenerator = {
+  kind = "random-bytes";
+  bytes = 32;               # 16 through 1024
+  encoding = "base64";      # "base64" (padded), "base64url" (unpadded), or "hex"
+  prefix = "";              # optional literal text, at most 1024 bytes
+  suffix = "";              # optional literal text, e.g. "\n"
+};
+```
+
+A leaf is never generated when it is public information, has
+`externalInputRequired = true`, or sets `generateOnDeploy = false`. Set the
+latter for a value that must equal another leaf's value, such as a key shared
+by two hosts: each host would otherwise generate its own. A `valueType = "key"`
+leaf without `valueGenerator` is never generated, since its format is unknown.
+If a requested value cannot be generated, it is not deployed and is listed
+with its reason, such as "generateOnDeploy = false"; everything else deploys.
+
+## Derived values
+
+`derivedFrom` deploys a framed copy of another stored, non-derived secret. It
+has no independent ciphertext or editable value:
+
+```nix
+secrets.credentials = {
+  destination = { /* path, category, owner, group, mode */ };
+  derivedFrom = {
+    identifier = "HOST.services.app.token";
+    prefix = "token=";
+    suffix = "\n";
+    # Optional: select a string field if the source is TOML.
+    # tomlPath = [ "authentication" "token" ];
+  };
+};
+```
+
+The deployed bytes are `prefix + source + suffix`. Changes to the source,
+framing or `tomlPath` change the derived version. A missing TOML field or
+invalid TOML is an error.
+
+If the source is generated during the same deployment, the target derives the
+value and publishes both atomically; only the source ciphertext is returned.
+An unset symmetric source owned by another host may be generated by the first
+host deployed, using the source's generator and recipients. Its ciphertext is
+stored under the source identifier; later deployments reuse it. Private keys
+are generated only on their owning host. Other missing sources are skipped.
+
+Target generation needs receiver protocol 2. Cross-host source generation and
+`tomlPath` need protocol 3. An older receiver can still receive already-stored
+values that do not use unsupported features.
+
+## Operator-only values
+
+`kind = "operator"` stores an encrypted value without a deployment destination.
+It is excluded from target manifests, readiness checks and deployment requests.
+An optional keypair generator runs on the operator's machine when requested:
+
+```nix
+services.nixSecrets.services.signing.secrets.private-key = {
+  kind = "operator";
+  generator = {
+    installable = "github:owner/signing-tool#signer";
+    args = [ "keygen" "--stdio" ];
+  };
+};
+```
+
+The generator runs as `nix run INSTALLABLE -- ARGS` with empty stdin. Arguments
+are public metadata. It must exit 0, write the private key to stdout (at most
+1 MiB), write the public key to fd 3 (at most 64 KiB), and write neither key to
+disk. Stderr is displayed on failure.
+
+The private key is encrypted; the public output is stored as base64 in
+`public_key`. `lib.operatorPublicKey STORE IDENTIFIER` returns that public
+value or null without decryption. The TUI copies printable public keys as text
+and binary keys as base64.
+
+## Install prerequisites
+
+Set `requiredForInstall = true` on a non-derived leaf when its stored value or
+public key is required for evaluation. `requiredBeforeInstall` lists additional
+identifiers declared elsewhere:
+
+```nix
+services.nixSecrets = {
+  storeFile = toString ./nix-secrets.toml;
+  requiredBeforeInstall = [ "HOST.services.signing.private-key" ];
+};
+```
+
+Evaluation fails with the missing identifier. Operator keys with generators
+require their stored public half; public-info leaves require their shared
+record or default; other leaves require an encrypted record.
+`storeFile` defaults to `publicInfoInventoryFile`.
+
+`lib.requireOperatorPublicKey STORE IDENTIFIER` returns the public key as
+base64 or fails instead of returning null. These helpers read public metadata
+only. Runtime service secrets belong in deployment, not evaluation.
+
+## Target-local SSH keys
+
+A `generatedSecret` with `type = "local-ssh-key"` generates or reuses an
+Ed25519 private key on its target. `output` has the same path, category,
+ownership, mode and content-type fields as a destination. The private key never
+returns to the operator; its dated public key is stored as metadata.
+
+Optional `generatedSecret.registerAt` names an encrypted public-key inventory.
+Declare that destination with `contentType = "named-ssh-ed25519-public-keys"`
+and `authorizedForUser = "ACCOUNT"`. The receiver accepts only unique named
+Ed25519 keys. After registration updates the inventory, a separate deployment
+approval installs it on the receiving host. Conditional writes and read-back
+checks prevent silently overwriting another operator's registrations.
+
+## Deployment audit
+
+Successful receiver transactions write root-owned, value-free events under
+`/run/nix-secrets/audit/`: target, time, identifiers, receiving SSH account/key
+names, and newly set versus replaced values. `receiver.auditGroup` grants
+reporters access to these events without granting access to secret files.

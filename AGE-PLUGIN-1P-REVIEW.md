@@ -46,7 +46,7 @@ Personal/Private vaults.
 What changed is what the authorized session is used for:
 - it reads exactly one private key;
 - it runs in its own session, so the grant ends with the launcher (see
-  README "Encryption");
+  [Command reference](COMMANDS.md#local-decryption));
 - it costs one prompt per deployment or secret request.
 
 With `--1password-shared-session`, the launcher keeps the caller's session,

@@ -1,783 +1,170 @@
 # nix-secrets
 
-`nix-secrets` is a repository-aware TUI for editing encrypted secrets and
-deploying them to NixOS machines. Nix declares the required secret tree and
-its recipients; secret plaintext never becomes a Nix value, derivation, store
-path, command-line argument, or Git object.
+Edit encrypted secrets and deploy them to NixOS hosts. Nix declares recipients,
+file destinations and consuming services. Values are stored with age encryption
+in `nix-secrets.toml`; plaintext stays out of Nix evaluation and the Nix store.
 
-The repository contains a Rust workspace with frontend, backend, deployment
-relay, and target programs. A NixOS module turns the same evaluated declaration
-into target paths, readiness checks, and service dependencies.
+The TUI runs where your keys are, typically a laptop. The repository and backend
+can be on another machine. Secret deployment is separate from system updates.
 
-## Invocation
+## Install
 
-The command grammar is:
-
-```text
-nix-secrets [SSH_ARG ...] -- REPOSITORY
-```
-
-When no argument appears before `--`, the repository and backend are local:
-
-```console
-$ nix-secrets -- ~/projects/infrastructure
-```
-
-Otherwise every argument before `--` is passed directly to OpenSSH:
-
-```console
-$ nix-secrets -p 222 user@workstation -- ~/projects/infrastructure
-```
-
-`REPOSITORY` is one argument. On a remote backend, a leading `~/` is expanded
-by the backend from that account's home directory. It is not expanded by a
-remote shell. The launcher uses a fixed remote command and protocol; it never
-constructs a shell command from these arguments.
-
-### Using a secret in another program
-
-```text
-nix-secrets with-secrets [OPTIONS] IDENTIFIER... -- COMMAND [ARGUMENT ...]
-nix-secrets pipe-secret [OPTIONS] IDENTIFIER -- COMMAND [ARGUMENT ...]
-nix-secrets pipe-secret [OPTIONS] IDENTIFIER
-```
-
-A program that runs on the backend host, for example an install script on the
-machine that holds the repository, asks the operator's open TUI for values.
-Decryption therefore happens where the operator and their 1Password are, not
-on the backend host.
-
-`with-secrets` connects to the running backend of the repository (found like
-the TUI finds it; `--repository PATH` defaults to the working directory,
-`--backend-socket PATH` names the socket directly) and asks for all listed
-values at once. The backend reads the requester's PID, executable, command
-line and working directory from `/proc` and forwards the request to the
-attached TUI. If several TUIs are attached, the one that attached last is
-asked. The TUI shows a modal over whatever is open: a table of the values
-and their kinds, the recipient and its short fingerprint, where the private
-key comes from, the requesting command, its directory and parent, and a
-countdown. `d` or the Details button shows full descriptions, fingerprints
-and process information. Descriptions and command lines wrap in the summary.
-Both commands accept `--reason TEXT`, shown as "Requestor provides unvalidated
-reason"; this explanation comes from the caller, while process identity is
-read by the backend from the kernel. Only Ctrl+Shift+Y or the Yes button sends; n, Enter and
-Esc deny, and after 120 seconds the request is denied. On approval the TUI
-decrypts the whole batch with one 1Password authorization and returns the
-values over its authenticated backend connection.
-
-When a request opens, the TUI rings the terminal bell, sends a desktop
-notification (OSC 777 for GNOME Console and other VTE terminals, OSC 9 for
-iTerm2, kitty, WezTerm, Windows Terminal and foot) and sets the window title
-to "⚠ nix-secrets: secret request" until the request closes, saving and
-restoring the previous title where the terminal keeps a title stack. The
-bell rings once more when 30 seconds are left. Unsupported sequences are
-ignored. For the bell to be noticed from another window, the terminal has to
-turn it into an urgency hint or a visual bell: GNOME Console and GNOME
-Terminal mark the window urgent by default; kitty needs
-`window_alert_on_bell yes` (the default), WezTerm a `visual_bell` or
-`audible_bell` setting. Inside tmux, the bell reaches the outer terminal with
-the default `bell-action any`, and the notifications need
-`set -g allow-passthrough on` (tmux 3.3 or later).
-
-The backend keeps the values only in memory and serves them on a private
-socket (0600, in a new 0700 directory under `$XDG_RUNTIME_DIR`), answering
-only same-user processes started by the `with-secrets` process. It runs
-`COMMAND` with `NIX_SECRETS_SESSION` set to that socket. When the command
-exits, the socket is removed, the values are erased, and `with-secrets` exits
-with the command's status. If no TUI is attached, or the operator denies,
-`COMMAND` does not run and `with-secrets` fails. Only one request may wait for
-the operator at a time.
-
-`pipe-secret` hands one value to another program without writing it to disk.
-With `-- COMMAND` it runs the command with the value on its stdin and exits
-with the command's status. Without it, the value is written to stdout for a
-pipeline; stdout must not be a terminal, and nothing else is ever written to
-stdout. Its source is:
-
-1. inside `with-secrets` (`NIX_SECRETS_SESSION` set): the session, without a
-   prompt. A value that was not part of the approved request is refused; it
-   never raises a new prompt;
-2. otherwise the attached TUI, as a request for this one value;
-3. with `--local`: decrypted in this process, through the one-shot 1Password
-   launcher or `--secret-identity PATH`, as before secret requests existed.
-   `with-secrets --local` does the same for a batch, still with one
-   authorization, and serves the session itself. `--1password-shared-session`
-   and `--schema-file PATH` (with `--backend-socket`) apply only here.
-
-Without a TUI and without `--local`, both commands fail with "open the
-nix-secrets TUI and retry"; they never fall back to decrypting locally.
-
-```console
-$ nix-secrets with-secrets host.services.nmbl.generation-key -- \
-    nmbl-install --target dns-vps
-$ nix-secrets pipe-secret host.services.nmbl.generation-key -- \
-    nmbl-sign sign --key-stdin --domain generation image.efi
-$ nix-secrets pipe-secret host.services.nmbl.generation-key | nmbl-sign sign --key-stdin …
-```
-
-A `keyCommand = [ "nix-secrets" "pipe-secret" "<id>" ]` option that a program
-runs once per signature should be run under `with-secrets`: the operator then
-approves once, and every signature reads the value from the session.
-
-## Declared secret tree
-
-The program evaluates the repository and consumes this shape:
-
-```text
-<hostname>.<services|user-{user}-services>.<service>.<service-defined structure>
-```
-
-Leaves are secrets. The TUI presents the structure as a file tree and marks
-each leaf `set` in green or `unset` in red. Pressing Enter opens a masked input
-editor. Pasting while a leaf is selected sets it from the clipboard, and a
-paste in the entry field inserts the pasted text. Ctrl+V reads the local
-clipboard directly, only when pressed: it reads the X11 CLIPBOARD selection
-in-process, over Xwayland under Wayland, with an unmapped helper window, so no
-window appears. `wl-paste` is not used because on compositors without a
-data-control protocol, such as GNOME, it maps a window for every read. It
-works even when the terminal refuses to paste; held keys read once, and one
-trailing newline is dropped.
-Space collapses or expands the selected group, and a click on a group
-selects and toggles it; `-` collapses all groups and `+` expands them. A
-collapsed group shows `▸`, an expanded one `▾`. A collapse that hides the
-selected row moves the selection to the collapsed group. Groups are keyed by
-their path of attribute values, so collapsed groups survive refreshes, value
-changes, filters, and tree reorders that keep the same path. The state lasts
-for the session and is not stored in profiles, which hold only filters and
-tree order. While a search is active, every group holding a match is shown
-expanded; groups folded during a search stay folded until the query changes,
-and clearing the search restores the earlier state.
-Clicking an unset input value selects it and opens its entry field. While a
-search is active, the status line counts matches and those hidden by filters.
-Attributes that do not apply to a value, such as the user of a system
-service, add no tree level or filter value; a filter on them leaves such
-values visible. Replacing
-an existing value requires confirmation after the new value is entered and
-saved with Enter; declining returns to the entry field with the typed value.
-Ctrl+R or the "Reveal current" button in that field or the confirmation
-shows the stored value, and closing it returns to the dialog. Before
-confirming, the backend compares the stored record with `HEAD:nix-secrets.toml`; only HEAD is checked, not older
-commits. If the value is not in HEAD, or git cannot answer, a warning explains
-that overwriting loses the old value for good. Only Ctrl+Shift+Y or its Yes
-button confirms; n, Enter, Space and Esc keep the value. `O` opens session
-settings, which reset on restart and are never written to the repository. With
-"Autosave unset on paste" on, toggled by Tab or a click in the entry field, a
-one-line paste into an unset value saves it at once.
-Press `d` to delete a selected value after confirmation; a value that is not
-committed in HEAD, or whose state git cannot tell, gets the same loss warning
-and keys as replacing it, including Ctrl+R to reveal it. Press `r` to reveal it,
-`c` to copy it, or `p` to copy the public half of a stored OpenSSH private key
-without decrypting. Dialogs appear over the tree. A success notice closes on the
-next key or click, which then performs its usual action; above a confirmation
-or entry dialog that key only closes the notice. Errors stay until Enter or a
-click on OK. Press `1` for values needing operator input, `2` for all items,
-`3` for private keys, `4` for passwords, or `5` for public information.
-Press `6` for all audiences or `7` for human-facing values; `/` searches names,
-identifiers, and descriptions. The views compose. Key and password views use
-the declared `valueType`; untyped certificates and other values remain in the
-all-items view. A leaf's optional description appears when selected. Local
-keys generated on a target do not appear as editable leaves.
-
-For all missing passwords, press `G` and choose `p` for random passwords or
-`w` for passphrases. Existing values are never replaced by this action.
-For one password leaf, press `g` and choose `p` for a random password or `w` for
-a word passphrase. The preview starts masked; `r` reveals it, `c` copies it,
-Enter encrypts and stores it, and Escape discards it. Replacement requires a
-separate confirmation. Copy uses `wl-copy` with the value on standard input;
-the opt-in `nix-secrets-clipboard` package supplies it without adding a
-clipboard dependency to other package outputs.
-
-The declaration can name SSH encryption recipients once and select them by
-name for the whole tree, a subtree, or a leaf. Recipient rotations retain
-earlier key identities in the TOML registry so existing ciphertext remains
-decryptable. Transport host keys authenticate connections separately.
-
-### Operator-only secrets
-
-A leaf with `kind = "operator"` is stored encrypted for its recipients like any
-other secret, but it has no destination. It never enters a host manifest, a
-deployment request, a readiness waiter, or deployment's missing-value checks.
-Use it for keys only the operator uses, such as image or closure signing keys.
-Set, reveal, paste and delete work as for other values. The TUI shows it as an
-operator key, in the Keys view.
-
-An operator leaf may declare a keypair generator. nix-secrets stays
-independent of any key tool: the consumer names a flake installable and its
-arguments, and the TUI's `g` runs it on the operator's machine only when asked:
+Add the flake to your configuration:
 
 ```nix
-services.nixSecrets.services.nmbl.secrets.generation-key = {
-  kind = "operator";
-  description = "NMBL boot generation signing key";
-  generator = {
-    installable = "github:sirati/siratis-nmbl-bootloader?dir=sirati-nmbl/nmbl-init-rs#nmbl-sign";
-    args = [ "keygen" "--alg" "ml-dsa-65" "--stdio" ];
-  };
-};
+inputs.nix-secrets.url = "github:sirati/nix-secrets";
 ```
 
-The generator contract:
-
-- it is run as `nix run INSTALLABLE -- ARGS…` with an empty stdin; `args`
-  are public schema data and must not contain secrets;
-- it writes the private key, byte for byte as it should be stored, to stdout
-  (at most 1 MiB);
-- it writes the public key, byte for byte, to file descriptor 3 (at most
-  64 KiB);
-- it writes neither to disk and exits 0; stderr is shown only on failure.
-
-The test suite checks this contract with a scripted generator. Set
-`NIX_SECRETS_NMBL_SIGN=/path/to/nmbl-sign` when running `cargo test` to also
-generate an ML-DSA-65 key with NMBL, sign through `pipe-secret` and
-`nmbl-sign sign --key-stdin`, and verify with the stored public key.
-
-nix-secrets reads both pipes concurrently, encrypts the private key to the
-leaf's recipients, and stores the public key in plain, base64-encoded, as
-`public_key` beside the ciphertext in `nix-secrets.toml`. `p` copies it: as
-text when it is printable, otherwise as base64. The consumer can reference it
-from Nix without decrypting anything:
+On the operator machine, install `nix-secrets-1password` for 1Password support:
 
 ```nix
-let
-  # Base64 of the generator's fd 3 output, or null while the key is unset.
-  encoded = nix-secrets.lib.operatorPublicKey ./nix-secrets.toml
-    "server-hetzner2.services.nmbl.generation-key";
-in
-{
-  # A binary key, such as NMBL's raw ML-DSA public key, is decoded in a build
-  # step; nothing secret is involved.
-  boot.nmbl.signing.publicKeys = lib.optional (encoded != null) (
-    pkgs.runCommand "nmbl-generation-key.pub" { } "echo ${encoded} | base64 -d > $out"
-  );
-}
-```
-
-### Values required before install
-
-Some values must exist before a host can be installed at all, because
-evaluation bakes them in: an operator key whose public half is part of the
-system, such as the NMBL generation signing key, or a value whose public part
-feeds another option. Mark such a leaf, of any kind except `derivedFrom`, with
-`requiredForInstall = true`:
-
-```nix
-services.nixSecrets = {
-  # The committed store, read purely at evaluation (defaults to
-  # publicInfoInventoryFile).
-  storeFile = toString ./nix-secrets.toml;
-  services.nmbl.secrets.generation-key = {
-    kind = "operator";
-    requiredForInstall = true;
-    generator = { installable = "…#nmbl-sign"; args = [ "keygen" ]; };
-  };
-  # Values declared elsewhere, e.g. on another host, can be required by
-  # identifier.
-  requiredBeforeInstall = [ "ns1.services.dns.update-key" ];
-};
-```
-
-While such a value is missing from `storeFile`, evaluating the host fails with
-an assertion per value:
-
-```text
-generate/enter host.services.nmbl.generation-key in the nix-secrets TUI first: it is required before this host can be installed
-```
-
-An operator leaf with a generator counts as present once its public key is
-stored; public information once its shared record exists; anything else once
-its encrypted record exists. The TUI's Required view lists these values until
-they are set.
-
-`lib.requireOperatorPublicKey STORE IDENTIFIER` is `operatorPublicKey` that
-throws the same message instead of returning null, for a value that
-evaluation cannot do without:
-
-```nix
-boot.nmbl.signing.publicKeys = [
-  (pkgs.runCommand "nmbl-generation-key.pub" { } ''
-    echo ${nix-secrets.lib.requireOperatorPublicKey ./nix-secrets.toml "host.services.nmbl.generation-key"} | base64 -d > $out
-  '')
+environment.systemPackages = [
+  inputs.nix-secrets.packages.${pkgs.system}.nix-secrets-1password
 ];
+programs._1password.enable = true;
+programs._1password-gui.enable = true;
 ```
 
-Both read only the committed TOML, so evaluation stays pure.
+Enable SSH-agent and CLI integration in the 1Password desktop app. On NixOS,
+the CLI must use `/run/wrappers/bin/op`. Decryption reads the matching private
+key through the CLI; SSH authentication uses the agent. These are separate
+permissions. See [1Password integration](AGE-PLUGIN-1P-REVIEW.md).
 
-### Committing from the TUI
+Other packages: `nix-secrets-age` for `--secret-identity /runtime/path/to/key`,
+`nix-secrets-clipboard` for clipboard-copy support, or the default package when
+runtime tools are already in `PATH`.
 
-`C` or the "Git Commit" button opens a commit dialog. It shows the
-`git diff --stat HEAD` of the two files the backend manages,
-`nix-secrets.toml` and `nix-secrets-profiles.toml`, and says whether commits
-are signed. Type the message directly; Enter starts a new line. Tab or a
-click on "Amend" toggles `--amend`, and with an empty message fills in the
-message of `HEAD`; an amend with an empty message keeps it. Ctrl+O or a
-click toggles "Signoff" (`--signoff`). Ctrl+E or "Open in editor" suspends
-the TUI and edits the message in `$VISUAL`, `$EDITOR` or `vi` on the machine
-running the TUI; the file lives in a new 0700 directory under
-`$XDG_RUNTIME_DIR` and is deleted afterwards. Ctrl+S or "Commit" commits;
-Esc closes the dialog and keeps the draft for next time.
+## Configure a target
 
-Only the two managed files are staged and committed (`git add -- <files>`,
-then `git commit -- <files>`). If anything else is already staged, the
-commit is refused and the dialog names those paths. Committing only our
-paths would also leave them out, but silently, and a later plain
-`git commit` would pick them up unreviewed. An empty message is refused
-unless amending. Success shows the new hash and the commit line; a failure
-shows git's full error output. The overwrite and delete warnings ask the
-backend about `HEAD` each time they open, so they see the new commit.
-
-The backend runs `git`, but signing uses the ssh-agent of the machine running
-the TUI, which may be a laptop connected over SSH. For the duration of one
-commit:
-
-1. The TUI asks the backend to commit with a forwarded agent over the
-   existing, peer-credential-checked backend connection.
-2. The backend creates a private directory (0700) under `$XDG_RUNTIME_DIR`
-   with a socket (0600) that accepts only its own user, and runs
-   `git -c gpg.ssh.program=ssh-keygen commit ...` with `SSH_AUTH_SOCK`
-   pointing there, for that child only. `ssh-keygen -Y sign` signs through
-   the agent; `op-ssh-sign` would ask a 1Password app on the backend host
-   instead. `user.signingkey` and the rest of the configuration stay as they
-   are.
-3. Each agent request travels to the TUI as a frame on the backend
-   connection. Both the backend and the TUI allow only
-   `REQUEST_IDENTITIES` and a `SIGN_REQUEST` whose data is an SSHSIG blob in
-   the `git` namespace. Adding or removing keys, locking, extensions, and
-   signing anything else, such as an SSH login challenge, get
-   `SSH_AGENT_FAILURE`.
-4. The TUI answers from its own `SSH_AUTH_SOCK`, so 1Password asks for
-   approval there. When git exits, the backend removes the socket and its
-   directory.
-
-This works the same when the TUI runs on the backend host. Without an
-`SSH_AUTH_SOCK` in the TUI, git signs as the backend's own configuration
-would.
-
-## Backend
-
-The frontend connects to a Unix socket selected by repository configuration,
-or by default:
-
-```text
-$XDG_RUNTIME_DIR/nix-secrets/<repository-id>.sock
-```
-
-It accepts the socket only when the peer process has the same effective user
-as the frontend. If no valid backend is listening, the program starts one with
-a fixed `nix run` invocation and the freshly evaluated secret declaration.
-Several TUI frontends can share one backend. The backend serializes changes to
-`nix-secrets.toml` and replaces that file atomically.
-While the TUI is open, the backend pushes change and deployment-request notices
-over a subscription. A local worker handles SSH, encryption, decryption, and
-deployment work; terminal input and drawing stay on the frontend thread.
-
-The backend stores ciphertext, recipient references, and public metadata in
-`nix-secrets.toml`. A shared public-information entry has one plaintext TOML
-value even when several hosts deploy it.
-Encryption and decryption happen in the TUI process.
-
-## Encryption
-
-The frontend sends the complete secret to `age` through an anonymous pipe.
-`age` encrypts and authenticates it directly to every configured ordinary
-`ssh-ed25519` or `ssh-rsa` recipient. The resulting age file is base64-encoded
-for `nix-secrets.toml`; age alone defines the cryptographic file format.
-
-Before encryption, the frontend prefixes the raw value with a compact payload
-containing a fixed format tag, the canonical full schema path, and a random
-opaque version ID. Decryption requires the requested path, TOML map key, outer
-version ID, and authenticated inner values to agree. Replacing a value creates
-a new version and ciphertext without changing its schema identifier.
-
-The default key provider is 1Password. Encryption needs only the SSH public
-key. For decryption, the private key comes from 1Password through `op`, so
-neither the TUI nor the repository needs a private key file. This uses 1Password
-CLI authorization rather than the SSH-agent signing API. The TUI runs every
-1Password decryption through `nix-secrets-1password --batch --one-key`. It
-reads the ciphertexts, lists the SSH key items' fingerprints (metadata, no
-key material), picks the one key that every ciphertext is encrypted to, and
-reads only that key with `op read op://<vault>/<item>/private key`. It hands
-the key to `age --decrypt --identity /dev/fd/3` on a pipe for each value.
-age-plugin-1p's `-j 1p` would read every SSH private key in the account.
-
-A deployment decrypts all its values, including the sources of derived
-values, in one such run: one 1Password prompt per deployment, next to the
-one SSH signature for its connection. The prompt authorizes the CLI for your
-1Password account. 1Password's app integration cannot scope it to a vault or
-an item; see [AGE-PLUGIN-1P-REVIEW.md](AGE-PLUGIN-1P-REVIEW.md). On Linux,
-1Password binds the authorization to the terminal it came from, or to the
-session leader when there is no terminal, for 10 minutes of use. The
-launcher therefore leads a new session without a terminal: the approval
-covers that one run, never reaches your shell, and the prompt names
-`nix-secrets-1password`. Pass `--1password-shared-session` to reuse the
-terminal's 10-minute authorization instead. While a slow operation runs, a
-Working strip shows its name and elapsed time.
-
-The flake keeps runtime tools opt in. Use `.#nix-secrets-1password` for the
-1Password provider. The desktop-app integration accepts only an `op` that is
-setgid `onepassword-cli`; on NixOS enable `programs._1password` so
-`/run/wrappers/bin/op` exists. The package appends its own 1Password CLI to the
-end of `PATH`, so a system `op` always takes precedence. The bundled one is only
-a fallback, for example for `OP_SERVICE_ACCOUNT_TOKEN`. Use `.#nix-secrets-age` together with
-`--secret-identity /runtime/path/to/key` for a private identity file. The bare
-package expects compatible `age` and OpenSSH programs already in `PATH`.
-
-## Deployment
-
-### SSH authentication from backend commands
-
-`with-ssh-agent` gives a backend command a temporary agent socket exposing only
-the specified Ed25519 public key. An SSH login signature opens an approval in
-the attached client TUI. After approval, the client asks its local agent
-(including the standard 1Password socket) and returns only the signature.
-The private SSH key stays on the client. No private key is fetched or exported.
-
-```sh
-nix-secrets with-ssh-agent --public-key ./update.pub \
-  --destination update@ns1.lamk.eu \
-  --reason 'Upload the approved signed ns1 generation.' -- \
-  ssh -o IdentityAgent=SSH_AUTH_SOCK -o IdentitiesOnly=yes -i ./update.pub \
-  -o StrictHostKeyChecking=yes update@ns1.lamk.eu nmbl-erofs-receive
-```
-
-Only user-authentication challenges for that key and username are allowed;
-agent mutations, extensions and Git signatures are refused. The existing Git
-relay still accepts only Git signatures. The TUI labels the caller's reason
-as unvalidated: the claimed hostname cannot be verified from an agent challenge.
-The SSH command remains responsible for strict host-key verification.
-
-### Secret deployment
-
-The TUI establishes the SSH connection to the final target through the
-backend and deployment relay as a byte-transparent path. The TUI performs host
-key verification against its own `known_hosts`: a changed key is rejected and
-an unknown key requires a warning that also identifies any known names using
-that key.
-
-The target deployer requests the secrets for a specific server. Connected
-frontends receive that request and show the target, the values to create or
-replace, and any target-generation tasks. The frontend compares the target's
-manifest with its evaluated schema, asks for approval, decrypts the requested
-values locally, and sends plaintext only inside the end-to-end SSH connection.
-Unknown SSH host keys require a separate approval before the target manifest
-is read. Editing or selecting one TUI item never initiates a deployment.
-
-The deployment offers only the key the target's forwarder account accepts,
-`services.nixSecrets.deployment.identityPublicKeys`, which defaults to the
-forwarder's `authorizedKeys` and is part of the evaluated schema. It uses
-the private key file of this machine's ssh config that holds it, or else asks
-the ssh-agent to sign with exactly that key (`IdentitiesOnly`). An agent
-holding many keys, such as 1Password's, is therefore not cut off by the
-target's `MaxAuthTries`. A deployment opens one authenticated connection, so
-the agent asks once. If the key is in neither place, the deployment fails and
-names the key by its agent comment and fingerprint. A failure after approval
-is final: the request is resolved with the reason, which `nix-secrets deploy
---wait` prints, and is not offered again. A host key that differs from
-known_hosts is reported with the host, both fingerprints, the known_hosts file
-and line, and the `ssh-keygen -R` command that removes the old key.
-
-The deployment dialog has three steps. Step 1/3, shown only for an unknown
-host key, trusts the key. It also names the login key: the schema's
-`recipientPublicKeys` name, the agent's title for it (the 1Password item,
-such as "IT Secrets") and a short fingerprint, or "not in your ssh-agent".
-Step 2/3 lists "Will be sent" (set, replaced, derived, public information and
-target tasks) and "Will be generated" (on the target), with a checkbox on
-every row, all checked at first. Space toggles the row under the cursor
-(↑↓), `a` its section, and a click on a row, label included, toggles it.
-Approving sends exactly the checked rows. Leaving rows out after the target
-was read needs deployment protocol 4 on the target. Values that cannot be
-deployed are listed under "Missing", grouped by why, without a checkbox. The
-decrypting key is named the same way as the login key. The dialog is as
-wide as its longest group header and identifier, as far as the screen
-allows, and scrolls vertically instead of cutting rows. Step 3/3 is the
-result: how many values were sent, generated, left out and missing.
-
-The operator starts a deployment. Press `D` in the tree to pick a host (the
-host of the selected row is preselected), or run from the backend host:
-
-```text
-nix-secrets deploy [--repository PATH] [--backend-socket PATH] [--wait] [--allow-partial] HOST
-```
-
-Both ask the backend to queue one deployment request for every deployable
-value of `HOST` in the evaluated schema: stored values, values generated on
-the target, derived values, public information and target tasks. Operator-only
-values are never included. The connected TUI shows it like any deployment
-request: the host-key check, the values to create or replace, what the target
-generates or derives, and the refusal when values are missing. The
-deployment runs only after the operator approves. `nix-secrets deploy` finds
-the backend like `with-secrets`. It exits 0 once the request is queued; with
-`--wait` it waits for the operator and prints the result, exiting 1 on
-rejection. Without a TUI connected to the backend it fails with "open the
-nix-secrets TUI and retry".
-
-Missing values never block a deployment: two hosts that need each other's
-values could otherwise never be deployed. Everything that can be deployed is
-deployed, and the dialog and the result list every other value, grouped by
-why: it needs input, it is filled by another host (a public-key inventory
-that other hosts' `registerAt` keys fill), it is derived from an unset
-source, or the host cannot receive it yet. Each service waits only for its
-own values, so a partial deployment is safe: a missing value keeps only its
-own consumers waiting. `--allow-partial` is accepted for compatibility and
-changes nothing. Public information with `installDefaultIfMissing` that is
-unset in the store and has no `defaultValue` is not sent; the host keeps the
-default it installs.
-
-The backend holds the host's whole evaluated configuration, so "cannot
-deploy" is decided before the host-key scan, any SSH connection or any
-1Password prompt:
-
-- a Storage Box task whose `knownHostsFile` is not public information of the
-  host for its server, or has neither a stored value nor a `defaultValue`
-  holding a key for that server;
-- a value that needs a newer receiver than the host's
-  `deployment.protocolVersion`, which the module takes from its receiver
-  package: generation on the target (2), another host's shared secret or
-  `tomlPath` (3), public information with several hosts or lines (4);
-- a derived value whose source cannot be generated in this deployment.
-
-A forwarder key that is not an OpenSSH public key refuses the deployment
-before connecting. When nothing can be deployed the dialog opens without
-contacting the host. The target checks everything again and reports a
-missing prerequisite as "not deployed: <reason>" naming the path.
-
-The target validates the request again, stages the complete update, and then
-atomically publishes it below:
-
-```text
-/persistent/secrets/<service>/<setup|service|backup>/<secret>
-```
-
-Only a consuming service depends on its readiness waiter. SSH remains
-available independently so a fresh installation can receive secrets. Missing
-secrets keep their consumers unavailable, which also prevents a machine with
-required services missing from being marked as a successful boot.
-
-Each successful receiver transaction writes a root-owned audit event under
-`/run/nix-secrets/audit/`. It records the target hostname, time, secret
-identifiers, and whether each secret was newly set or replaced. It never
-records secret values. `services.nixSecrets.receiver.auditGroup` grants a
-reporter read access to the event without granting access to secret files.
-
-`local-ssh-key` is a generated secret type for an Ed25519 key kept on the
-target. The target mixes the operator's random contribution into its kernel
-random source, generates or reuses the private key, and returns a dated public
-key. Optional `generatedSecret.registerAt` names a stored secret for the
-public-key inventory. The operator-side deployer adds the verified target
-hostname to the key name and updates that inventory in the encrypted backend.
-It queues a separate approval to deploy the changed inventory to its target.
-Declare its destination with `contentType = "named-ssh-ed25519-public-keys"`
-and `authorizedForUser = "<ssh-account>"`; the receiver then refuses values
-that are not unique named Ed25519 public keys. Registration uses a conditional
-write followed by a decrypt-and-compare read-back so two operators cannot
-silently overwrite each other's key inventory.
-Audit events include the receiving SSH account and key names.
-
-### Values generated at deployment
-
-A deployment never stops on the first unset value. When a requested value is
-unset in `nix-secrets.toml`, the target generates it itself, installs it, and
-returns only an age ciphertext for its recipients. The TUI verifies the
-recipients without decrypting and stores the record through the normal
-conditional write. The approval dialog lists these values as "will generate N
-values on the target", and a notice lists them after deployment. Values that
-already exist are never regenerated.
-
-A leaf is generated when it is unset and:
-
-- has `valueType = "password"`: a 32-character password, or the length and
-  alphabet its `consumerConstraints` allow; or
-- declares `valueGenerator`, which fixes the exact bytes:
+Import the module, declare recipients and secrets, and enable the receiver:
 
 ```nix
-# prefix + encode(<bytes> random bytes) + suffix, byte for byte.
-valueGenerator = {
-  kind = "random-bytes";
-  bytes = 32;               # 16 through 1024
-  encoding = "base64";      # "base64" (padded), "base64url" (unpadded), or "hex"
-  prefix = "";              # optional literal text, at most 1024 bytes
-  suffix = "";              # optional literal text, e.g. "\n"
-};
-```
-
-For example, a Knot TSIG key file:
-
-```nix
-valueGenerator = {
-  kind = "random-bytes"; bytes = 32; encoding = "base64";
-  prefix = "key:\n  - id: dns-transfer\n    algorithm: hmac-sha256\n    secret: ";
-  suffix = "\n";
-};
-```
-
-A leaf is never generated when it is public information, has
-`externalInputRequired = true`, or sets `generateOnDeploy = false`. Set the
-latter for a value that must equal another leaf's value, such as a key shared
-by two hosts: each host would otherwise generate its own. A `valueType = "key"`
-leaf without `valueGenerator` is never generated, since its format is unknown.
-If a requested value cannot be generated, it is not deployed and is listed
-with its reason, such as "generateOnDeploy = false"; everything else deploys.
-
-### Values derived from another value
-
-Some values must contain another secret, possibly one deployed to another
-host: a Knot TSIG key file wraps the same secret a mail server reads raw, and
-a PostgreSQL standby needs the primary's replication password. Declare the
-dependent leaf with `derivedFrom`:
-
-```nix
-# ns1: the Knot key file for the secret server-hetzner2's Stalwart reads raw.
-update-key = {
-  valueType = "key";
-  destination = { … };
-  derivedFrom = {
-    identifier = "server-hetzner2.services.stalwart.dns-update-key";
-    prefix = "key:\n  - id: stalwart-dns\n    algorithm: hmac-sha256\n    secret: ";
-    suffix = "\n";
-  };
-};
-```
-
-The deployed bytes are `prefix + <source value> + suffix`. A derived value is
-never stored, entered or generated. At deployment the TUI decrypts the source
-locally, as it does for every value it deploys, frames it, and sends it inside
-the SSH connection like any other value. It therefore always matches its
-source; changing the source, or the framing, changes the derived value's
-version, so the next deployment of the dependent host replaces it.
-
-When the source is unset but generated in the same deployment, which means it
-is on the same host, the target frames the derived value itself from the value
-it just generated or adopted. Both are published in the same atomic
-generation, and only the source's ciphertext comes back. The target computes
-the same version the operator would later compute from the stored source, so
-the next deployment changes nothing.
-
-The source must be a stored, non-derived secret. If it is unset and not
-generated by the same deployment:
-
-- a symmetric secret of another host (a stored leaf with a generator and no
-  content type, such as a TSIG secret) is generated on the host deployed
-  first. That target generates it with the source leaf's own generator,
-  encrypts it to the source leaf's recipients, installs only its own derived
-  value, and returns the ciphertext, which the TUI stores under the source's
-  identifier without decrypting it. The owning host's later deployment sends
-  the stored value unchanged, so both hosts hold the same secret. This needs
-  deployment protocol 3 on the generating target; an older target leaves the
-  derived value out and lists it;
-- a private key is only ever generated on its own host, and any other source
-  that cannot be generated this way leaves the derived value out, listed as
-  "derived from unset …".
-
-`tomlPath` selects one string field of a TOML source instead of its whole
-value, for example the TSIG secret of an entered credentials file:
-
-```nix
-dyndns-update-key = {
-  valueType = "key";
-  destination = { … };
-  derivedFrom = {
-    identifier = "ns1.services.dyndns-rfc2136.credentials";
-    tomlPath = [ "tsig" "secret_base64" ];
-    prefix = "key:\n  - id: dyndns-rfc2136\n    algorithm: hmac-sha256\n    secret: ";
-    suffix = "\n";
-  };
-};
-```
-
-A source that is not TOML or lacks the field is a deployment error naming the
-field. The path is part of the derived value's version. Targets must be built
-with this nix-secrets to accept a `tomlPath` leaf.
-
-Generation needs a target running deployment protocol 2, which also must have
-been built from the same `valueGenerator` and constraints the TUI evaluates.
-An older target still receives values that are already set.
-
-See [PROTOCOL.md](PROTOCOL.md) for message flow and
-[THREAT-MODEL.md](THREAT-MODEL.md) for the security boundary.
-
-## How consumers should test
-
-A NixOS VM test of a configuration that uses nix-secrets should not write
-secret files by hand. Enable the mock in the test configuration instead:
-
-```nix
-services.nixSecrets.mock = {
-  enable = true;                                   # test configurations only
-  iUnderstandThisIsATestOnlyConfiguration = true;  # required whenever enable is set
-  values = {                                       # non-secret test data
-    "<service>.<leaf path>" = "…";                 # a machine service leaf
-    "HOST.NAMESPACE.SERVICE.PATH" = "…";           # any leaf, e.g. a userServices one
-  };
-  generateRest = true;                             # default
-};
-```
-
-At boot, `nix-secrets-mock-install.service` installs a value for every
-deployable leaf of the host that is not installed yet. It runs
-`secret-deploy --mock-install`, which validates and publishes the values
-with the same code as a real deployment: owner, group, mode, generations,
-service links and versions are exactly as in production, so the readiness
-waiters release their consumers normally. The unit is ordered before the
-consumer units and works with or without `receiver.enable`.
-
-Where the values come from:
-
-- An entry in `values`. Each key must name a deployable leaf of this host, or
-  evaluation fails; operator-only leaves are never deployed and not accepted.
-  A key naming a derived leaf gives its source value, which is then framed.
-- Otherwise, with `generateRest`:
-  - a leaf the target would generate at deployment uses the same generator:
-    the password rules under its `consumerConstraints`, or its
-    `valueGenerator`;
-  - a derived leaf is framed with its real `prefix`/`suffix` and version from
-    its same-host source's mock value. A source on another host gets a random
-    value, since that host's mock value is not known here;
-  - a `local-ssh-key` or `storage-box-ssh-key` task gets a fresh Ed25519
-    private key. No Storage Box is contacted;
-  - public information gets a known-hosts line for its `expectedSshHost` and
-    `expectedSshPort` (a declared public default, when present, installs first);
-  - any other leaf gets a value that passes the receiver's content checks: a
-    key for `openssh-private-key`, its public half for `openssh-public-key`,
-    `mock-<stamp> ssh-ed25519 …` for `named-ssh-ed25519-public-keys`, and
-    random base64url text otherwise.
-- With `generateRest = false`, a leaf without a value fails the unit, which
-  lists every missing leaf.
-
-Installed leaves are never replaced, so generated values stay the same across
-reboots, and a fully installed host is left untouched.
-
-The mock never reads or writes `nix-secrets.toml` and never talks to a
-backend. Explicit `values` are written to the world-readable Nix store: use
-only non-secret test data.
-
-Guard: the mock replaces every real secret of the host, so it must never be
-enabled in production by accident. Evaluation fails unless
-`iUnderstandThisIsATestOnlyConfiguration = true` is set next to
-`enable`. The mock does not require the NixOS test framework's `qemu-vm`
-module, because consumers also test custom VM setups that do not import it,
-such as a real disk image booted under SeaBIOS; the explicit acknowledgement
-is the guard. A mocked system is marked by the `nix-secrets-mock` entry in
-`system.nixos.tags` (and so in its boot label), an evaluation warning, and
-`/etc/nix-secrets/MOCK-SECRETS-TEST-ONLY`.
-
-Example:
-
-```nix
-pkgs.testers.runNixOSTest {
-  name = "app";
-  nodes.machine = {
-    imports = [ nix-secrets.nixosModules.default ./machine.nix ];
-    services.nixSecrets.mock = {
+{ inputs, ... }: {
+  imports = [ inputs.nix-secrets.nixosModules.default ];
+  services.openssh.enable = true;
+  services.nixSecrets = {
+    enable = true;
+    recipientPublicKeys.primary = "ssh-ed25519 AAAA... operator";
+    defaultRecipientNames = [ "primary" ];
+    receiver.enable = true;
+    forwarder = {
       enable = true;
-      iUnderstandThisIsATestOnlyConfiguration = true;
-      values."app.api-token" = "test-token";
+      authorizedKeys = [ "ssh-ed25519 AAAA... deployer" ];
+    };
+    services.app = {
+      consumerUnits = [ "app.service" ];
+      secrets.password = {
+        valueType = "password";
+        destination = {
+          path = "/persistent/secrets/app/service/password";
+          category = "service";
+          owner = "app";
+          group = "app";
+          mode = "0400";
+        };
+      };
     };
   };
-  testScript = ''
-    machine.wait_for_unit("app.service")
-  '';
+  services.secretsReadyWaiter.enable = true;
 }
 ```
+
+The destination owner and group must exist. Expose each host's evaluated
+inventory from the repository flake:
+
+```nix
+nixSecretsSchemas = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } (
+  nixpkgs.lib.mapAttrsToList
+    (_: host: host.config.services.nixSecrets.evaluated)
+    self.nixosConfigurations
+);
+apps.x86_64-linux.secrets-backend =
+  inputs.nix-secrets.apps.x86_64-linux.secrets-backend;
+```
+
+Export `secrets-backend` for each backend architecture you use. Include only
+host configurations that enable nix-secrets in the inventory above.
+
+Set `services.nixSecrets.deployment.host` and `deployment.destination` if the
+hostname is not the SSH address. By default deployment uses
+`nix-secrets-forward@HOST` on port 22.
+
+See the [Nix reference](nix/README.md) for public information, target-generated
+keys, derived values, operator-only keys and install prerequisites.
+
+## Open the TUI
+
+Local repository:
+
+```sh
+nix-secrets -- ~/infrastructure
+```
+
+Laptop TUI with the repository on a remote workstation:
+
+```sh
+nix-secrets user@workstation -- '~/infrastructure'
+```
+
+Arguments before `--` are SSH arguments. The quoted repository path is expanded
+by the remote backend. The launcher evaluates the inventory and starts a backend
+when needed; no persistent backend service is required. The workstation needs Nix and SSH access to the repository. Backend startup
+uses the repository's `secrets-backend` flake application.
+
+## Edit and deploy
+
+| Key | Action |
+| --- | --- |
+| Enter | Edit the selected value |
+| `g` / `G` | Generate one / all missing passwords |
+| `r` / `c` / `p` | Reveal / copy / copy the public key |
+| `d` | Delete after confirmation |
+| `/` | Search |
+| `F` / `T` / `S` | Filters / tree layout / saved views |
+| `C` | Commit the managed TOML files |
+| `D` | Deploy to a selected host |
+
+Changes are encrypted and saved to the repository. Commit the ciphertext file
+for recovery. Profiles are stored separately in `nix-secrets-profiles.toml`.
+The commit dialog refuses unrelated staged changes.
+
+A command on the repository machine can also queue a deployment:
+
+```sh
+nix-secrets deploy --wait HOST
+```
+
+Keep the laptop TUI open. It verifies the target host key, displays the selected
+values and target generation tasks, and asks for approval. Changed host keys
+are rejected; unknown keys require explicit trust. Decryption occurs on the
+laptop, and values reach the target through an end-to-end SSH connection.
+
+Unset passwords can be generated on the target. External credentials must be
+entered by the operator. Missing values are listed and skipped; their consuming
+services keep waiting while SSH remains available for repair. Deploying secrets
+does not install or update the host's NixOS system.
+
+## Use secrets from commands
+
+An approved backend command can request a batch through the open TUI:
+
+```sh
+nix-secrets with-secrets HOST.services.app.token \
+  --reason 'Authenticate the maintenance command.' -- maintenance-command
+```
+
+This deliberately sends the approved plaintext to that command on the backend.
+For stdin delivery and client-side SSH authentication, see [Command reference](COMMANDS.md).
+
+## Reference
+
+- [Nix declarations](nix/README.md)
+- [Command reference](COMMANDS.md)
+- [Storage Box bootstrap](STORAGE-BOX-BOOTSTRAP.md)
+- [Trust boundaries and recovery](THREAT-MODEL.md)
+- [Protocol and interoperability](PROTOCOL.md)
+- [Consumer tests](TESTING.md)
 
 ## License
 
-This project is available under the [MIT License](LICENSE).
+[MIT](LICENSE); see [third-party licenses](LICENSES.md).
