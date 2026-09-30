@@ -207,6 +207,37 @@ impl HostKeyVerifier {
         self.preflight_with(host, port, &ProcessRunner)
     }
 
+    /// Retry scans missing approved keys; never accept a partial identity.
+    pub fn preflight_approved(
+        &self, host: &str, port: u16, approved: &HostIdentity,
+    ) -> Result<HostKeyPreflight, HostKeyError> {
+        self.preflight_approved_with(host, port, approved, &ProcessRunner)
+    }
+
+    fn preflight_approved_with(
+        &self, host: &str, port: u16, approved: &HostIdentity, runner: &impl Runner,
+    ) -> Result<HostKeyPreflight, HostKeyError> {
+        if approved.host != host || approved.port != port {
+            return Err(HostKeyError::Tool("approved host-key target mismatch".into()));
+        }
+        for attempt in 0..3 {
+            let current = self.preflight_with(host, port, runner)?;
+            if current.identity.keys == approved.keys
+                || current.identity.keys.iter().any(|key| !approved.keys.contains(key))
+            {
+                // The caller still rejects changed identities before SSH.
+                return Ok(current);
+            }
+            if attempt == 2 {
+                return Err(HostKeyError::Tool(
+                    "could not read all approved SSH host keys after three scans; no connection was opened".into(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        unreachable!()
+    }
+
     fn verify_with(
         &self,
         host: &str,

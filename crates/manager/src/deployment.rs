@@ -162,7 +162,7 @@ pub fn prepare(
     };
     let current = open
         .verifier
-        .preflight(&connection.host, connection.port)
+        .preflight_approved(&connection.host, connection.port, approved_identity)
         .map_err(|error| host_key_error(connection, error))?;
     if &current.identity != approved_identity {
         return Err(identity_changed(
