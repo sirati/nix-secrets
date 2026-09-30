@@ -90,7 +90,7 @@ pub(super) fn prompt(model: &Model) -> String {
             format!("generated: {preview} · r: reveal/hide · c: copy · Enter: save · Esc: cancel")
         }
         Mode::ProviderFailure { message, .. } => {
-            format!("Provider failed: {message}. r: retry · Esc: cancel")
+            format!("Value not saved: {message}. Your draft is kept. Enter/r: retry · Esc: edit")
         }
         Mode::Approval(request) => super::deploy_view::plain(&super::deploy_view::approval_lines(
             request,
@@ -247,9 +247,9 @@ pub(super) fn selector_selected(model: &Model) -> Option<usize> {
         Mode::FacetCategories { selected }
         | Mode::FacetValues { selected, .. }
         | Mode::TreeOrder { selected } => Some(*selected),
-        Mode::Profiles { selected } | Mode::Settings { selected } | Mode::DeployHost { selected } => {
-            Some(*selected)
-        }
+        Mode::Profiles { selected }
+        | Mode::Settings { selected }
+        | Mode::DeployHost { selected } => Some(*selected),
         Mode::FacetFirstChoice { .. } => Some(0),
         _ => None,
     }
