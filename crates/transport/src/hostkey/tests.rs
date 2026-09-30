@@ -22,6 +22,36 @@ fn verifier() -> HostKeyVerifier {
     HostKeyVerifier::new(vec![PathBuf::from("/dev/null")])
 }
 
+struct InterruptedScan {
+    interrupted: RefCell<bool>,
+    keys: Fake,
+}
+impl Runner for InterruptedScan {
+    fn run(&self, program: &OsStr, args: &[OsString]) -> Result<Output, HostKeyError> {
+        if program == OsStr::new("ssh-keyscan") && !self.interrupted.replace(true) {
+            return Ok(Output { success: false, stdout: Vec::new() });
+        }
+        self.keys.run(program, args)
+    }
+}
+
+#[test]
+fn interrupted_scan_retries_without_bypassing_host_identity_checks() {
+    for (scanned, changed) in [("OLD", false), ("NEW", true)] {
+        let runner = InterruptedScan {
+            interrupted: RefCell::new(false),
+            keys: Fake {
+                scan: format!("host ssh-ed25519 {scanned}\n").into_bytes(),
+                find: b"host ssh-ed25519 OLD\n".to_vec(),
+            },
+        };
+        let mut decision = |_: &HostIdentity| panic!("known or changed keys must not prompt");
+        let result = verifier().verify_with("host", 22, &mut decision, &runner);
+        if changed { assert!(matches!(result, Err(HostKeyError::Changed(_)))); }
+        else { result.unwrap(); }
+    }
+}
+
 #[test]
 fn known_matching_key_needs_no_decision() {
     let fake = Fake {
