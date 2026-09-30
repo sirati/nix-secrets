@@ -78,11 +78,13 @@ impl BackendClient {
         path: &SecretPath,
         public_key: String,
         expected_version: Vec<u8>,
+        expected_public_key: Option<String>,
     ) -> io::Result<()> {
         match self.exchange(&Request::SetPublicKeyIfVersion {
             path: path.clone(),
             public_key,
             expected_version,
+            expected_public_key,
         })? {
             Response::Updated => Ok(()),
             Response::Error { message } => Err(io::Error::other(message)),

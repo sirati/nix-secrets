@@ -53,6 +53,23 @@ fn generated_public_metadata_is_cas_saved_and_read_back_without_a_private_sideca
         ),
         Err(StoreError::InvalidPublicKey)
     ));
+    let replacement = GeneratedPublicKey {
+        version_id: "v2".into(),
+        public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII98Z87B5Q+rVPra6DlmpZ7SR1ex38kfL0ygu4w1p61S".into(),
+    };
+    store.set_generated_public_key_if_version(&schema, &identifier, replacement.clone(), Some("v1")).unwrap();
+    // A writer that read the previous host must not undo the fresh host's key.
+    assert!(matches!(
+        store.set_generated_public_key_if_version(&schema, &identifier, metadata.clone(), Some("v1")),
+        Err(StoreError::VersionConflict)
+    ));
+    // Changing a key while reusing the current version is also rejected.
+    let reused_version = GeneratedPublicKey { version_id: "v2".into(), ..metadata };
+    assert!(matches!(
+        store.set_generated_public_key_if_version(&schema, &identifier, reused_version, Some("v2")),
+        Err(StoreError::VersionConflict)
+    ));
+    assert_eq!(store.generated_public_key(&identifier).unwrap(), Some(replacement));
     let raw = std::fs::read_to_string(path).unwrap();
     assert!(raw.contains("generated_public_keys"));
     assert!(raw.contains("public_key"));
@@ -333,7 +350,7 @@ fn stores_and_removes_generated_task_input() {
     store.set(&schema, &path, envelope.clone()).unwrap();
     assert_eq!(store.get(&path).unwrap(), Some(envelope.clone()));
     store
-        .set_public_key_if_version(&schema, &path, ED25519_PUBLIC.into(), &envelope.version_id)
+        .set_public_key_if_version(&schema, &path, ED25519_PUBLIC.into(), &envelope.version_id, None)
         .unwrap();
     let document = std::fs::read_to_string(&store_path).unwrap();
     assert!(document.contains("[secrets.\"host.services.backup.storage-key\"]"));
@@ -341,6 +358,16 @@ fn stores_and_removes_generated_task_input() {
     assert!(document.contains(&format!("public_key = \"{ED25519_PUBLIC}\"")));
     assert!(!document.contains("private_key = "));
     assert!(!document.contains("OPENSSH PRIVATE KEY"));
+    let replacement = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII98Z87B5Q+rVPra6DlmpZ7SR1ex38kfL0ygu4w1p61S";
+    store.set_public_key_if_version(&schema, &path, replacement.into(), &envelope.version_id, Some(ED25519_PUBLIC)).unwrap();
+    assert!(matches!(
+        store.set_public_key_if_version(&schema, &path, ED25519_PUBLIC.into(), &envelope.version_id, Some(ED25519_PUBLIC)),
+        Err(StoreError::VersionConflict)
+    ));
+    let saved = store.get(&path).unwrap().unwrap();
+    assert_eq!(saved.age_ciphertext, envelope.age_ciphertext);
+    assert_eq!(saved.version_id, envelope.version_id);
+    assert_eq!(saved.public_key.as_deref(), Some(replacement));
     assert!(store.remove(&schema, &path).unwrap());
 }
 

@@ -23,7 +23,10 @@ impl SecretStore {
             if actual.map(|record| record.version_id.as_str()) != expected_version {
                 return Err(StoreError::VersionConflict);
             }
-            if actual.is_some_and(|record| record.public_key != value.public_key) {
+            // Replacements must advance the metadata version. A stale writer
+            // is rejected above, including concurrent target registrations.
+            if actual.is_some_and(|record| record.public_key != value.public_key
+                && record.version_id == value.version_id) {
                 return Err(StoreError::VersionConflict);
             }
             document
@@ -51,6 +54,7 @@ impl SecretStore {
         path: &SecretPath,
         public_key: String,
         expected_version: &[u8],
+        expected_public_key: Option<&str>,
     ) -> Result<(), StoreError> {
         let LeafSpec::Generated(spec) = schema.leaf(path)? else {
             return Err(StoreError::InvalidPublicKey);
@@ -68,11 +72,7 @@ impl SecretStore {
             if record.version_id != expected_version {
                 return Err(StoreError::VersionConflict);
             }
-            if record
-                .public_key
-                .as_deref()
-                .is_some_and(|old| old != public_key)
-            {
+            if record.public_key.as_deref() != expected_public_key {
                 return Err(StoreError::VersionConflict);
             }
             record.public_key = Some(public_key);

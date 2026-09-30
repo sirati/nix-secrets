@@ -41,6 +41,7 @@ pub enum Request {
         path: SecretPath,
         public_key: String,
         expected_version: Vec<u8>,
+        expected_public_key: Option<String>,
     },
     ListPublicInfo,
     GetPublicInfo {
