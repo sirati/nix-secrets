@@ -64,6 +64,10 @@ Presentation does not change identifiers or deployed paths. A service's
 }
 ```
 
+`optional = true` leaves may remain unset: deployment skips them without
+generation, and they do not gate service startup. Provided values are validated
+and deployed normally. This cannot be combined with `requiredForInstall = true`.
+
 Unset password leaves, and leaves declaring `valueGenerator`, are generated
 on the target during deployment unless they set `externalInputRequired = true`
 or `generateOnDeploy = false`. See [Generation](#generation) for the `valueGenerator` format.

@@ -111,6 +111,9 @@ pub struct SecretLeaf {
     /// The host cannot be installed until this value is stored.
     #[serde(rename = "requiredForInstall", default)]
     pub required_for_install: bool,
+    /// Absent values do not hold consumers or trigger deployment generation.
+    #[serde(default)]
+    pub optional: bool,
     #[serde(default)]
     pub identity: Option<SecretIdentity>,
     #[serde(default)]
@@ -294,6 +297,7 @@ impl Schema {
                 description: leaf.description.clone(),
                 human_facing: leaf.human_facing,
                 external_input_required: leaf.external_input_required,
+                optional: leaf.optional,
                 identity: leaf.identity.clone(),
                 presentation: leaf.presentation.clone(),
                 recipient_public_keys: leaf.recipient_public_keys.clone(),
@@ -323,6 +327,7 @@ impl Schema {
                 description: leaf.description.clone(),
                 human_facing: leaf.human_facing,
                 external_input_required: leaf.external_input_required,
+                optional: leaf.optional,
                 identity: leaf.identity.clone(),
                 presentation: leaf.presentation.clone(),
                 recipient_public_keys: leaf.recipient_public_keys.clone(),

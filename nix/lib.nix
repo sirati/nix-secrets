@@ -64,6 +64,7 @@ let
         "externalInputRequired"
         "identity"
         "presentation"
+        "optional"
         "requiredForInstall"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
@@ -220,6 +221,7 @@ let
         "externalInputRequired"
         "identity"
         "presentation"
+        "optional"
         "requiredForInstall"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
@@ -282,6 +284,10 @@ let
         throw "secret tree entry ${name} must be an attribute set"
       else if isLeaf node && !builtins.isBool (node.requiredForInstall or false) then
         throw "requiredForInstall of ${name} must be a boolean"
+      else if isLeaf node && !builtins.isBool (node.optional or false) then
+        throw "optional of ${name} must be a boolean"
+      else if (node.optional or false) && (node.requiredForInstall or false) then
+        throw "${name}: optional conflicts with requiredForInstall"
       else if (node.requiredForInstall or false) && node ? derivedFrom then
         throw "${name}: requiredForInstall belongs on the derivedFrom source leaf"
       else if isOperatorLeaf node && (node ? destination || node ? generatedSecret) then

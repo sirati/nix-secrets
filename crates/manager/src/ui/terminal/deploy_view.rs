@@ -14,7 +14,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// The groups of values that cannot be deployed, in display order.
-const MISSING: [&str; 4] = [
+const MISSING: [&str; 5] = [
+    "Optional; not provided",
     "Cannot deploy",
     "Needs input",
     "Filled by another host",

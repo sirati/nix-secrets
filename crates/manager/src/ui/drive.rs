@@ -324,7 +324,7 @@ pub(crate) fn deployed_notice(generated: &[String], skipped: &[String]) -> Strin
     };
     if !skipped.is_empty() {
         notice.push_str(&format!(
-            "\n\nNot deployed yet ({}); only their own services keep waiting:\n{}",
+            "\n\nNot deployed ({}); missing required values hold only their own services:\n{}",
             skipped.len(),
             skipped.join("\n")
         ));

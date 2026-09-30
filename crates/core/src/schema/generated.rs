@@ -15,6 +15,9 @@ pub struct GeneratedSecretLeaf {
     /// The host cannot be installed until this value is stored.
     #[serde(rename = "requiredForInstall", default)]
     pub required_for_install: bool,
+    /// Absent values do not hold consumers or trigger deployment generation.
+    #[serde(default)]
+    pub optional: bool,
     #[serde(default)]
     pub identity: Option<SecretIdentity>,
     #[serde(default)]

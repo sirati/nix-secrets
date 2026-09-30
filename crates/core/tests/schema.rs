@@ -236,3 +236,13 @@ fn a_public_default_value_must_match_the_declared_hosts() {
     let other = format!("[sub2.box.example]:23 ssh-ed25519 {key}\n");
     assert!(nix_secrets_core::Schema::from_json(&schema(&other)).is_err());
 }
+
+#[test]
+fn optional_deployed_leaf_is_preserved_and_cannot_be_required_for_install() {
+    let mut document = serde_json::to_value(common::schema()).unwrap();
+    document["host"]["services"]["mail"]["password"]["optional"] = json!(true);
+    let schema = Schema::from_json(&document.to_string()).unwrap();
+    assert!(schema.secret(&SecretPath::parse("host.services.mail.password").unwrap()).unwrap().optional);
+    document["host"]["services"]["mail"]["password"]["requiredForInstall"] = json!(true);
+    assert!(Schema::from_json(&document.to_string()).is_err());
+}

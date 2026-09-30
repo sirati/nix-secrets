@@ -293,7 +293,7 @@ impl Controller {
         let mut skipped = if allow_partial {
             plan.skippable.clone()
         } else {
-            Vec::new()
+            plan.skippable.iter().filter(|id| plan.reasons.get(*id) == Some(&unset::MissingKind::Optional)).cloned().collect()
         };
         identifiers.retain(|identifier| {
             !skipped.contains(identifier) && !plan.host_default.contains(identifier)
