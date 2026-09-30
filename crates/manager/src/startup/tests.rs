@@ -61,8 +61,11 @@ fn starts_once_then_connects_to_same_user_backend() {
 fn starts_new_backend_without_replacing_older_protocol_socket() {
     let repository = path();
     let versioned = repository.with_file_name(socket_name(&repository));
-    let legacy =
-        repository.with_file_name(socket_name(&repository).replace("backend-v15-", "backend-v14-"));
+    let legacy = repository.with_file_name(socket_name(&repository).replace(
+        &format!("backend-v{BACKEND_COMPATIBILITY_VERSION}-"),
+        &format!("backend-v{}-", BACKEND_COMPATIBILITY_VERSION - 1),
+    ));
+    assert_ne!(legacy, versioned);
     let old_listener = UnixListener::bind(&legacy).unwrap();
     let mut launcher = FakeLauncher {
         path: versioned.clone(),

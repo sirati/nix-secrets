@@ -275,8 +275,9 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                 path,
                 public_key,
                 expected_version,
+                expected_public_key,
             } => store
-                .set_public_key_if_version(schema, &path, public_key, &expected_version)
+                .set_public_key_if_version(schema, &path, public_key, &expected_version, expected_public_key.as_deref())
                 .map(|()| Response::Updated)
                 .map_err(|error| error.to_string()),
             Request::ListPublicInfo => store

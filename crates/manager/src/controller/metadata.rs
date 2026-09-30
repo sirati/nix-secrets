@@ -20,14 +20,11 @@ impl Controller {
                     .client
                     .generated_public_key(path)
                     .map_err(|e| e.to_string())?;
-                if old
-                    .as_ref()
-                    .is_some_and(|value| value.public_key != canonical)
-                {
-                    return Err(format!("generated public key changed unexpectedly for {path}"));
-                }
+                // This receipt comes from the approved, authenticated target.
+                // A fresh host generates a new local key; metadata follows it
+                // using CAS instead of permanently binding the first key.
                 let value = GeneratedPublicKey {
-                    version_id: "local-generated-v1".into(),
+                    version_id: format!("local-generated-{}", key.fingerprint(ssh_key::HashAlg::Sha256)),
                     public_key: canonical,
                 };
                 self.client
@@ -50,15 +47,8 @@ impl Controller {
                     self.client.get(path).map_err(|e| e.to_string())?.ok_or(
                         "Storage Box bootstrap secret disappeared before key registration",
                     )?;
-                if old
-                    .public_key
-                    .as_ref()
-                    .is_some_and(|value| value != &canonical)
-                {
-                    return Err(format!("generated public key changed unexpectedly for {path}"));
-                }
                 self.client
-                    .set_public_key_if_version(path, canonical.clone(), old.version_id.clone())
+                    .set_public_key_if_version(path, canonical.clone(), old.version_id.clone(), old.public_key.clone())
                     .map_err(|e| e.to_string())?;
                 let saved = self
                     .client
