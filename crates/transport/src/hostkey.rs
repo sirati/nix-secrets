@@ -231,24 +231,28 @@ impl HostKeyVerifier {
         port: u16,
         runner: &impl Runner,
     ) -> Result<HostKeyPreflight, HostKeyError> {
-        let scan = runner.run(
-            &self.ssh_keyscan,
-            &[
-                "-T".into(),
-                "10".into(),
-                "-p".into(),
-                port.to_string().into(),
-                "--".into(),
-                host.into(),
-            ],
-        )?;
-        if !scan.success {
-            return Err(HostKeyError::Tool("ssh-keyscan failed".into()));
-        }
-        let scanned = parse_key_lines(&scan.stdout);
-        if scanned.is_empty() {
-            return Err(HostKeyError::NoKeys);
-        }
+        let mut attempt = 0;
+        let scanned = loop {
+            let scan = runner.run(
+                &self.ssh_keyscan,
+                &[
+                    "-T".into(),
+                    "10".into(),
+                    "-p".into(),
+                    port.to_string().into(),
+                    "--".into(),
+                    host.into(),
+                ],
+            )?;
+            let scanned = parse_key_lines(&scan.stdout);
+            if scan.success && !scanned.is_empty() { break scanned; }
+            if attempt == 2 {
+                return Err(if scan.success { HostKeyError::NoKeys }
+                    else { HostKeyError::Tool("ssh-keyscan failed".into()) });
+            }
+            attempt += 1;
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        };
         let lookup = lookup_name(host, port);
         let mut known = Vec::new();
         let mut recorded = Vec::new();
