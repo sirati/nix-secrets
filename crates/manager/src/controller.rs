@@ -589,7 +589,7 @@ impl Controller {
             stored.as_ref().err().or(registered.as_ref().err()),
         );
         self.client
-            .resolve(active.request.id, active.lease_id, true, Some(summary))
+            .resolve(active.request.id, active.lease_id, stored.is_ok() && registered.is_ok(), Some(summary))
             .map_err(|error| error.to_string())?;
         let stored = stored?;
         registered?;
@@ -616,7 +616,11 @@ fn deployment_summary(
     skipped: &[String],
     problem: Option<&String>,
 ) -> String {
-    let mut summary = format!("deployed {target}");
+    let mut summary = if problem.is_some() {
+        format!("deployment of {target} incomplete")
+    } else {
+        format!("deployed {target}")
+    };
     if !generated.is_empty() {
         summary.push_str(&format!("; generated and stored: {}", generated.join(", ")));
     }
