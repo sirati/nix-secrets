@@ -22,6 +22,51 @@ fn verifier() -> HostKeyVerifier {
     HostKeyVerifier::new(vec![PathBuf::from("/dev/null")])
 }
 
+struct PartialScan {
+    scans: RefCell<usize>,
+    eventually_complete: bool,
+    changed: bool,
+}
+impl Runner for PartialScan {
+    fn run(&self, program: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+        if program != OsStr::new("ssh-keyscan") {
+            return Ok(Output { success: false, stdout: Vec::new() });
+        }
+        let mut scans = self.scans.borrow_mut();
+        *scans += 1;
+        let data = if self.changed {
+            "host ssh-rsa NEW\n"
+        } else if self.eventually_complete && *scans > 1 {
+            "host ssh-ed25519 ED\nhost ssh-rsa RSA\n"
+        } else {
+            "host ssh-rsa RSA\n"
+        };
+        Ok(Output { success: true, stdout: data.as_bytes().to_vec() })
+    }
+}
+
+#[test]
+fn approved_identity_requires_all_keys_but_retries_partial_scans() {
+    let approved = verifier().preflight_with("host", 22, &Fake {
+        scan: b"host ssh-ed25519 ED\nhost ssh-rsa RSA\n".to_vec(),
+        find: Vec::new(),
+    }).unwrap().identity;
+    for (complete, changed) in [(true, false), (false, false), (false, true)] {
+        let runner = PartialScan { scans: RefCell::new(0), eventually_complete: complete, changed };
+        let result = verifier().preflight_approved_with("host", 22, &approved, &runner);
+        if changed {
+            assert_ne!(result.unwrap().identity, approved);
+            assert_eq!(*runner.scans.borrow(), 1, "changed keys are not retried");
+        } else if complete {
+            assert_eq!(result.unwrap().identity, approved);
+            assert_eq!(*runner.scans.borrow(), 2);
+        } else {
+            assert!(matches!(result, Err(HostKeyError::Tool(_))));
+            assert_eq!(*runner.scans.borrow(), 3, "partial identities must fail closed");
+        }
+    }
+}
+
 struct InterruptedScan {
     interrupted: RefCell<bool>,
     keys: Fake,
