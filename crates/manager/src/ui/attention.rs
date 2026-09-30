@@ -47,6 +47,39 @@ pub(super) struct Attention {
 }
 
 impl Attention {
+    pub(super) fn update_model(
+        &mut self,
+        model: Option<&crate::model::Model>,
+        tmux: bool,
+    ) -> Option<Vec<u8>> {
+        let prompt = model.and_then(|model| model.secret_prompt.as_ref());
+        let remaining = prompt.map_or(Duration::MAX, |prompt| {
+            prompt
+                .deadline
+                .saturating_duration_since(std::time::Instant::now())
+        });
+        if prompt.is_some() {
+            self.update(prompt, remaining, tmux)
+        } else if let Some(crate::model::Model {
+            mode: crate::model::Mode::Approval(request),
+            ..
+        }) = model
+        {
+            let id = format!("deployment:{}", request.id);
+            self.update_request(
+                Some((
+                    &id,
+                    "Deployment approval requested",
+                    "⚠ nix-secrets: deployment approval",
+                )),
+                remaining,
+                tmux,
+            )
+        } else {
+            self.update(None, remaining, tmux)
+        }
+    }
+
     /// The bytes to write after the next frame for the request now open,
     /// if any: an announcement for a new one, a bell at [`REMINDER_AT`],
     /// and the old title once it closed.
@@ -56,18 +89,39 @@ impl Attention {
         remaining: Duration,
         tmux: bool,
     ) -> Option<Vec<u8>> {
+        let request = prompt.map(|prompt| {
+            (
+                format!("secret:{}", prompt.id),
+                super::secret_request::title(prompt),
+                REQUEST_TITLE,
+            )
+        });
+        self.update_request(
+            request
+                .as_ref()
+                .map(|(id, summary, title)| (id.as_str(), summary.as_str(), *title)),
+            remaining,
+            tmux,
+        )
+    }
+
+    pub(super) fn update_request(
+        &mut self,
+        request: Option<(&str, &str, &str)>,
+        remaining: Duration,
+        tmux: bool,
+    ) -> Option<Vec<u8>> {
         let mut output = String::new();
-        let current = prompt.map(|prompt| prompt.id.as_str());
+        let current = request.map(|(id, _, _)| id);
         if self.announced.is_some() && self.announced.as_deref() != current {
             self.announced = None;
             output.push_str(&restore());
         }
-        if let Some(prompt) = prompt {
+        if let Some((id, summary, title)) = request {
             if self.announced.is_none() {
-                self.announced = Some(prompt.id.clone());
-                // A request that arrives late never rings twice at once.
+                self.announced = Some(id.to_owned());
                 self.reminded = remaining <= REMINDER_AT;
-                output.push_str(&announce(&super::secret_request::title(prompt), tmux));
+                output.push_str(&announce_with_title(summary, title, tmux));
             } else if !self.reminded && remaining <= REMINDER_AT {
                 self.reminded = true;
                 output.push_str(BEL);
@@ -83,12 +137,18 @@ pub(super) fn in_tmux() -> bool {
 }
 
 /// The bell, the notifications and the warning title for `summary`.
+#[cfg(test)]
 pub(super) fn announce(summary: &str, tmux: bool) -> String {
+    announce_with_title(summary, REQUEST_TITLE, tmux)
+}
+
+fn announce_with_title(summary: &str, title: &str, tmux: bool) -> String {
     // The summary names a program read from /proc: no control character in
     // it may end the sequence early or start another one.
     let summary: String = summary.chars().filter(|c| !c.is_control()).collect();
+    let title: String = title.chars().filter(|c| !c.is_control()).collect();
     format!(
-        "{BEL}{}{}{PUSH_TITLE}\x1b]2;{REQUEST_TITLE}\x07",
+        "{BEL}{}{}{PUSH_TITLE}\x1b]2;{title}\x07",
         passthrough(&format!("\x1b]777;notify;nix-secrets;{summary}\x07"), tmux),
         passthrough(&format!("\x1b]9;nix-secrets: {summary}\x07"), tmux),
     )
@@ -200,6 +260,92 @@ mod tests {
                 "\x1b[22;2t",
                 "\x1b]2;⚠ nix-secrets: secret request\x07",
             )
+        );
+    }
+}
+
+#[cfg(test)]
+mod deployment_tests {
+    use super::*;
+
+    #[test]
+    fn deployment_approval_announces_once_and_restores_title() {
+        let mut attention = Attention::default();
+        let request = Some((
+            "deployment:1",
+            "Deployment approval requested",
+            "⚠ nix-secrets: deployment approval",
+        ));
+        let bytes = attention
+            .update_request(request, Duration::MAX, false)
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with(BEL));
+        assert!(text.contains("777;notify;nix-secrets;Deployment approval requested"));
+        assert!(text.contains("9;nix-secrets: Deployment approval requested"));
+        assert!(text.contains("2;⚠ nix-secrets: deployment approval"));
+        assert!(attention
+            .update_request(request, Duration::MAX, false)
+            .is_none());
+        assert_eq!(
+            attention
+                .update_request(None, Duration::MAX, false)
+                .unwrap(),
+            restore().into_bytes()
+        );
+        assert!(attention
+            .update_request(None, Duration::MAX, false)
+            .is_none());
+    }
+}
+
+#[cfg(test)]
+mod model_attention_tests {
+    use super::*;
+    use crate::model::{ApprovalRequest, Mode, Model};
+    use crate::ui::{reduce, Action, SecretWriter, UiEvent};
+    use zeroize::Zeroizing;
+
+    struct Writer;
+    impl SecretWriter for Writer {
+        fn write(
+            &mut self,
+            _: &str,
+            value: Zeroizing<Vec<u8>>,
+        ) -> Result<Action, (String, Zeroizing<Vec<u8>>)> {
+            Err(("unused".into(), value))
+        }
+    }
+
+    #[test]
+    fn incoming_deployment_approval_interrupts_notice_and_signals_then_restores() {
+        let mut model = Model::new(vec![]);
+        let mut writer = Writer;
+        let mut attention = Attention::default();
+        model.inform("previous success");
+        reduce(
+            &mut model,
+            UiEvent::Approval(ApprovalRequest {
+                id: "request".into(),
+                target: "untrusted\x1bhost".into(),
+                ..Default::default()
+            }),
+            &mut writer,
+        );
+        assert!(matches!(model.mode, Mode::Approval(_)));
+        assert!(model.message.is_none());
+        let bytes = attention.update_model(Some(&model), false).unwrap();
+        let notification = String::from_utf8(bytes).unwrap();
+        assert!(notification.starts_with(BEL));
+        assert!(notification.contains("Deployment approval requested"));
+        assert!(notification.contains("2;⚠ nix-secrets: deployment approval"));
+        assert!(!notification.contains("untrusted"));
+        assert!(attention.update_model(Some(&model), false).is_none());
+        reduce(&mut model, UiEvent::Character('n'), &mut writer);
+        assert_eq!(model.message_text(), Some("previous success"));
+        assert_eq!(
+            attention.update_model(Some(&model), false).unwrap(),
+            restore().into_bytes()
         );
     }
 }

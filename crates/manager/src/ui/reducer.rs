@@ -408,6 +408,7 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
         (Mode::Approval(request), event) => {
             let action = approval::reduce(model, writer, request, event);
             if action != Action::Continue {
+                model.show_pending_approval();
                 return action;
             }
         }
