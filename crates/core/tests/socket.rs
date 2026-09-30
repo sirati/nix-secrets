@@ -332,3 +332,54 @@ fn a_deployment_request_reaches_the_registered_frontend() {
         } if message == "deployed host"
     ));
 }
+
+#[test]
+fn persistent_backend_revalidates_public_info_against_current_trusted_schema() {
+    use nix_secrets_core::{PublicInfoRecord, Schema, SecretPath};
+    use std::sync::{Arc, Mutex};
+    fn schema(host: &str) -> String {
+        serde_json::json!({"host": {
+            "metadata": {"socketPath":"/run/backend.sock", "deployment":{"host":"host","destination":"forward@host","port":22}},
+            "services":{"backup":{"known-hosts":{
+                "kind":"public-info", "sharedPublicId":"storage-box/known-hosts",
+                "expectedSshHost":host, "expectedSshPort":23,
+                "destination":{"path":"/persistent/public-info/storage-box/known-hosts","category":"public-info","owner":"root","group":"root","mode":"0644","contentType":"ssh-known-hosts"},
+                "consumerUnits":[]
+            }}}
+        }}).to_string()
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("reload.sock");
+    let current = Arc::new(Mutex::new(Ok(schema("old.example"))));
+    let loader = Arc::clone(&current);
+    let backend = Backend::bind(&socket, Schema::from_json(&schema("old.example")).unwrap(),
+        SecretStore::new(directory.path().join("nix-secrets.toml"))).unwrap()
+        .with_schema_loader(move || {
+            let input: String = loader.lock().unwrap().clone()?;
+            Schema::from_json(&input).map_err(|error| error.to_string())
+        });
+    thread::spawn(move || backend.serve().unwrap());
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let path = SecretPath::parse("host.services.backup.known-hosts").unwrap();
+    let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJGP6rI+0vwLXEdrpE4Gptmg510lwiD0GHfr+ZX9CbCN";
+    let record = |host: &str, version: &str| PublicInfoRecord {
+        version_id: version.repeat(16), value: format!("[{host}]:23 {key}\n"),
+    };
+    assert!(matches!(call(&mut stream, Request::SetPublicInfoIfVersion {
+        path: path.clone(), value: record("old.example", "01"), expected_version: None,
+    }), Response::Updated));
+    *current.lock().unwrap() = Ok(schema("new.example"));
+    assert!(matches!(call(&mut stream, Request::SetPublicInfoIfVersion {
+        path: path.clone(), value: record("new.example", "02"), expected_version: Some("01".repeat(16)),
+    }), Response::Updated));
+    assert!(matches!(call(&mut stream, Request::SetPublicInfoIfVersion {
+        path: path.clone(), value: record("old.example", "03"), expected_version: Some("02".repeat(16)),
+    }), Response::Error { .. }));
+    *current.lock().unwrap() = Err("repository evaluation failed".to_owned());
+    assert!(matches!(call(&mut stream, Request::RemovePublicInfoIfVersion {
+        path, expected_version: "02".repeat(16),
+    }), Response::Error { message } if message.contains("reloading repository schema failed")));
+    assert!(matches!(call(&mut stream, Request::GetPublicInfo {
+        shared_id: "storage-box/known-hosts".into(),
+    }), Response::PublicInfo { value: Some(value) } if value == record("new.example", "02")));
+}
