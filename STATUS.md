@@ -1,50 +1,20 @@
-# Implementation status
+# Development checks
 
-The repository implements the local editing and target deployment path in
-[PROTOCOL.md](PROTOCOL.md).
+Current behavior is documented in the [README](README.md) and
+[protocol reference](PROTOCOL.md).
 
-## Implemented
+Run the Rust workspace tests in the component development shell:
 
-- Fresh local or remote schema evaluation and safe same-user backend startup.
-- Multiple frontends, atomic ciphertext-store updates, and claimed deployment
-  approvals with rejection, cancellation, lease renewal, and retry behavior.
-- A TUI tree with set/unset state, masked input, explicit paste, replacement
-  confirmation, deployment requests, and provider retry.
-- Direct age encryption to SSH recipients, with optional 1Password decryption
-  and a runtime identity-file provider for automation.
-- Frontend-owned OpenSSH, host-key classification and pinning, and a fixed
-  no-shell byte relay.
-- An authoritative target-manifest handshake followed by local decryption and
-  bounded plaintext transfer inside SSH.
-- Crash-atomic persistent generations, safe partial updates, strict ownership
-  and modes, and bounded rollback history.
-- Metadata-only service waiters and consumer-only systemd dependencies. SSH
-  and `multi-user.target` remain independent; essential waiters participate in
-  the configured boot-success check.
-- Schema-authorized password, EFF passphrase, and encoded random-byte
-  password and passphrase creation in the TUI, with masked preview, explicit reveal/copy, and
-  replacement confirmation.
-- Target-side generation of unset password and `valueGenerator` leaves during
-  deployment, with ciphertext-only return, header recipient checks, retry
-  adoption of installed values, and a single list of values that must be
-  entered.
-- Derived values (`derivedFrom`) deployed as a framed copy of another stored
-  secret, also across hosts, with a clear order when the source is unset.
-- Operator-only leaves that are never deployed, keypair generation through a
-  consumer-declared installable (private key on stdout, public key on fd 3),
-  and `pipe-secret` to hand one value to another program's stdin.
-- Secret requests from the backend host: `with-secrets` and `pipe-secret`
-  ask the attached TUI, which shows one approval modal for the batch and
-  decrypts it with one 1Password authorization; the backend serves the
-  values to that command on a private session socket until it exits.
-- NixOS modules, packages, apps, Rust tests, a real-age check, and NixOS VM
-  tests for the service and deployment boundaries.
+```sh
+nix develop --command cargo test --workspace
+```
 
-## Validation environment
+Run the packaged Rust, age, schema and NixOS VM checks:
 
-The complete flake check passes. It runs the Rust workspace tests in release
-mode, a real `age` encryption and decryption check, module evaluation checks,
-and two NixOS VM tests. The VMs exercise the restricted SSH relay, atomic
-deployment, rejection of malformed transactions, service ownership isolation,
-consumer-only readiness dependencies, boot-health gating, and persistence over
-a reboot.
+```sh
+nix flake check
+```
+
+For configurations that consume the module, see [Consumer tests](TESTING.md).
+Passing results apply to the revision and environment tested; this file is
+not a record of a completed production rollout.
