@@ -39,7 +39,7 @@ fn unset_leaf_enters_editor_directly() {
 }
 
 #[test]
-fn notices_are_acknowledged_in_order_before_pending_approval() {
+fn failure_notice_requires_acknowledgement_but_passive_notice_does_not_hide_approval() {
     let mut model = Model::new(vec![]);
     model.fail("first");
     model.inform("second");
@@ -63,7 +63,9 @@ fn notices_are_acknowledged_in_order_before_pending_approval() {
     assert!(matches!(model.mode, Mode::Browse));
     assert_eq!(model.message_text(), Some("first"));
     model.acknowledge();
-    assert_eq!(model.message_text(), Some("second"));
-    model.acknowledge();
+    assert!(model.message.is_none());
     assert!(matches!(model.mode, Mode::Approval(_)));
+    model.mode = Mode::Browse;
+    model.show_pending_approval();
+    assert_eq!(model.message_text(), Some("second"));
 }

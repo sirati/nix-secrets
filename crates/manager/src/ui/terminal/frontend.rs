@@ -42,17 +42,10 @@ impl CrosstermFrontend {
     }
 
     /// Writes what [`crate::ui::attention::Attention`] asks for, if anything.
-    pub(super) fn signal(
-        &mut self,
-        prompt: Option<&crate::operator_channel::SecretPrompt>,
-    ) -> io::Result<()> {
+    pub(super) fn signal(&mut self, model: Option<&Model>) -> io::Result<()> {
         use std::io::Write;
-        let remaining = prompt.map_or(std::time::Duration::MAX, |prompt| {
-            prompt
-                .deadline
-                .saturating_duration_since(std::time::Instant::now())
-        });
-        if let Some(bytes) = self.attention.update(prompt, remaining, self.tmux) {
+        let bytes = self.attention.update_model(model, self.tmux);
+        if let Some(bytes) = bytes {
             let output = self.terminal.backend_mut();
             output.write_all(&bytes)?;
             output.flush()?;
@@ -77,7 +70,7 @@ impl Frontend for CrosstermFrontend {
         self.terminal
             .draw(|frame| self.hits = render(frame, model))?;
         // After the frame, so the bytes never land inside its escape sequences.
-        self.signal(model.secret_prompt.as_ref())
+        self.signal(Some(model))
     }
 
     fn edit(&mut self, text: &str) -> Result<String, String> {

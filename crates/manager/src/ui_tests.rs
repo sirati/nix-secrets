@@ -668,3 +668,21 @@ fn a_queued_reveal_lands_over_the_entry_dialog() {
     reduce(&mut model, UiEvent::Escape, &mut Queued);
     assert_eq!(entered(&model.mode), b"x");
 }
+
+#[test]
+fn deployment_approval_preempts_a_passive_notice_and_restores_it() {
+    let mut model = model(false);
+    let mut writer = writer();
+    model.inform("previous operation finished");
+    reduce(&mut model, UiEvent::Approval(ApprovalRequest {
+        id: "deployment".into(), target: "host".into(), ..Default::default()
+    }), &mut writer);
+    assert!(matches!(model.mode, Mode::Approval(_)));
+    assert!(model.message.is_none());
+    model.inform("another operation finished");
+    assert!(model.message.is_none(), "notices must not cover an open approval");
+    reduce(&mut model, UiEvent::Character('n'), &mut writer);
+    assert_eq!(model.message_text(), Some("previous operation finished"));
+    model.acknowledge();
+    assert_eq!(model.message_text(), Some("another operation finished"));
+}
