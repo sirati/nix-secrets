@@ -307,3 +307,8 @@ Successful receiver transactions write root-owned, value-free events under
 `/run/nix-secrets/audit/`: target, time, identifiers, receiving SSH account/key
 names, and newly set versus replaced values. `receiver.auditGroup` grants
 reporters access to these events without granting access to secret files.
+
+`receiver.postDeployCommand` runs a configured executable from `/nix/store`
+after publication and before success is returned, for example to restore
+container credential ACLs. Its output stays outside the deployment protocol.
+If it fails, the receiver reports failure; the published values remain installed.
