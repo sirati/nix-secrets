@@ -207,26 +207,63 @@ impl HostKeyVerifier {
         self.preflight_with(host, port, &ProcessRunner)
     }
 
-    /// Retry scans missing approved keys; never accept a partial identity.
+    /// Retry scans missing approved keys. A later scan may discover more keys,
+    /// but only the previously approved keys are returned and pinned.
     pub fn preflight_approved(
-        &self, host: &str, port: u16, approved: &HostIdentity,
+        &self,
+        host: &str,
+        port: u16,
+        approved: &HostIdentity,
     ) -> Result<HostKeyPreflight, HostKeyError> {
         self.preflight_approved_with(host, port, approved, &ProcessRunner)
     }
 
     fn preflight_approved_with(
-        &self, host: &str, port: u16, approved: &HostIdentity, runner: &impl Runner,
+        &self,
+        host: &str,
+        port: u16,
+        approved: &HostIdentity,
+        runner: &impl Runner,
     ) -> Result<HostKeyPreflight, HostKeyError> {
         if approved.host != host || approved.port != port {
-            return Err(HostKeyError::Tool("approved host-key target mismatch".into()));
+            return Err(HostKeyError::Tool(
+                "approved host-key target mismatch".into(),
+            ));
+        }
+        if approved.keys.is_empty() {
+            return Err(HostKeyError::NoKeys);
         }
         for attempt in 0..3 {
-            let current = self.preflight_with(host, port, runner)?;
-            if current.identity.keys == approved.keys
-                || current.identity.keys.iter().any(|key| !approved.keys.contains(key))
+            let mut current = self.preflight_with(host, port, runner)?;
+            if approved
+                .keys
+                .iter()
+                .all(|key| current.identity.keys.contains(key))
             {
-                // The caller still rejects changed identities before SSH.
+                // ssh-keyscan can succeed with a partial set when one of its
+                // independent algorithm connections times out. Additional keys
+                // discovered later remain untrusted, even on the same host.
+                current.identity = approved.clone();
+                let lookup = lookup_name(host, port);
+                current.known_host_lines = approved
+                    .keys
+                    .iter()
+                    .map(|key| format!("{lookup} {} {}", key.algorithm, key.encoded))
+                    .collect();
+                current
+                    .known
+                    .retain(|entry| approved.keys.contains(&entry.key));
                 return Ok(current);
+            }
+            if current
+                .identity
+                .keys
+                .iter()
+                .any(|key| !approved.keys.contains(key))
+            {
+                return Err(HostKeyError::Tool(
+                    "SSH host keys changed after approval; an approved key is missing or replaced; no connection was opened".into(),
+                ));
             }
             if attempt == 2 {
                 return Err(HostKeyError::Tool(
@@ -276,10 +313,15 @@ impl HostKeyVerifier {
                 ],
             )?;
             let scanned = parse_key_lines(&scan.stdout);
-            if scan.success && !scanned.is_empty() { break scanned; }
+            if scan.success && !scanned.is_empty() {
+                break scanned;
+            }
             if attempt == 2 {
-                return Err(if scan.success { HostKeyError::NoKeys }
-                    else { HostKeyError::Tool("ssh-keyscan failed".into()) });
+                return Err(if scan.success {
+                    HostKeyError::NoKeys
+                } else {
+                    HostKeyError::Tool("ssh-keyscan failed".into())
+                });
             }
             attempt += 1;
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -347,9 +389,9 @@ impl HostKeyVerifier {
         let known = recorded
             .into_iter()
             .filter(|entry| {
-                accepted
-                    .iter()
-                    .any(|key| key.algorithm == entry.key.algorithm && key.encoded == entry.key.encoded)
+                accepted.iter().any(|key| {
+                    key.algorithm == entry.key.algorithm && key.encoded == entry.key.encoded
+                })
             })
             .collect();
         Ok(HostKeyPreflight {
