@@ -5,9 +5,9 @@ use crate::{
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -36,7 +36,10 @@ impl fmt::Display for SshError {
             Self::Io(e) => e.fmt(f),
             Self::Protocol(e) => e.fmt(f),
             Self::MissingPipe => f.write_str("SSH pipe unavailable"),
-            Self::Disconnected { destination, stderr } => {
+            Self::Disconnected {
+                destination,
+                stderr,
+            } => {
                 let cause = if stderr.contains("Too many authentication failures")
                     || stderr.contains("Permission denied")
                 {
@@ -112,6 +115,7 @@ impl OpenSsh {
     }
 
     fn spawn(&self, known_host_lines: Vec<String>) -> Result<SshSession, SshError> {
+        let algorithms = pinned_host_key_algorithms(&known_host_lines)?;
         let pin = TemporaryKnownHosts::create(&known_host_lines)?;
         // Offering only the forwarder key keeps an agent with many keys from
         // hitting the server's MaxAuthTries. For an agent key ssh gets its
@@ -151,6 +155,10 @@ impl OpenSsh {
                 "-o",
                 "UpdateHostKeys=no",
                 "-o",
+                "KnownHostsCommand=none",
+                "-o",
+                "VerifyHostKeyDNS=no",
+                "-o",
                 "ConnectTimeout=15",
                 "-o",
                 "ServerAliveInterval=15",
@@ -159,10 +167,19 @@ impl OpenSsh {
             ])
             .arg("-o")
             .arg(format!("UserKnownHostsFile={}", pin.file.display()))
+            .arg("-o")
+            .arg(format!("HostKeyAlgorithms={algorithms}"))
             .args(["-o", "GlobalKnownHostsFile=/dev/null"])
             // One authenticated connection per session: no password or
             // keyboard prompt, and no connection sharing with other ssh.
-            .args(["-o", "PreferredAuthentications=publickey", "-o", "ControlMaster=no", "-o", "ControlPath=none"])
+            .args([
+                "-o",
+                "PreferredAuthentications=publickey",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
+            ])
             .args(identity_arguments)
             .arg("--")
             .arg(&self.destination)
@@ -193,14 +210,42 @@ impl OpenSsh {
             input,
             output,
             stderr,
-            destination: format!(
-                "{}:{}",
-                self.destination.to_string_lossy(),
-                self.port
-            ),
+            destination: format!("{}:{}", self.destination.to_string_lossy(), self.port),
             _pin: pin,
         })
     }
+}
+
+// Restrict negotiation to the keys in the temporary pin. In particular an
+// approved RSA key supports modern RSA SHA2 signatures, not SHA1 ssh-rsa.
+fn pinned_host_key_algorithms(lines: &[String]) -> Result<String, SshError> {
+    let mut algorithms = Vec::new();
+    for line in lines {
+        let key_type = line.split_whitespace().nth(1).unwrap_or("");
+        let supported: &[&str] = match key_type {
+            "ssh-rsa" => &["rsa-sha2-512", "rsa-sha2-256"],
+            "ssh-ed25519" => &["ssh-ed25519"],
+            "ecdsa-sha2-nistp256" => &["ecdsa-sha2-nistp256"],
+            "ecdsa-sha2-nistp384" => &["ecdsa-sha2-nistp384"],
+            "ecdsa-sha2-nistp521" => &["ecdsa-sha2-nistp521"],
+            "sk-ssh-ed25519@openssh.com" => &["sk-ssh-ed25519@openssh.com"],
+            "sk-ecdsa-sha2-nistp256@openssh.com" => &["sk-ecdsa-sha2-nistp256@openssh.com"],
+            _ => {
+                return Err(SshError::HostKey(HostKeyError::Tool(format!(
+                    "unsupported approved SSH host-key algorithm: {key_type}"
+                ))))
+            }
+        };
+        for algorithm in supported {
+            if !algorithms.contains(algorithm) {
+                algorithms.push(*algorithm);
+            }
+        }
+    }
+    if algorithms.is_empty() {
+        return Err(SshError::HostKey(HostKeyError::NoKeys));
+    }
+    Ok(algorithms.join(","))
 }
 
 pub struct SshSession {

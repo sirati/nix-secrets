@@ -30,7 +30,10 @@ struct PartialScan {
 impl Runner for PartialScan {
     fn run(&self, program: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
         if program != OsStr::new("ssh-keyscan") {
-            return Ok(Output { success: false, stdout: Vec::new() });
+            return Ok(Output {
+                success: false,
+                stdout: Vec::new(),
+            });
         }
         let mut scans = self.scans.borrow_mut();
         *scans += 1;
@@ -41,28 +44,46 @@ impl Runner for PartialScan {
         } else {
             "host ssh-rsa RSA\n"
         };
-        Ok(Output { success: true, stdout: data.as_bytes().to_vec() })
+        Ok(Output {
+            success: true,
+            stdout: data.as_bytes().to_vec(),
+        })
     }
 }
 
 #[test]
 fn approved_identity_requires_all_keys_but_retries_partial_scans() {
-    let approved = verifier().preflight_with("host", 22, &Fake {
-        scan: b"host ssh-ed25519 ED\nhost ssh-rsa RSA\n".to_vec(),
-        find: Vec::new(),
-    }).unwrap().identity;
+    let approved = verifier()
+        .preflight_with(
+            "host",
+            22,
+            &Fake {
+                scan: b"host ssh-ed25519 ED\nhost ssh-rsa RSA\n".to_vec(),
+                find: Vec::new(),
+            },
+        )
+        .unwrap()
+        .identity;
     for (complete, changed) in [(true, false), (false, false), (false, true)] {
-        let runner = PartialScan { scans: RefCell::new(0), eventually_complete: complete, changed };
+        let runner = PartialScan {
+            scans: RefCell::new(0),
+            eventually_complete: complete,
+            changed,
+        };
         let result = verifier().preflight_approved_with("host", 22, &approved, &runner);
         if changed {
-            assert_ne!(result.unwrap().identity, approved);
+            assert!(matches!(result, Err(HostKeyError::Tool(_))));
             assert_eq!(*runner.scans.borrow(), 1, "changed keys are not retried");
         } else if complete {
             assert_eq!(result.unwrap().identity, approved);
             assert_eq!(*runner.scans.borrow(), 2);
         } else {
             assert!(matches!(result, Err(HostKeyError::Tool(_))));
-            assert_eq!(*runner.scans.borrow(), 3, "partial identities must fail closed");
+            assert_eq!(
+                *runner.scans.borrow(),
+                3,
+                "partial identities must fail closed"
+            );
         }
     }
 }
@@ -74,7 +95,10 @@ struct InterruptedScan {
 impl Runner for InterruptedScan {
     fn run(&self, program: &OsStr, args: &[OsString]) -> Result<Output, HostKeyError> {
         if program == OsStr::new("ssh-keyscan") && !self.interrupted.replace(true) {
-            return Ok(Output { success: false, stdout: Vec::new() });
+            return Ok(Output {
+                success: false,
+                stdout: Vec::new(),
+            });
         }
         self.keys.run(program, args)
     }
@@ -92,8 +116,11 @@ fn interrupted_scan_retries_without_bypassing_host_identity_checks() {
         };
         let mut decision = |_: &HostIdentity| panic!("known or changed keys must not prompt");
         let result = verifier().verify_with("host", 22, &mut decision, &runner);
-        if changed { assert!(matches!(result, Err(HostKeyError::Changed(_)))); }
-        else { result.unwrap(); }
+        if changed {
+            assert!(matches!(result, Err(HostKeyError::Changed(_))));
+        } else {
+            result.unwrap();
+        }
     }
 }
 
@@ -160,10 +187,12 @@ fn the_identity_does_not_depend_on_scan_order() {
             .into_bytes(),
         find: Vec::new(),
     };
-    let keys = ["ssh-ed25519 AAAA", "ecdsa-sha2-nistp256 BBBB", "ssh-rsa CCCC"];
-    let first = verifier()
-        .preflight_with("host", 22, &scan(&keys))
-        .unwrap();
+    let keys = [
+        "ssh-ed25519 AAAA",
+        "ecdsa-sha2-nistp256 BBBB",
+        "ssh-rsa CCCC",
+    ];
+    let first = verifier().preflight_with("host", 22, &scan(&keys)).unwrap();
     let reversed = verifier()
         .preflight_with("host", 22, &scan(&[keys[2], keys[0], keys[1], keys[0]]))
         .unwrap();
@@ -183,7 +212,8 @@ fn a_changed_key_names_the_host_the_fingerprints_and_the_fix() {
     let (old, new) = (encode(1), encode(2));
     let fake = Fake {
         scan: format!("ns1.lamk.eu ssh-ed25519 {new}\n").into_bytes(),
-        find: format!("# Host ns1.lamk.eu found: line 17\nns1.lamk.eu ssh-ed25519 {old}\n").into_bytes(),
+        find: format!("# Host ns1.lamk.eu found: line 17\nns1.lamk.eu ssh-ed25519 {old}\n")
+            .into_bytes(),
     };
     // The file must exist to be asked; the fake answers for it.
     let file = tempfile_known_hosts();
@@ -196,14 +226,26 @@ fn a_changed_key_names_the_host_the_fingerprints_and_the_fix() {
     let old_print = fingerprint(&old);
     let new_print = fingerprint(&new);
     assert!(old_print.starts_with("SHA256:") && old_print != new_print);
-    assert!(text.contains("SSH HOST KEY MISMATCH for ns1.lamk.eu:22"), "{text}");
     assert!(
-        text.contains(&format!("expected: ssh-ed25519 {old_print} ({} line 17)", file.display())),
+        text.contains("SSH HOST KEY MISMATCH for ns1.lamk.eu:22"),
         "{text}"
     );
-    assert!(text.contains(&format!("offered:  ssh-ed25519 {new_print}")), "{text}");
     assert!(
-        text.contains(&format!("`ssh-keygen -R ns1.lamk.eu -f {}`", file.display())),
+        text.contains(&format!(
+            "expected: ssh-ed25519 {old_print} ({} line 17)",
+            file.display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("offered:  ssh-ed25519 {new_print}")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "`ssh-keygen -R ns1.lamk.eu -f {}`",
+            file.display()
+        )),
         "{text}"
     );
     assert!(text.contains("any IP address"), "{text}");
@@ -224,7 +266,9 @@ fn a_non_default_port_is_quoted_for_ssh_keygen() {
         }],
         offered: vec![],
     };
-    assert!(changed.to_string().contains("`ssh-keygen -R '[ns1]:2222' -f /k`"));
+    assert!(changed
+        .to_string()
+        .contains("`ssh-keygen -R '[ns1]:2222' -f /k`"));
 }
 
 #[test]
@@ -240,4 +284,58 @@ fn tempfile_known_hosts() -> PathBuf {
     let path = std::env::temp_dir().join(format!("nix-secrets-known-hosts-{}", std::process::id()));
     fs::write(&path, "").unwrap();
     path
+}
+
+#[test]
+fn added_keys_are_discarded_and_only_approved_keys_remain_pinned() {
+    let approved = verifier()
+        .preflight_with(
+            "host",
+            22,
+            &Fake {
+                scan: b"host ssh-rsa RSA\n".to_vec(),
+                find: Vec::new(),
+            },
+        )
+        .unwrap()
+        .identity;
+    let checked = verifier()
+        .preflight_approved_with(
+            "host",
+            22,
+            &approved,
+            &Fake {
+                scan: b"host ssh-rsa RSA\nhost ssh-ed25519 NEW\n".to_vec(),
+                find: Vec::new(),
+            },
+        )
+        .unwrap();
+    assert_eq!(checked.identity, approved);
+    assert_eq!(checked.known_host_lines, vec!["host ssh-rsa RSA"]);
+    assert!(checked.known.is_empty());
+}
+
+#[test]
+fn replacement_plus_new_algorithm_is_not_an_additive_discovery() {
+    let approved = verifier()
+        .preflight_with(
+            "host",
+            22,
+            &Fake {
+                scan: b"host ssh-rsa RSA\n".to_vec(),
+                find: Vec::new(),
+            },
+        )
+        .unwrap()
+        .identity;
+    let result = verifier().preflight_approved_with(
+        "host",
+        22,
+        &approved,
+        &Fake {
+            scan: b"host ssh-rsa REPLACED\nhost ssh-ed25519 NEW\n".to_vec(),
+            find: Vec::new(),
+        },
+    );
+    assert!(matches!(result, Err(HostKeyError::Tool(_))));
 }
