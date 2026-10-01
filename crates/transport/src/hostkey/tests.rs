@@ -584,3 +584,37 @@ fn complementary_approved_subsets_accumulate_but_later_replacements_do_not() {
         }
     }
 }
+
+#[test]
+fn missing_approved_key_diagnostic_names_only_the_unobserved_public_key() {
+    let approved = verifier()
+        .preflight_with(
+            "host",
+            22,
+            &Fake {
+                scan: b"host ssh-ed25519 RUQ=\nhost ssh-rsa UlNB\n".to_vec(),
+                find: Vec::new(),
+            },
+        )
+        .unwrap()
+        .identity;
+    let error = verifier()
+        .preflight_approved_with(
+            "host",
+            22,
+            &approved,
+            &Fake {
+                scan: b"host ssh-ed25519 RUQ=\n".to_vec(),
+                find: Vec::new(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("could not read all approved SSH host keys after three scans"));
+    assert!(error.contains(&format!(
+        "missing approved keys: ssh-rsa {}",
+        fingerprint("UlNB")
+    )));
+    assert!(!error.contains("ssh-ed25519"));
+    assert!(!error.contains(&fingerprint("RUQ=")));
+}
