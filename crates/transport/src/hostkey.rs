@@ -210,7 +210,8 @@ impl HostKeyVerifier {
         self.preflight_with(host, port, &ProcessRunner)
     }
 
-    /// Retry scans missing approved keys. A later scan may discover more keys,
+    /// Retry scans missing approved keys, accumulating exact approved subsets.
+    /// A later scan may discover more keys,
     /// but only the previously approved keys are returned and pinned.
     pub fn preflight_approved(
         &self,
@@ -236,13 +237,29 @@ impl HostKeyVerifier {
         if approved.keys.is_empty() {
             return Err(HostKeyError::NoKeys);
         }
+        let mut observed = Vec::new();
         for attempt in 0..3 {
             let mut current = self.preflight_with(host, port, runner)?;
-            if approved
+            let complete_scan = approved
                 .keys
                 .iter()
-                .all(|key| current.identity.keys.contains(key))
+                .all(|key| current.identity.keys.contains(key));
+            // Extra keys are harmless only when this scan also contains the
+            // entire approved set. A replacement alongside a partial set must
+            // not be hidden by approved keys observed in an earlier scan.
+            if !complete_scan
+                && current.identity.keys.iter().any(|key| !approved.keys.contains(key))
             {
+                return Err(HostKeyError::Tool(
+                    "SSH host keys changed after approval; an approved key is missing or replaced; no connection was opened".into(),
+                ));
+            }
+            for key in &current.identity.keys {
+                if approved.keys.contains(key) && !observed.contains(key) {
+                    observed.push(key.clone());
+                }
+            }
+            if approved.keys.iter().all(|key| observed.contains(key)) {
                 // ssh-keyscan can succeed with a partial set when one of its
                 // independent algorithm connections times out. Additional keys
                 // discovered later remain untrusted, even on the same host.
@@ -257,16 +274,6 @@ impl HostKeyVerifier {
                     .known
                     .retain(|entry| approved.keys.contains(&entry.key));
                 return Ok(current);
-            }
-            if current
-                .identity
-                .keys
-                .iter()
-                .any(|key| !approved.keys.contains(key))
-            {
-                return Err(HostKeyError::Tool(
-                    "SSH host keys changed after approval; an approved key is missing or replaced; no connection was opened".into(),
-                ));
             }
             if attempt == 2 {
                 return Err(HostKeyError::Tool(
