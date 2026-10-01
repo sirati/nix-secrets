@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod async_ui;
+pub mod artifact_signing;
 pub mod cli;
 pub mod client;
 mod clipboard;

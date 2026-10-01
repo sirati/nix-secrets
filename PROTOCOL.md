@@ -462,3 +462,21 @@ decryption provider, secret session, or private-key transfer is used.
 
 The temporary agent socket is removed when the child exits. Refusal or a missing
 client agent fails authentication and never falls back to the backend's agent.
+
+## Detached artifact signing
+
+Backend compatibility version 18 adds `RequestArtifactSignatures` and
+`ReadSigningArtifact`. The backend pins read-only regular Nix store files for
+one opaque request ID; bounded reads name only that ID, role, and offset.
+Registration ends on completion, rejection, timeout, or requester disconnect.
+
+The frontend independently hashes the streamed bytes and binds approval to
+host, signing identifier, public-key SHA256, and every role/SHA512/size. Its
+locally configured trusted signer receives the key after approval and returns
+NMBLSIG1 sidecars. Only `ArtifactsSigned` is accepted as a successful answer;
+plaintext answers and other signature types are rejected. A signing-only
+operator leaf refuses `RequestSecrets`, including after schema reload.
+
+NMBLSIG1 authenticates the artifact digest and role. Size is checked against
+streamed bytes and response metadata. It is not a separate authenticated
+field in the existing sidecar format.

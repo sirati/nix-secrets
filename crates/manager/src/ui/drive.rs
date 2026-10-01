@@ -283,6 +283,12 @@ fn apply_completion(model: &mut Model, completion: Completion) {
                 Err(error) => { model.secret_prompt = None; model.fail(format!("SSH authentication for {requester} failed: {error}")); }
             }
         }
+        Completion::ArtifactSignatureFinished { requester, result } => {
+            match result {
+                Ok(()) => model.inform(format!("Returned detached artifact signatures to {requester}; the private key stayed on this client.")),
+                Err(error) => { model.secret_prompt = None; model.fail(format!("Artifact signing for {requester} failed: {error}")); }
+            }
+        }
     }
     model.show_pending_approval();
 }

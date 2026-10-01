@@ -98,6 +98,8 @@ pub struct SecretRequest {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_signature: Option<crate::ssh_auth::SignatureRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_signature: Option<crate::artifact_signing::SigningRequest>,
     /// The process that connected to the backend, read from `/proc`.
     pub requester: ProcessInfo,
     /// Its parent, which is usually the program that wants the values.
@@ -133,6 +135,7 @@ impl std::fmt::Debug for SecretValue {
 pub enum SecretAnswer {
     Approved { values: Vec<SecretValue> },
     Signed { reply: Vec<u8> },
+    ArtifactsSigned { signatures: crate::artifact_signing::Signatures },
     Denied { reason: String },
 }
 

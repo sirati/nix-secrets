@@ -41,6 +41,7 @@ fn prompt(id: &str, deadline: Instant) -> SecretPrompt {
     SecretPrompt {
         id: id.into(),
         ssh_signature: false,
+        artifact_signature: false,
         reason: Some("Sign and deploy the ns1 boot generation, then reboot the server.".into()),
         values: vec![RequestedValue {
             identifier: "host.services.nmbl.generation-key".into(),
@@ -381,4 +382,25 @@ fn ssh_approval_explains_signature_only_and_unvalidated_destination() {
         !details.contains("The values go to the backend"),
         "{details}"
     );
+}
+
+#[test]
+fn artifact_approval_explains_local_signing_and_wrapped_requester_reason() {
+    let mut model = model(true);
+    let mut writer = Requests::default();
+    let mut request = prompt("artifact", Instant::now() + Duration::from_secs(120));
+    request.artifact_signature = true;
+    request.reason = Some("Sign the initial host generation during rescue installation. The private generation key stays on the operator's client.".into());
+    request.values[0].description = Some("Host: host\nPublic key SHA256: 0123456789\nVerified generation-image: 100 bytes\nSHA512 1234567890".into());
+    writer.prompts.push(request);
+    crate::ui::secret_request_tick_for_tests(&mut model, &mut writer);
+    let screen = render(&model, 100, 40);
+    assert!(screen.contains("Artifact signing request"), "{screen}");
+    assert!(screen.contains("Requestor provides unvalidated reason"), "{screen}");
+    assert!(screen.contains("Only detached signatures"), "{screen}");
+    assert!(screen.contains("Verified generation-image"), "{screen}");
+    reduce(&mut model, UiEvent::Character('d'), &mut writer);
+    let details = render(&model, 100, 40);
+    assert!(details.contains("private signing key stays on this client"), "{details}");
+    assert!(!details.contains("values go to the backend"), "{details}");
 }

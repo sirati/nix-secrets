@@ -312,6 +312,7 @@ impl Schema {
                 derived_from: leaf.derived_from.clone(),
             })),
             SecretNode::Operator(leaf) => Ok(LeafSpec::Operator(OperatorSpec {
+                signing_only: leaf.signing_only,
                 path: path.clone(),
                 description: leaf.description.clone(),
                 human_facing: leaf.human_facing,

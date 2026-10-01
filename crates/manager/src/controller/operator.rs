@@ -69,6 +69,7 @@ impl Controller {
     ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
         let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
         match self.schema.leaf(&path).map_err(|error| error.to_string())? {
+            LeafSpec::Operator(spec) if spec.signing_only => return Err(format!("{identifier} is signing-only; plaintext export is forbidden")),
             LeafSpec::Stored(spec) if matches!(spec.kind, SecretKind::PublicInfo) => {
                 return Err(format!("{identifier} is public information, not a secret"))
             }

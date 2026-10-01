@@ -14,6 +14,7 @@ rustPlatform.buildRustPackage {
   src = ../..;
   cargoLock.lockFile = ../../Cargo.lock;
   strictDeps = true;
+  NIX_SECRETS_SIGNING_TEST_ARTIFACT = "${../..}/README.md";
   # The store tests compare records with a real git HEAD; deploy-time
   # generation tests encrypt with real age to a freshly generated SSH key.
   nativeCheckInputs = [

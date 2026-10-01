@@ -27,6 +27,9 @@ compatibility and has no effect.
 
 ## Request plaintext for a command
 
+Keys declared `signingOnly = true` cannot be exported by these commands,
+including `--local`, or copied from the TUI.
+
 ```text
 nix-secrets with-secrets [OPTIONS] IDENTIFIER... -- COMMAND [ARGUMENT ...]
 nix-secrets pipe-secret [OPTIONS] IDENTIFIER -- COMMAND [ARGUMENT ...]
@@ -85,3 +88,22 @@ Only login challenges for that key and username are allowed. Agent mutations,
 extensions and Git signatures are refused. The caller's hostname and reason
 are unvalidated claims: SSH must verify the host key. This relay is separate
 from the Git-only relay used by the TUI commit dialog.
+
+## Sign boot artifacts on the client
+
+```text
+nix-secrets sign-artifacts --host HOST --reason TEXT IDENTIFIER < manifest.json
+```
+
+The attached TUI streams and hashes immutable Nix store artifacts before
+showing approval. After approval it decrypts the signing-only key once on the
+client and returns detached signatures; the backend receives no private key.
+The frontend requires a locally selected immutable `nmbl-sign` executable in
+`NIX_SECRETS_ARTIFACT_SIGNER`. The sirati fleet's `nix-secrets-operator` package
+sets this to its locked signer. Requests cannot select another executable.
+
+Input is a bounded JSON object with `artifacts`: each entry names its `role`,
+`path`, lowercase `sha512`, and `size`. Required roles are `generation-image`,
+`boot-config`, `gen-kernel`, `gen-initrd`, and `rescue-sfs`; `network-stage` is
+optional. Output contains `signatures`, with the same role, digest, and size
+plus `signature_base64`. The caller must reject missing or changed bindings.

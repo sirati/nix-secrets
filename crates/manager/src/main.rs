@@ -14,7 +14,9 @@ use std::time::Duration;
 
 fn main() {
     let mut arguments = env::args_os().skip(1).peekable();
-    let result = if arguments
+    let result = if arguments.next_if(|argument| argument == "sign-artifacts").is_some() {
+        home().and_then(|home| nix_secrets_manager::artifact_signing::run(arguments.collect(), &runtime_directory(&home)).map(|()| 0).map_err(Into::into))
+    } else if arguments
         .next_if(|argument| argument == "pipe-secret")
         .is_some()
     {

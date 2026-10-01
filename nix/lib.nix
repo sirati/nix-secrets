@@ -66,6 +66,7 @@ let
         "presentation"
         "optional"
         "requiredForInstall"
+        "signingOnly"
       ];
       extra = builtins.filter (name: !(builtins.elem name allowed)) (attrNames node);
     in
