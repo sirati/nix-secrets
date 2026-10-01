@@ -4,6 +4,65 @@ mod facets;
 mod profiles;
 
 #[test]
+fn failed_approval_preempts_signing_success_and_acknowledgement_restores_it() {
+    let mut model = model(true);
+    crate::ui::apply_completion_for_tests(
+        &mut model,
+        crate::ui::Completion::ArtifactSignatureFinished {
+            requester: "nix-secrets (pid 42)".into(),
+            result: Ok(()),
+        },
+    );
+    let success = model.message_text().unwrap().to_owned();
+    model.inform("another saved notice");
+    crate::ui::apply_completion_for_tests(
+        &mut model,
+        crate::ui::Completion::ApprovalLost("target preparation failed".into()),
+    );
+    assert_eq!(model.message_text(), Some("target preparation failed"));
+    assert_eq!(
+        model.message.as_ref().unwrap().severity,
+        crate::model::NoticeSeverity::Failure
+    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    let rendered = crate::ui::render_for_tests(&mut terminal, &model);
+    assert!(rendered.contains("Error"), "{rendered}");
+    assert!(rendered.contains("target preparation failed"), "{rendered}");
+    model.acknowledge();
+    assert_eq!(model.message_text(), Some(success.as_str()));
+    model.acknowledge();
+    assert_eq!(model.message_text(), Some("another saved notice"));
+}
+
+#[test]
+fn failures_preserve_active_approvals_and_previously_queued_errors() {
+    let mut model = model(true);
+    model.inform("signing succeeded");
+    let request = ApprovalRequest {
+        id: "pending".into(),
+        target: "h".into(),
+        ..Default::default()
+    };
+    model.offer_approval(request);
+    model.fail("first error");
+    model.fail("second error");
+    assert!(matches!(&model.mode, Mode::Approval(request) if request.id == "pending"));
+    assert!(model.message.is_none());
+    model.mode = Mode::Browse;
+    model.show_pending_approval();
+    model.fail("new failure");
+    assert_eq!(model.message_text(), Some("new failure"));
+    model.acknowledge();
+    assert_eq!(model.message_text(), Some("signing succeeded"));
+    model.acknowledge();
+    assert_eq!(model.message_text(), Some("first error"));
+    model.acknowledge();
+    assert_eq!(model.message_text(), Some("second error"));
+    model.acknowledge();
+    assert!(model.message.is_none());
+}
+
+#[test]
 fn idle_ticks_do_not_redraw_the_terminal() {
     let mut frontend = FakeFrontend {
         events: VecDeque::from([UiEvent::Tick, UiEvent::Tick, UiEvent::Escape]),
