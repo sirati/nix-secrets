@@ -223,8 +223,9 @@ secrets.credentials = {
 };
 ```
 
-The deployed bytes are `prefix + source + suffix`. Changes to the source,
-framing or `tomlPath` change the derived version. A missing TOML field or
+The deployed bytes are `prefix + source + suffix`. Set `encoding = "pgpass"`
+to escape password colons and backslashes; line breaks and NUL are rejected.
+Changes to the source, framing, encoding or `tomlPath` change the derived version. A missing TOML field or
 invalid TOML is an error.
 
 If the source is generated during the same deployment, the target derives the

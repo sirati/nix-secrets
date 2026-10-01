@@ -41,6 +41,8 @@ assert
       suffix = "\n";
     };
   }).derivedFrom.identifier == "server-hetzner2.services.stalwart.dns-update-key";
+assert (normalize { derivedFrom = { identifier = "h.services.a.b"; encoding = "pgpass"; }; }).derivedFrom.encoding == "pgpass";
+assert fails { derivedFrom = { identifier = "h.services.a.b"; encoding = "unknown"; }; };
 assert fails { derivedFrom.identifier = "not an identifier"; };
 assert fails { derivedFrom = { identifier = "h.services.a.b"; extra = 1; }; };
 assert fails { derivedFrom.identifier = "h.services.a.b"; valueGenerator = tsig; valueType = "key"; };
