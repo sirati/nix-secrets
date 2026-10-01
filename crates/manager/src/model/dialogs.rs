@@ -16,6 +16,20 @@ impl Model {
         if self.message.as_ref() == Some(&notice) || self.notifications.back() == Some(&notice) {
             return;
         }
+        if matches!(self.mode, Mode::Browse)
+            && severity == NoticeSeverity::Failure
+            && self
+                .message
+                .as_ref()
+                .is_some_and(|current| current.severity == NoticeSeverity::Info)
+        {
+            let displaced = self
+                .message
+                .replace(notice)
+                .expect("informational notice exists");
+            self.notifications.push_front(displaced);
+            return;
+        }
         if self.message.is_none() && !matches!(self.mode, Mode::Approval(_)) {
             self.message = Some(notice);
         } else {
