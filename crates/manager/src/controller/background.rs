@@ -8,8 +8,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
-#[cfg(test)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(super) fn listen(
     socket: PathBuf,
@@ -33,8 +32,40 @@ pub(super) fn listen(
     {
         return Ok(());
     }
+    // Read framed feed messages on their own worker. A read timeout could
+    // split a frame, so the availability timer must not interrupt that read.
+    let (updates, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || loop {
+        let update = subscription.next_change();
+        let failed = update.is_err();
+        if updates.send(update).is_err() || failed {
+            break;
+        }
+    });
+    let interval = Duration::from_secs(1);
+    let mut checked_at = Instant::now();
     loop {
-        match subscription.next_change()? {
+        // Check against an absolute interval so other feed traffic cannot
+        // indefinitely postpone availability checks.
+        if checked_at.elapsed() >= interval {
+            if client.has_pending_approvals()?
+                && sender.send(BackgroundUpdate::ApprovalPending).is_err()
+            {
+                return Ok(());
+            }
+            checked_at = Instant::now();
+        }
+        let update = match receiver.recv_timeout(interval.saturating_sub(checked_at.elapsed())) {
+            Ok(update) => update?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "change stream worker closed",
+                ))
+            }
+        };
+        match update {
             BackendEvent::ApprovalRequested { .. } => {
                 if sender.send(BackgroundUpdate::ApprovalPending).is_err() {
                     return Ok(());

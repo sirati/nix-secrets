@@ -21,7 +21,7 @@ fn broadcasts_to_every_registered_frontend() {
 
     assert_eq!(broker.pending(10).unwrap(), vec![request("deploy-1")]);
     assert_eq!(broker.pending(11).unwrap(), vec![request("deploy-1")]);
-    assert!(broker.pending(10).unwrap().is_empty());
+    assert_eq!(broker.pending(10).unwrap(), vec![request("deploy-1")]);
 }
 
 #[test]
@@ -66,7 +66,9 @@ fn expired_and_disconnected_leases_are_reclaimed() {
     broker
         .claim(1, "expires", Duration::from_millis(2))
         .unwrap();
+    assert!(broker.pending(2).unwrap().is_empty());
     thread::sleep(Duration::from_millis(10));
+    assert_eq!(broker.pending(2).unwrap(), vec![request("expires")]);
     assert!(broker.claim(2, "expires", Duration::from_secs(1)).is_ok());
 
     broker.submit(request("disconnects")).unwrap();
@@ -165,4 +167,75 @@ fn lease_renewal_requires_the_live_owners_exact_lease() {
         ),
         Err(BrokerError::WrongLease)
     ));
+}
+
+#[test]
+fn peeking_and_claiming_a_followup_preserve_a_queued_deployment() {
+    let mut broker = ApprovalBroker::default();
+    broker.register(1).unwrap();
+    broker.register(2).unwrap();
+    broker.submit(request("pubkey-ns1-followup")).unwrap();
+    broker.submit(request("deploy-ns1-update")).unwrap();
+    let both = vec![request("pubkey-ns1-followup"), request("deploy-ns1-update")];
+    assert_eq!(broker.pending(1).unwrap(), both);
+    assert_eq!(broker.pending(1).unwrap(), both);
+    let followup = broker
+        .claim(1, "pubkey-ns1-followup", Duration::from_secs(30))
+        .unwrap();
+    assert_eq!(
+        broker.pending(1).unwrap(),
+        vec![request("deploy-ns1-update")]
+    );
+    assert_eq!(
+        broker.pending(2).unwrap(),
+        vec![request("deploy-ns1-update")]
+    );
+    broker
+        .renew(
+            1,
+            "pubkey-ns1-followup",
+            followup.lease_id,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+    assert!(matches!(
+        broker.resolve(
+            2,
+            "pubkey-ns1-followup",
+            followup.lease_id,
+            Decision::Approved,
+            None
+        ),
+        Err(BrokerError::WrongLease)
+    ));
+    broker
+        .resolve(
+            1,
+            "pubkey-ns1-followup",
+            followup.lease_id,
+            Decision::Approved,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        broker.pending(1).unwrap(),
+        vec![request("deploy-ns1-update")]
+    );
+    broker.cancel("deploy-ns1-update").unwrap();
+    assert!(broker.pending(1).unwrap().is_empty());
+    assert!(broker.pending(2).unwrap().is_empty());
+}
+
+#[test]
+fn a_claim_pruned_by_readers_returns_when_its_owner_disconnects() {
+    let mut broker = ApprovalBroker::default();
+    broker.register(1).unwrap();
+    broker.register(2).unwrap();
+    broker.submit(request("requeued")).unwrap();
+    broker
+        .claim(1, "requeued", Duration::from_secs(30))
+        .unwrap();
+    assert!(broker.pending(2).unwrap().is_empty());
+    broker.disconnect(1);
+    assert_eq!(broker.pending(2).unwrap(), vec![request("requeued")]);
 }

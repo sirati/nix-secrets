@@ -102,12 +102,18 @@ impl ApprovalBroker {
             .frontends
             .get_mut(&session)
             .ok_or(BrokerError::Unavailable)?;
-        let ids = frontend.queued.drain(..).collect::<Vec<_>>();
-        frontend.known.clear();
-        Ok(ids
-            .into_iter()
-            .filter_map(|id| self.entries.get(&id))
-            .filter(|entry| matches!(entry.state, State::Pending))
+        // Reading availability must not acknowledge or consume requests.
+        // A frontend may peek before claiming one of several deployments.
+        frontend.queued.retain(|id| {
+            self.entries
+                .get(id)
+                .is_some_and(|entry| matches!(entry.state, State::Pending))
+        });
+        frontend.known = frontend.queued.iter().cloned().collect();
+        Ok(frontend
+            .queued
+            .iter()
+            .filter_map(|id| self.entries.get(id))
             .map(|entry| entry.request.clone())
             .collect())
     }
@@ -146,7 +152,10 @@ impl ApprovalBroker {
         message: Option<String>,
     ) -> Result<(), BrokerError> {
         self.reclaim();
-        if message.as_ref().is_some_and(|message| message.len() > MAX_MESSAGE) {
+        if message
+            .as_ref()
+            .is_some_and(|message| message.len() > MAX_MESSAGE)
+        {
             return Err(BrokerError::Invalid("resolution message is too long"));
         }
         let entry = self.entries.get_mut(id).ok_or(BrokerError::Unknown)?;

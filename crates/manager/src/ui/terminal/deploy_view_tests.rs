@@ -278,3 +278,32 @@ fn the_result_counts_sent_generated_left_out_and_missing() {
     assert!(line.starts_with("Deploy ns1 · step 3/3 done: 12 sent · 2 generated · 1 left out · 3 missing"), "{line}");
     assert!(line.contains("Left out by you: ns1.services.a.b"), "{line}");
 }
+
+#[test]
+fn deployment_dialogs_show_the_exact_request_id_at_every_approval_step() {
+    let current = "deploy-f9cab417f3c2116993bc2a51c44d579a";
+    let previous = "deploy-347a7a0d7b504114b0720ffb5a662caf";
+    for host_key in [true, false] {
+        for details in [false, true] {
+            for width in [80, 120, 180] {
+                let mut request = ns1_request();
+                request.id = current.into();
+                if host_key { request.host_key = Some("UNKNOWN SSH HOST KEY: ssh-ed25519 SHA256:test".into()); }
+                let mut model = Model::new(vec![]);
+                model.mode = Mode::Approval(request);
+                model.approval_details = details;
+                let rendered = screen(&draw(&model, width, 40));
+                assert!(rendered.contains(&format!("Request: {current}")), "{width} host_key={host_key}: {rendered}");
+                assert!(!rendered.contains(previous));
+                assert!(rendered.contains(if host_key { "y Trust and connect" } else { "y Deploy" }), "{rendered}");
+            }
+        }
+    }
+    let mut empty = ns1_request();
+    empty.id = current.into();
+    empty.create.clear(); empty.replace.clear(); empty.generate.clear();
+    let mut model = Model::new(vec![]); model.mode = Mode::Approval(empty);
+    let rendered = screen(&draw(&model, 100, 40));
+    assert!(rendered.contains(&format!("Request: {current}")), "{rendered}");
+    assert!(rendered.contains("n Dismiss"), "{rendered}");
+}

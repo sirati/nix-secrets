@@ -111,7 +111,7 @@ pub fn run(
             ApprovalStatus::Pending => claimed = false,
             ApprovalStatus::Claimed { .. } => {
                 if !claimed {
-                    progress("the TUI opened the request; waiting for the operator");
+                    progress(&format!("the TUI opened the request {}; waiting for the operator", request.id));
                 }
                 claimed = true;
             }
@@ -159,4 +159,31 @@ mod tests {
         assert!(parse(os(&["--local", "a"]), "/".into()).is_err());
         assert!(parse(os(&["--backend-socket"]), "/".into()).is_err());
     }
+    #[test]
+    fn opened_acknowledgement_identifies_the_exact_queued_request() {
+        use nix_secrets_core::{framing::{read_json, write_json}, ApprovalRequest, Request, Response};
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("backend.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let id = "deploy-f9cab417f3c2116993bc2a51c44d579a";
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            assert!(matches!(read_json::<Request>(&mut stream).unwrap().unwrap(), Request::RequestDeployment { target, .. } if target == "ns1"));
+            write_json(&mut stream, &Response::DeploymentRequested { request: ApprovalRequest { id: id.into(), target: "ns1".into(), secrets: vec!["ns1.services.mail.password".into()], allow_partial: false } }).unwrap();
+            for state in [ApprovalStatus::Claimed { lease_id: 1, expires_in_ms: 1000 }, ApprovalStatus::Resolved { decision: Decision::Approved, message: Some("deployed".into()) }] {
+                assert!(matches!(read_json::<Request>(&mut stream).unwrap().unwrap(), Request::ApprovalStatus { request_id } if request_id == id));
+                write_json(&mut stream, &Response::ApprovalState { state }).unwrap();
+            }
+        });
+        let invocation = parse(vec!["--backend-socket".into(), socket.into_os_string(), "--wait".into(), "ns1".into()], directory.path().into()).unwrap();
+        let mut progress = Vec::new();
+        assert_eq!(run(&invocation, directory.path(), Duration::ZERO, &mut |line| progress.push(line.to_owned())).unwrap(), Outcome::Deployed("deployed".into()));
+        server.join().unwrap();
+        assert!(progress[0].contains(&format!("request {id}; approve")));
+        assert_eq!(progress[1], format!("the TUI opened the request {id}; waiting for the operator"));
+    }
+
 }
