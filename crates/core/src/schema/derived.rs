@@ -23,6 +23,9 @@ pub struct DerivedFrom {
     /// value, e.g. `["tsig", "secret_base64"]`.
     #[serde(rename = "tomlPath", default, skip_serializing_if = "Vec::is_empty")]
     pub toml_path: Vec<String>,
+    /// Escape a PostgreSQL password-file field before adding its framing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 impl DerivedFrom {
@@ -36,6 +39,13 @@ impl DerivedFrom {
                 .any(|key| key.is_empty() || key.len() > 128 || key.contains('\0'))
         {
             return Err("derivedFrom.tomlPath must be at most 8 non-empty keys".into());
+        }
+        if self
+            .encoding
+            .as_deref()
+            .is_some_and(|value| value != "pgpass")
+        {
+            return Err("derivedFrom.encoding must be pgpass when set".into());
         }
         for affix in [&self.prefix, &self.suffix] {
             if affix.len() > MAX_DERIVED_AFFIX_BYTES || affix.contains('\0') {
@@ -70,6 +80,11 @@ impl DerivedFrom {
             hasher.update((path.len() as u64).to_be_bytes());
             hasher.update(path.as_bytes());
         }
+        if let Some(encoding) = &self.encoding {
+            let tag = format!("encoding:{encoding}");
+            hasher.update((tag.len() as u64).to_be_bytes());
+            hasher.update(tag.as_bytes());
+        }
         let digest = hasher.finalize();
         let hex = digest[..16]
             .iter()
@@ -87,10 +102,32 @@ impl DerivedFrom {
     /// hold the selected field.
     pub fn frame(&self, source: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
         if self.toml_path.is_empty() {
-            return Ok(self.frame_bytes(source));
+            return self.frame_encoded(source);
         }
         let field = self.select(source)?;
-        Ok(self.frame_bytes(field.as_bytes()))
+        self.frame_encoded(field.as_bytes())
+    }
+
+    fn frame_encoded(&self, source: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+        match self.encoding.as_deref() {
+            None => Ok(self.frame_bytes(source)),
+            Some("pgpass") => {
+                if source.iter().any(|byte| matches!(byte, 0 | b'\r' | b'\n')) {
+                    return Err(
+                        "pgpass source must be one password without NUL or line breaks".into(),
+                    );
+                }
+                let mut escaped = zeroize::Zeroizing::new(Vec::with_capacity(source.len()));
+                for byte in source {
+                    if matches!(byte, b':' | b'\\') {
+                        escaped.push(b'\\');
+                    }
+                    escaped.push(*byte);
+                }
+                Ok(self.frame_bytes(&escaped))
+            }
+            Some(_) => Err("derivedFrom.encoding must be pgpass when set".into()),
+        }
     }
 
     /// The string at `toml_path` in a TOML source.
@@ -220,6 +257,7 @@ mod toml_tests {
             prefix: "key:\n  - id: dyndns-rfc2136\n    algorithm: hmac-sha256\n    secret: ".into(),
             suffix: "\n".into(),
             toml_path: vec!["tsig".into(), "secret_base64".into()],
+            encoding: None,
         }
     }
 
@@ -237,7 +275,10 @@ mod toml_tests {
         let error = knot().frame(b"[tsig]\nkey_name = \"x\"\n").unwrap_err();
         assert!(error.contains("has no field tsig.secret_base64"), "{error}");
         let error = knot().frame(b"[tsig]\nsecret_base64 = 3\n").unwrap_err();
-        assert!(error.contains("tsig.secret_base64 is not a string"), "{error}");
+        assert!(
+            error.contains("tsig.secret_base64 is not a string"),
+            "{error}"
+        );
         let error = knot().frame(b"not = [toml").unwrap_err();
         assert!(error.contains("is not valid TOML"), "{error}");
     }
@@ -251,5 +292,44 @@ mod toml_tests {
         let mut deep = knot();
         deep.toml_path = vec!["".into()];
         assert!(deep.validate_definition().is_err());
+    }
+}
+
+#[cfg(test)]
+mod pgpass_tests {
+    use super::*;
+    fn field() -> DerivedFrom {
+        DerivedFrom {
+            identifier: "db.services.postgresql.password".into(),
+            prefix: "host:5432:replication:replicator:".into(),
+            suffix: "\n".into(),
+            toml_path: vec![],
+            encoding: Some("pgpass".into()),
+        }
+    }
+    #[test]
+    fn escapes_password_delimiters_and_backslashes() {
+        assert_eq!(
+            &*field().frame(br"pass:word\tail").unwrap(),
+            br"host:5432:replication:replicator:pass\:word\\tail
+"
+        );
+    }
+    #[test]
+    fn rejects_record_injection_without_disclosing_the_password() {
+        for source in [b"secret\nother".as_slice(), b"secret\r", b"secret\0"] {
+            let error = field().frame(source).unwrap_err();
+            assert!(!error.contains("secret"));
+        }
+    }
+    #[test]
+    fn encoding_changes_the_deployed_version() {
+        let encoded = field();
+        let mut plain = encoded.clone();
+        plain.encoding = None;
+        assert_ne!(encoded.version(b"v"), plain.version(b"v"));
+        assert_ne!(encoded.fingerprint(), plain.fingerprint());
+        plain.encoding = Some("unknown".into());
+        assert!(plain.validate_definition().is_err());
     }
 }

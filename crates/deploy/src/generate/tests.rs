@@ -259,6 +259,7 @@ fn target_frames_a_derived_value_from_the_source_it_generates() {
         prefix: "pw=".into(),
         suffix: "\n".into(),
         toml_path: vec![],
+        encoding: None,
     };
     assert_eq!(
         version,

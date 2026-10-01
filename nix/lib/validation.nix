@@ -225,7 +225,7 @@ let
   validateDerivedFrom =
     derived:
     let
-      extra = builtins.filter (name: !(builtins.elem name [ "identifier" "prefix" "suffix" "tomlPath" ])) (
+      extra = builtins.filter (name: !(builtins.elem name [ "identifier" "prefix" "suffix" "tomlPath" "encoding" ])) (
         attrNames derived
       );
       affixOk =
@@ -242,6 +242,8 @@ let
       || builtins.match "[A-Za-z0-9_-]+\\.(services|user-[A-Za-z0-9_-]+-services)(\\.[A-Za-z0-9_-]+){2,}" derived.identifier == null
     then
       throw "derivedFrom.identifier must be a canonical secret identifier"
+    else if derived ? encoding && derived.encoding != "pgpass" then
+      throw "derivedFrom.encoding must be pgpass when set"
     else if !(affixOk "prefix" && affixOk "suffix") then
       throw "derivedFrom prefix and suffix must be strings of at most 1024 bytes"
     else if
