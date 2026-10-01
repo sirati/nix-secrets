@@ -276,9 +276,16 @@ impl HostKeyVerifier {
                 return Ok(current);
             }
             if attempt == 2 {
-                return Err(HostKeyError::Tool(
-                    "could not read all approved SSH host keys after three scans; no connection was opened".into(),
-                ));
+                let missing = approved
+                    .keys
+                    .iter()
+                    .filter(|key| !observed.contains(key))
+                    .map(PresentedKey::describe)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(HostKeyError::Tool(format!(
+                    "could not read all approved SSH host keys after three scans; no connection was opened; missing approved keys: {missing}"
+                )));
             }
             runner.pause(std::time::Duration::from_secs(1));
         }
