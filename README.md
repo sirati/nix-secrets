@@ -108,8 +108,8 @@ nix-secrets user@workstation -- '~/infrastructure'
 
 Arguments before `--` are SSH arguments. The quoted repository path is expanded
 by the remote backend. The launcher evaluates the inventory and starts a backend
-when needed; no persistent backend service is required. The workstation needs Nix and SSH access to the repository. Backend startup
-uses the repository's `secrets-backend` flake application.
+when needed. The workstation needs Nix and SSH access to the repository; startup
+uses its `secrets-backend` flake application.
 
 ## Edit and deploy
 

@@ -32,60 +32,41 @@ services.nixSecrets.services.backup.secrets.storageBoxKey = {
 };
 ```
 
-The complete normalized leaf is public Nix-store metadata. It contains the
-canonical identifier, recipient IDs, output metadata, Storage Box address and
-complete pinned OpenSSH host public-key lines. It never contains the password
-or a private key.
+Use the Storage Box account's own SSH hostname, user and port 23. Supply
+complete pinned host-key lines. Alternatively, set `bootstrap.knownHostsFile`
+to a managed public-info destination for that host and port; declare its pins
+as described in the [Nix reference](nix/README.md).
 
-The ciphertext at that identifier in `nix-secrets.toml` is the bootstrap
-password. It is a task input, not a deployable file. The generated private key
-is the output used by readiness checks and consumers.
+## Deploy
 
-## Execution
+1. Enter the Storage Box password at this leaf in the TUI. Its ciphertext is
+   a bootstrap input, not a file to install on the target.
+2. Deploy the target and approve the task. The target checks the pinned host
+   key, generates an Ed25519 key locally, and installs its public half in the
+   Storage Box's `.ssh/authorized_keys`.
+3. After the remote update succeeds, the target publishes the private key at
+   `output`. Consumers wait for that output through the normal readiness gate.
 
-1. The frontend and target independently resolve the selected identifier from
-   freshly evaluated/generated manifests and compare every public field.
-2. The frontend asks for task approval, decrypts the password locally and
-   obtains exactly 32 bytes from the operating-system CSPRNG.
-3. The password and contribution travel only in the already authenticated,
-   host-key-verified end-to-end deployment SSH stream.
-4. The target writes the full contribution to `/dev/urandom` using ordinary
-   safe Rust I/O. This mixes untrusted input into the Linux random pool without
-   using `RNDADDENTROPY` or claiming entropy credit. It then erases the input.
-5. After that write succeeds, the target obtains fresh target-local OS random
-   bytes and generates an Ed25519 key. If an output key already exists, it is
-   parsed and reused; retries never rotate implicitly.
-6. The target password-authenticates to the configured Storage Box, accepting
-   only a complete configured host key. It reads `.ssh/authorized_keys`,
-   preserves unrelated valid lines, and replaces the single line whose comment
-   starts with `nix-secrets:<target-host>:<task-id>:`. The new comment also
-   includes the UTC date.
-7. The remote file is uploaded and renamed atomically. Only after that succeeds
-   does the target atomically publish the private key at the declared output
-   path. A crash before local publication can leave the remote replacement;
-   retry replaces the same marker rather than adding another active key.
+The managed authorized-key comment starts with
+`nix-secrets:<target-host>:<task-id>:`. Updates replace that marker and preserve
+unrelated valid entries; malformed or duplicate markers are rejected.
+Retries reuse an installed key. A crash before local publication can leave a
+remote key, but retry replaces the same marker rather than accumulating keys.
 
-Malformed or duplicate task markers are rejected. An incorrect host key,
-password failure, schema mismatch, malformed contribution, remote update
-failure, or local publication failure produces no newly published local key.
-The password, contribution and private seed are zeroized on all ordinary Rust
-return paths.
+## Security and recovery
 
-## Boundary and limitations
+The password reaches only the operator TUI and final target during approval
+and authentication; it is never persisted on the target or passed in arguments
+or the environment. The generated private key never leaves the target.
+Its persistent file is unencrypted for unattended use, with access restricted
+by `output.owner`, `group` and `mode`.
 
-The frontend process necessarily sees the decrypted password during an
-approved run. The final target necessarily sees it while authenticating the
-bootstrap connection. The repository backend and byte relays see only age
-ciphertext or encrypted SSH traffic.
+Changed or unlisted Storage Box host keys fail closed. Review and update the
+pins before retrying a legitimate host-key rotation. Authentication, validation
+or remote-update failure publishes no new local key.
 
-The password is never supplied in an argument or environment variable. The
-implementation uses in-process SSH/SFTP, so it does not need an askpass helper,
-temporary password file or shell command. The target private key is generated
-and serialized in memory and never leaves the target. Its only filesystem
-publication is the declared persistent output.
-
-Pinned host keys are availability-sensitive: Storage Box host-key rotation
-requires an operator-reviewed Nix configuration change before bootstrap can
-continue. The generated key is intentionally unencrypted because unattended
-backup services must use it. The declared file owner and mode restrict local
-access.
+The target uses its OS random source, mixed with an operator contribution
+without claiming entropy credit. The contribution and key seed are erased
+after use. See [Threat model](THREAT-MODEL.md#generated-storage-box-credentials)
+for the trust boundary and [Protocol](PROTOCOL.md#generated-secret-tasks)
+for the task contract.

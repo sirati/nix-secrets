@@ -1,21 +1,19 @@
 # Nix interface
 
-Import `nixosModules.default`, enable `services.nixSecrets`, and describe each
-secret as a leaf with a deployment destination. Configuration contains public
-metadata only. A password leaf may declare `valueType = "password"` and optional
-consumer format limits. The TUI offers password and passphrase generation as
-an operator choice.
-Use `valueType = "key"` for private keys shown in the key-only view. An optional
-`description` on any leaf is shown when it is selected. Set
-`humanFacing = true` for values people enter or use directly; the TUI can
-restrict its view to these leaves. Generated password/passphrase choices are
-available for every password leaf, and consumer constraints describe only the
-receiving program's format limits. Set
-`externalInputRequired = true` only when a value must be supplied from a
-separately administered system, such as a password set in a hosting provider's
-control panel. The TUI's **Required** view shows only leaves with this flag.
-It does not infer this property from password type, generator availability, or
-whether the value is currently set. The default is `false`.
+Import `nixosModules.default` and enable `services.nixSecrets`. Declarations
+contain public metadata; values are managed by the TUI and receiver.
+
+| Leaf setting | Purpose |
+| --- | --- |
+| `valueType = "password"` | Password/passphrase generation and format limits |
+| `valueType = "key"` | Key classification in the TUI |
+| `description` | Explain the value to the operator |
+| `humanFacing = true` | Include in the human-facing view |
+| `externalInputRequired = true` | Must be supplied from an external system |
+
+`externalInputRequired` defaults to false. The Required view uses this flag,
+not the value's type or whether it is unset.
+
 Use `destination.contentType` for format validation (`openssh-private-key`,
 `openssh-public-key` or `named-ssh-ed25519-public-keys`). A stored OpenSSH
 private key keeps its public half beside the ciphertext, so the TUI can copy
@@ -90,42 +88,9 @@ if a program rejects values longer than 64 characters, declare
 `cannotHandleShorterThan`, `cannotHandleLongerThan`, and `matchingRegex`.
 They are enforced for typed passwords entered, pasted, or generated in the TUI.
 
-A generated Storage Box key leaf consumes an operator-encrypted bootstrap
-password and publishes only its locally generated private key at `output`:
-
-```nix
-services.nixSecrets.services.backup.secrets.storage-key = {
-  valueType = "password";
-  generatedSecret = {
-    type = "storage-box-ssh-key";
-    output = {
-      path = "/persistent/secrets/backup/backup/storage-key";
-      category = "backup";
-      owner = "backup";
-      group = "backup";
-      mode = "0400";
-    };
-    bootstrap = {
-      host = "u123.storagebox.example";
-      port = 23;
-      user = "u123";
-      hostPublicKeys = [ "ssh-ed25519 AAAA... pinned-storage-box-host" ];
-    };
-  };
-};
-```
-
-The normalized leaf has `kind = "generated"`. Ordinary destination leaves have
-`kind = "secret"`. Generated outputs take part in destination uniqueness and
-service readiness checks. Host keys are complete, pinned OpenSSH public-key
-lines; duplicate pins and ports other than the Storage Box SSH port 23 fail
-schema validation.
-For a host key maintained as public information, use
-`bootstrap.knownHostsFile = "/persistent/public-info/storage-box/known-hosts"`
-instead of `hostPublicKeys`. The target requires that path to be an attested
-public-info destination for the same host and port, then reads and validates
-the current file before connecting. It never fetches or accepts a host key on
-its own.
+For a password-to-key bootstrap task, see [Storage Box setup](../STORAGE-BOX-BOOTSTRAP.md).
+Generated outputs use the same destination uniqueness and service-readiness
+checks as ordinary secret files.
 
 To name recipients once, use
 `recipientPublicKeys = { primary = "ssh-ed25519 ..."; };` and
