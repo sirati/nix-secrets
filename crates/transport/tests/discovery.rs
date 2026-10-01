@@ -111,7 +111,7 @@ esac
     let args = fs::read_to_string(root.0.join("arguments")).unwrap();
     let lines = args.lines().collect::<Vec<_>>();
     for invocation in lines.chunks_exact(6) {
-        assert_eq!(invocation, ["-T", "10", "-p", "22", "--", "host"]);
+        assert_eq!(invocation, ["-T", "9", "-p", "22", "--", "host"]);
     }
     assert_eq!(lines.len(), attempts * 6);
     if mode == "transient" {
