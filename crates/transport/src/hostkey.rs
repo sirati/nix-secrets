@@ -7,6 +7,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 const MAX_TOOL_OUTPUT: usize = 4 * 1024 * 1024;
+const MAX_DISCOVERY_ATTEMPTS: usize = 8;
+const DISCOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+const DISCOVERY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PresentedKey {
@@ -270,7 +273,7 @@ impl HostKeyVerifier {
                     "could not read all approved SSH host keys after three scans; no connection was opened".into(),
                 ));
             }
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            runner.pause(std::time::Duration::from_secs(1));
         }
         unreachable!()
     }
@@ -299,32 +302,48 @@ impl HostKeyVerifier {
         port: u16,
         runner: &impl Runner,
     ) -> Result<HostKeyPreflight, HostKeyError> {
-        let mut attempt = 0;
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        let mut diagnostic = "no scan completed".to_owned();
         let scanned = loop {
-            let scan = runner.run(
+            let remaining = DISCOVERY_BUDGET.saturating_sub(runner.elapsed(started));
+            if attempts == MAX_DISCOVERY_ATTEMPTS || remaining.is_zero() {
+                return Err(HostKeyError::Tool(format!(
+                    "ssh-keyscan failed after {attempts} attempts within the 60-second discovery budget: {diagnostic}"
+                )));
+            }
+            attempts += 1;
+            let timeout = remaining.min(std::time::Duration::from_secs(10));
+            let scan = runner.run_bounded(
                 &self.ssh_keyscan,
                 &[
                     "-T".into(),
-                    "10".into(),
+                    timeout.as_secs().max(1).to_string().into(),
                     "-p".into(),
                     port.to_string().into(),
                     "--".into(),
                     host.into(),
                 ],
+                timeout,
             )?;
             let scanned = parse_key_lines(&scan.stdout);
-            if scan.success && !scanned.is_empty() {
+            // A failed multi-algorithm scan can still emit keys. Inspect those
+            // immediately: never retry away an observed key replacement.
+            if !scanned.is_empty() {
                 break scanned;
             }
-            if attempt == 2 {
-                return Err(if scan.success {
-                    HostKeyError::NoKeys
-                } else {
-                    HostKeyError::Tool("ssh-keyscan failed".into())
-                });
+            diagnostic = if scan.success {
+                "successful ssh-keyscan produced no host keys".into()
+            } else {
+                scan.diagnostic
+            };
+            if attempts < MAX_DISCOVERY_ATTEMPTS {
+                let delay =
+                    DISCOVERY_DELAY.min(DISCOVERY_BUDGET.saturating_sub(runner.elapsed(started)));
+                if !delay.is_zero() {
+                    runner.pause(delay);
+                }
             }
-            attempt += 1;
-            std::thread::sleep(std::time::Duration::from_secs(1));
         };
         let lookup = lookup_name(host, port);
         let mut known = Vec::new();

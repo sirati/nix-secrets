@@ -6,6 +6,7 @@ struct Fake {
     find: Vec<u8>,
 }
 impl Runner for Fake {
+    fn pause(&self, _: std::time::Duration) {}
     fn run(&self, program: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
         let value = if program == OsStr::new("ssh-keyscan") {
             &self.scan
@@ -15,6 +16,7 @@ impl Runner for Fake {
         Ok(Output {
             success: !value.is_empty(),
             stdout: value.clone(),
+            diagnostic: "fixture failure".into(),
         })
     }
 }
@@ -28,11 +30,13 @@ struct PartialScan {
     changed: bool,
 }
 impl Runner for PartialScan {
+    fn pause(&self, _: std::time::Duration) {}
     fn run(&self, program: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
         if program != OsStr::new("ssh-keyscan") {
             return Ok(Output {
                 success: false,
                 stdout: Vec::new(),
+                diagnostic: "fixture failure".into(),
             });
         }
         let mut scans = self.scans.borrow_mut();
@@ -47,6 +51,7 @@ impl Runner for PartialScan {
         Ok(Output {
             success: true,
             stdout: data.as_bytes().to_vec(),
+            diagnostic: "fixture failure".into(),
         })
     }
 }
@@ -93,11 +98,13 @@ struct InterruptedScan {
     keys: Fake,
 }
 impl Runner for InterruptedScan {
+    fn pause(&self, _: std::time::Duration) {}
     fn run(&self, program: &OsStr, args: &[OsString]) -> Result<Output, HostKeyError> {
         if program == OsStr::new("ssh-keyscan") && !self.interrupted.replace(true) {
             return Ok(Output {
                 success: false,
                 stdout: Vec::new(),
+                diagnostic: "fixture failure".into(),
             });
         }
         self.keys.run(program, args)
@@ -338,4 +345,72 @@ fn replacement_plus_new_algorithm_is_not_an_additive_discovery() {
         },
     );
     assert!(matches!(result, Err(HostKeyError::Tool(_))));
+}
+
+#[test]
+fn empty_discovery_stops_at_total_budget_before_attempt_limit() {
+    struct Budget {
+        elapsed: RefCell<std::time::Duration>,
+        scans: RefCell<usize>,
+    }
+    impl Runner for Budget {
+        fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+            *self.scans.borrow_mut() += 1;
+            *self.elapsed.borrow_mut() += std::time::Duration::from_secs(10);
+            Ok(Output {
+                success: false,
+                stdout: Vec::new(),
+                diagnostic: "fixture timeout".into(),
+            })
+        }
+        fn elapsed(&self, _: std::time::Instant) -> std::time::Duration {
+            *self.elapsed.borrow()
+        }
+        fn pause(&self, duration: std::time::Duration) {
+            *self.elapsed.borrow_mut() += duration;
+        }
+    }
+    let runner = Budget {
+        elapsed: RefCell::new(std::time::Duration::ZERO),
+        scans: RefCell::new(0),
+    };
+    let error = verifier().preflight_with("host", 22, &runner).unwrap_err();
+    assert_eq!(*runner.scans.borrow(), 5);
+    assert_eq!(*runner.elapsed.borrow(), DISCOVERY_BUDGET);
+    assert!(error.to_string().contains("5 attempts"));
+    assert!(error.to_string().contains("fixture timeout"));
+}
+
+#[test]
+fn process_scan_deadline_kills_a_stalled_tool() {
+    let started = std::time::Instant::now();
+    let result = ProcessRunner
+        .run_bounded(
+            OsStr::new("sh"),
+            &["-c".into(), "exec sleep 10".into()],
+            std::time::Duration::from_millis(50),
+        )
+        .unwrap();
+    assert!(!result.success);
+    assert!(result.diagnostic.contains("timed out"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn inherited_output_pipes_cannot_extend_the_scan_deadline() {
+    let started = std::time::Instant::now();
+    let result = ProcessRunner
+        .run_bounded(
+            OsStr::new("sh"),
+            &[
+                "-c".into(),
+                "printf 'host ssh-rsa OBSERVED\n'; sleep 0.2 & exit 1".into(),
+            ],
+            std::time::Duration::from_millis(50),
+        )
+        .unwrap();
+    assert!(!result.success);
+    assert!(result.diagnostic.contains("timed out"));
+    assert!(started.elapsed() < std::time::Duration::from_millis(180));
+    assert_eq!(parse_key_lines(&result.stdout)[0].encoded, "OBSERVED");
 }
