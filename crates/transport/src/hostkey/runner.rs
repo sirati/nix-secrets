@@ -72,13 +72,14 @@ impl Runner for ProcessRunner {
         let (stdout, stdout_done) = collect(Box::new(stdout), MAX_TOOL_OUTPUT);
         let (stderr, stderr_done) = collect(Box::new(stderr), 2048);
         let deadline = std::time::Instant::now() + timeout;
-        let mut timed_out = false;
+        let mut process_timed_out = false;
+        let mut pipes_timed_out = false;
         let status = loop {
             if let Some(status) = child.try_wait()? {
                 break status;
             }
             if std::time::Instant::now() >= deadline {
-                timed_out = true;
+                process_timed_out = true;
                 let _ = child.kill();
                 break child.wait()?;
             }
@@ -87,7 +88,7 @@ impl Runner for ProcessRunner {
         for done in [stdout_done, stderr_done] {
             match done.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
                 Ok(result) => result?,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => timed_out = true,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => pipes_timed_out = true,
                 Err(_) => return Err(HostKeyError::Tool("SSH output reader failed".into())),
             }
         }
@@ -105,8 +106,10 @@ impl Runner for ProcessRunner {
             .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
             .filter(|c| !matches!(*c as u32, 0x202a..=0x202e | 0x2066..=0x2069))
             .collect();
-        let mut diagnostic = if timed_out {
-            "SSH discovery tool or its output pipes timed out".to_owned()
+        let mut diagnostic = if process_timed_out {
+            "SSH discovery tool reached its process deadline".to_owned()
+        } else if pipes_timed_out {
+            "SSH discovery output pipes reached their drain deadline".to_owned()
         } else {
             status.to_string()
         };
@@ -118,7 +121,7 @@ impl Runner for ProcessRunner {
             diagnostic.push_str(" [diagnostics truncated]");
         }
         Ok(Output {
-            success: status.success() && !timed_out,
+            success: status.success() && !process_timed_out && !pipes_timed_out,
             stdout,
             diagnostic,
         })
