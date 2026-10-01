@@ -180,17 +180,22 @@ impl BackendClient {
             Response::Approvals { requests } => requests,
             response => return Err(unexpected(response)),
         };
-        let Some(request) = requests.into_iter().next() else {
-            return Ok(None);
-        };
-        match self.exchange(&Request::ClaimApproval {
-            request_id: request.id.clone(),
-            lease_ms: 300_000,
-        })? {
-            Response::ApprovalClaimed { lease_id, .. } => Ok(Some((request, lease_id))),
-            Response::Error { .. } => Ok(None),
-            response => Err(unexpected(response)),
+        for request in requests {
+            match self.exchange(&Request::ClaimApproval {
+                request_id: request.id.clone(),
+                lease_ms: 300_000,
+            })? {
+                Response::ApprovalClaimed { lease_id, .. } => return Ok(Some((request, lease_id))),
+                // Another frontend can win a claim after our availability
+                // snapshot. Try the remaining requests without losing them.
+                Response::Error { message } if message == "approval request is unavailable" => {
+                    continue
+                }
+                Response::Error { message } => return Err(io::Error::other(message)),
+                response => return Err(unexpected(response)),
+            }
         }
+        Ok(None)
     }
 
     pub fn has_pending_approvals(&mut self) -> io::Result<bool> {

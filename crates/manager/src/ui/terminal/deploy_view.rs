@@ -104,6 +104,7 @@ pub(crate) fn needed_width(request: &ApprovalRequest, details: bool) -> usize {
         .chain([
             width_of("  Will be generated on the target (000)"),
             width_of(&approval_title(request)) + 2,
+            width_of(&format!("Request: {}", request.id)),
         ])
         .max()
         .unwrap_or(0);
@@ -158,6 +159,10 @@ pub(crate) fn approval_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    if !request.id.is_empty() {
+        lines.push(Line::raw(format!("Request: {}", request.id)));
+        lines.push(Line::default());
+    }
     if let Some(failure) = failure.filter(|text| !text.is_empty()) {
         lines.push(Line::styled(failure.to_owned(), bold(Color::Red)));
         lines.push(Line::default());
