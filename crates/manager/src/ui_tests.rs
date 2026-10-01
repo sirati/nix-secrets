@@ -686,3 +686,23 @@ fn deployment_approval_preempts_a_passive_notice_and_restores_it() {
     model.acknowledge();
     assert_eq!(model.message_text(), Some("another operation finished"));
 }
+
+#[test]
+fn deployment_approval_preempts_an_error_and_restores_it_for_acknowledgement() {
+    let mut model = model(false);
+    let mut writer = writer();
+    model.fail("previous deployment failed");
+    reduce(&mut model, UiEvent::Approval(ApprovalRequest {
+        id: "deployment".into(), target: "host".into(), ..Default::default()
+    }), &mut writer);
+    assert!(matches!(model.mode, Mode::Approval(_)));
+    assert!(model.message.is_none());
+    model.inform("another operation finished");
+    reduce(&mut model, UiEvent::Character('n'), &mut writer);
+    assert_eq!(model.message_text(), Some("previous deployment failed"));
+    assert_eq!(model.message.as_ref().unwrap().severity, crate::model::NoticeSeverity::Failure);
+    reduce(&mut model, UiEvent::Character('x'), &mut writer);
+    assert_eq!(model.message_text(), Some("previous deployment failed"));
+    reduce(&mut model, UiEvent::Enter, &mut writer);
+    assert_eq!(model.message_text(), Some("another operation finished"));
+}

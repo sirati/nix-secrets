@@ -40,27 +40,20 @@ impl Model {
     }
 
     pub fn show_pending_approval(&mut self) {
-        // Passive notices must not hide a newly arrived approval. Preserve
-        // their order and restore them after the request has been answered.
+        // Notices must not hide a newly arrived request. Preserve failures
+        // as well as informational messages for acknowledgement afterward.
         if matches!(self.mode, Mode::Browse)
-            && !self.pending_approvals.is_empty()
-            && self.pending_dialogs.is_empty()
-            && self.message.as_ref().is_none_or(|notice| notice.severity == NoticeSeverity::Info)
+            && (!self.pending_dialogs.is_empty() || !self.pending_approvals.is_empty())
         {
             if let Some(notice) = self.message.take() {
                 self.notifications.push_front(notice);
             }
-            self.mode = Mode::Approval(self.pending_approvals.pop_front().unwrap());
+            self.mode = self.pending_dialogs.pop_front().unwrap_or_else(||
+                Mode::Approval(self.pending_approvals.pop_front().unwrap()));
             return;
         }
         if self.message.is_none() && matches!(self.mode, Mode::Browse) {
-            if let Some(dialog) = self.pending_dialogs.pop_front() {
-                self.mode = dialog;
-            } else if let Some(request) = self.pending_approvals.pop_front() {
-                self.mode = Mode::Approval(request);
-            } else {
-                self.message = self.notifications.pop_front();
-            }
+            self.message = self.notifications.pop_front();
         }
     }
 }
