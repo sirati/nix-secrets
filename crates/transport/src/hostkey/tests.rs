@@ -480,7 +480,11 @@ fn scanner_inactivity_timeout_leaves_a_whole_second_for_drain() {
     struct Budget(std::time::Duration);
     impl Runner for Budget {
         fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
-            Ok(Output { success: false, stdout: Vec::new(), diagnostic: "no recorded host key".into() })
+            Ok(Output {
+                success: false,
+                stdout: Vec::new(),
+                diagnostic: "no recorded host key".into(),
+            })
         }
         fn run_bounded(
             &self,
@@ -509,5 +513,74 @@ fn scanner_inactivity_timeout_leaves_a_whole_second_for_drain() {
         assert!(verifier()
             .preflight_with("host", 22, &Budget(remaining))
             .is_ok());
+    }
+}
+
+#[test]
+fn complementary_approved_subsets_accumulate_but_later_replacements_do_not() {
+    struct Complementary {
+        scans: RefCell<usize>,
+        replacement: bool,
+    }
+    impl Runner for Complementary {
+        fn pause(&self, _: std::time::Duration) {}
+        fn run(&self, program: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+            if program != OsStr::new("ssh-keyscan") {
+                return Ok(Output {
+                    success: false,
+                    stdout: Vec::new(),
+                    diagnostic: "no recorded key".into(),
+                });
+            }
+            let mut scans = self.scans.borrow_mut();
+            *scans += 1;
+            let data = if *scans == 1 {
+                "host ssh-rsa RSA\n"
+            } else if self.replacement {
+                "host ssh-ed25519 ED\nhost ssh-rsa REPLACED\n"
+            } else {
+                "host ssh-ed25519 ED\n"
+            };
+            Ok(Output {
+                success: false,
+                stdout: data.as_bytes().to_vec(),
+                diagnostic: "partial nonzero scan".into(),
+            })
+        }
+    }
+    let approved = verifier()
+        .preflight_with(
+            "host",
+            22,
+            &Fake {
+                scan: b"host ssh-ed25519 ED\nhost ssh-rsa RSA\n".to_vec(),
+                find: Vec::new(),
+            },
+        )
+        .unwrap()
+        .identity;
+    for replacement in [false, true] {
+        let runner = Complementary {
+            scans: RefCell::new(0),
+            replacement,
+        };
+        let result = verifier().preflight_approved_with("host", 22, &approved, &runner);
+        assert_eq!(*runner.scans.borrow(), 2);
+        if replacement {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("changed after approval"));
+        } else {
+            let checked = result.unwrap();
+            assert_eq!(checked.identity, approved);
+            assert_eq!(checked.known_host_lines.len(), 2);
+            assert!(checked
+                .known_host_lines
+                .contains(&"host ssh-rsa RSA".to_owned()));
+            assert!(checked
+                .known_host_lines
+                .contains(&"host ssh-ed25519 ED".to_owned()));
+        }
     }
 }
