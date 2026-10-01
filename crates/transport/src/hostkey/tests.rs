@@ -392,7 +392,7 @@ fn process_scan_deadline_kills_a_stalled_tool() {
         )
         .unwrap();
     assert!(!result.success);
-    assert!(result.diagnostic.contains("timed out"));
+    assert!(result.diagnostic.contains("process deadline"));
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
@@ -410,7 +410,104 @@ fn inherited_output_pipes_cannot_extend_the_scan_deadline() {
         )
         .unwrap();
     assert!(!result.success);
-    assert!(result.diagnostic.contains("timed out"));
+    assert!(result.diagnostic.contains("drain deadline"));
     assert!(started.elapsed() < std::time::Duration::from_millis(180));
     assert_eq!(parse_key_lines(&result.stdout)[0].encoded, "OBSERVED");
+}
+
+#[test]
+fn real_keyscan_natural_inactivity_exit_is_not_a_runner_timeout() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
+    let server = std::thread::spawn(move || {
+        let mut connections = Vec::new();
+        while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((connection, _)) => connections.push(connection),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
+                Err(error) => panic!("local listener: {error}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+    let result = ProcessRunner.run_bounded(
+        OsStr::new("ssh-keyscan"),
+        &[
+            "-T".into(),
+            "1".into(),
+            "-p".into(),
+            port.to_string().into(),
+            "--".into(),
+            "127.0.0.1".into(),
+        ],
+        std::time::Duration::from_secs(2),
+    );
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    server.join().unwrap();
+    let output = result.expect("actual ssh-keyscan must be available for transport tests");
+    assert!(!output.success);
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.diagnostic.starts_with("exit status:"),
+        "{}",
+        output.diagnostic
+    );
+}
+
+#[test]
+fn fractional_discovery_budget_never_starts_an_over_budget_scan() {
+    struct AlmostExpired;
+    impl Runner for AlmostExpired {
+        fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+            panic!("insufficient budget for inactivity timeout plus drain");
+        }
+        fn elapsed(&self, _: std::time::Instant) -> std::time::Duration {
+            DISCOVERY_BUDGET - std::time::Duration::from_millis(1999)
+        }
+    }
+    let error = verifier()
+        .preflight_with("host", 22, &AlmostExpired)
+        .unwrap_err();
+    assert!(error.to_string().contains("after 0 attempts"));
+}
+
+#[test]
+fn scanner_inactivity_timeout_leaves_a_whole_second_for_drain() {
+    struct Budget(std::time::Duration);
+    impl Runner for Budget {
+        fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+            Ok(Output { success: false, stdout: Vec::new(), diagnostic: "no recorded host key".into() })
+        }
+        fn run_bounded(
+            &self,
+            _: &OsStr,
+            arguments: &[OsString],
+            wall: std::time::Duration,
+        ) -> Result<Output, HostKeyError> {
+            let inactivity: u64 = arguments[1].to_str().unwrap().parse().unwrap();
+            assert_eq!(wall, self.0.min(std::time::Duration::from_secs(10)));
+            assert!(std::time::Duration::from_secs(inactivity + 1) <= wall);
+            Ok(Output {
+                success: false,
+                stdout: b"host ssh-ed25519 OBSERVED\n".to_vec(),
+                diagnostic: "nonzero scan still preserves keys".into(),
+            })
+        }
+        fn elapsed(&self, _: std::time::Instant) -> std::time::Duration {
+            DISCOVERY_BUDGET - self.0
+        }
+    }
+    for remaining in [
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_millis(2999),
+        std::time::Duration::from_secs(2),
+    ] {
+        assert!(verifier()
+            .preflight_with("host", 22, &Budget(remaining))
+            .is_ok());
+    }
 }

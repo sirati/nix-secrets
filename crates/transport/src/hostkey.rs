@@ -307,7 +307,7 @@ impl HostKeyVerifier {
         let mut diagnostic = "no scan completed".to_owned();
         let scanned = loop {
             let remaining = DISCOVERY_BUDGET.saturating_sub(runner.elapsed(started));
-            if attempts == MAX_DISCOVERY_ATTEMPTS || remaining.is_zero() {
+            if attempts == MAX_DISCOVERY_ATTEMPTS || remaining < std::time::Duration::from_secs(2) {
                 return Err(HostKeyError::Tool(format!(
                     "ssh-keyscan failed after {attempts} attempts within the 60-second discovery budget: {diagnostic}"
                 )));
@@ -318,7 +318,10 @@ impl HostKeyVerifier {
                 &self.ssh_keyscan,
                 &[
                     "-T".into(),
-                    timeout.as_secs().max(1).to_string().into(),
+                    // Reserve a second for normal exit and pipe drain within
+                    // the unchanged hard wall deadline. Subsecond fractions
+                    // cannot extend ssh-keyscan's whole-second timeout.
+                    (timeout.as_secs() - 1).to_string().into(),
                     "-p".into(),
                     port.to_string().into(),
                     "--".into(),
