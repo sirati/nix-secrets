@@ -11,22 +11,22 @@
 //! the session or disconnects. Without an attached TUI the request fails; it
 //! is never decrypted anywhere else.
 use super::{Request, Response};
+use crate::SecretPath;
 use crate::framing::{read_json, read_json_sensitive, write_json};
 use crate::private_socket::runtime_directory;
 use crate::secret_request::{
-    parent_pid, ProcessInfo, SecretAnswer, SecretRequest, MAX_REQUEST_IDENTIFIERS,
+    MAX_REQUEST_IDENTIFIERS, ProcessInfo, SecretAnswer, SecretRequest, parent_pid,
 };
 use crate::secret_session::SecretSession;
-use crate::SecretPath;
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use rustix::net::RecvFlags;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::os::unix::net::UnixStream;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -47,6 +47,7 @@ struct Job {
 
 #[derive(Default)]
 pub(super) struct Operators {
+    artifacts: Mutex<BTreeMap<String, BTreeMap<String, std::fs::File>>>,
     /// Attached TUIs in attach order; the last one receives requests.
     attached: Mutex<Vec<(u64, Sender<Job>)>>,
     /// Whether a request is waiting for the operator.
@@ -132,13 +133,21 @@ pub(super) fn attach(
 }
 
 fn ask(stream: &mut UnixStream, request: &SecretRequest) -> io::Result<SecretAnswer> {
+    ask_with_timeout(stream, request, ANSWER_TIMEOUT)
+}
+
+fn ask_with_timeout(
+    stream: &mut UnixStream,
+    request: &SecretRequest,
+    timeout: Duration,
+) -> io::Result<SecretAnswer> {
     write_json(
         stream,
         &Response::SecretRequested {
             request: request.clone(),
         },
     )?;
-    stream.set_read_timeout(Some(ANSWER_TIMEOUT))?;
+    stream.set_read_timeout(Some(timeout))?;
     let answer = read_json_sensitive::<Request>(stream);
     stream.set_read_timeout(None)?;
     match answer? {
@@ -165,7 +174,27 @@ pub(super) fn request(
     peer: u32,
     identifiers: Vec<String>,
     reason: Option<String>,
+    schema: &crate::Schema,
 ) -> io::Result<()> {
+    for identifier in &identifiers {
+        let result = SecretPath::parse(identifier)
+            .map_err(|e| e.to_string())
+            .and_then(|path| schema.leaf(&path).map_err(|e| e.to_string()));
+        match result {
+            Ok(crate::LeafSpec::Operator(spec)) if spec.signing_only => {
+                return write_json(
+                    stream,
+                    &Response::Error {
+                        message: format!(
+                            "{identifier} is signing-only; plaintext export is forbidden"
+                        ),
+                    },
+                );
+            }
+            Err(message) => return write_json(stream, &Response::Error { message }),
+            _ => {}
+        }
+    }
     let values = match approved_values(operators, peer, identifiers, reason) {
         Ok(values) => values,
         Err(message) => return write_json(stream, &Response::Error { message }),
@@ -230,11 +259,13 @@ fn approved_values(
             return Err(format!("{identifier} is requested twice"));
         }
     }
-    let answer = request_operator(operators, peer, identifiers, reason, None)?;
+    let answer = request_operator(operators, peer, identifiers, reason, None, None, None)?;
     let values = match &answer {
         SecretAnswer::Denied { reason } => return Err(reason.clone()),
         SecretAnswer::Approved { values } => values,
-        SecretAnswer::Signed { .. } => return Err("the TUI returned an unasked signature".into()),
+        SecretAnswer::Signed { .. } | SecretAnswer::ArtifactsSigned { .. } => {
+            return Err("the TUI returned an unasked signature".into());
+        }
     };
     let mut decoded = BTreeMap::new();
     for value in values {
@@ -266,6 +297,8 @@ fn request_operator(
     identifiers: Vec<String>,
     reason: Option<String>,
     ssh_signature: Option<crate::ssh_auth::SignatureRequest>,
+    artifact_signature: Option<crate::artifact_signing::SigningRequest>,
+    requester: Option<&UnixStream>,
 ) -> Result<SecretAnswer, String> {
     if reason
         .as_ref()
@@ -290,9 +323,33 @@ fn request_operator(
         identifiers,
         reason,
         ssh_signature,
+        artifact_signature,
         requester: ProcessInfo::read(peer),
         parent: parent_pid(peer).map(ProcessInfo::read),
     };
+    // Pin immutable files before the request becomes visible. The frontend
+    // can read only these files, by role and opaque request ID, while pending.
+    let files = request
+        .artifact_signature
+        .as_ref()
+        .map(open_artifacts)
+        .transpose()?;
+    if let Some(files) = files {
+        operators
+            .artifacts
+            .lock()
+            .map_err(|_| "artifact registry poisoned")?
+            .insert(request.id.clone(), files);
+    }
+    struct Registered<'a>(&'a Operators, String);
+    impl Drop for Registered<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut files) = self.0.artifacts.lock() {
+                files.remove(&self.1);
+            }
+        }
+    }
+    let _registered = Registered(operators, request.id.clone());
     let (reply, answer) = mpsc::channel();
     operator
         .send(Job {
@@ -300,9 +357,23 @@ fn request_operator(
             reply,
         })
         .map_err(|_| NO_OPERATOR.to_owned())?;
-    answer
-        .recv_timeout(ANSWER_TIMEOUT + Duration::from_secs(10))
-        .map_err(|_| "the nix-secrets TUI did not answer in time".to_owned())?
+    let deadline = Instant::now() + ANSWER_TIMEOUT + Duration::from_secs(10);
+    loop {
+        match answer.recv_timeout(POLL.min(deadline.saturating_duration_since(Instant::now()))) {
+            Ok(answer) => return answer,
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err("the nix-secrets TUI disconnected".into());
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if requester.is_some_and(peer_done) {
+                    return Err("artifact signing requester disconnected".into());
+                }
+                if Instant::now() >= deadline {
+                    return Err("the nix-secrets TUI did not answer in time".into());
+                }
+            }
+        }
+    }
 }
 
 pub(super) fn request_signature(
@@ -314,14 +385,26 @@ pub(super) fn request_signature(
 ) -> io::Result<()> {
     let result = request
         .validate()
-        .and_then(|()| request_operator(operators, peer, Vec::new(), reason, Some(request)))
+        .and_then(|()| {
+            request_operator(
+                operators,
+                peer,
+                Vec::new(),
+                reason,
+                Some(request),
+                None,
+                None,
+            )
+        })
         .and_then(|answer| match answer {
             SecretAnswer::Signed { reply } => {
                 crate::ssh_auth::validate_reply(&reply)?;
                 Ok(reply)
             }
             SecretAnswer::Denied { reason } => Err(reason),
-            SecretAnswer::Approved { .. } => Err("the TUI returned unasked secret values".into()),
+            SecretAnswer::Approved { .. } | SecretAnswer::ArtifactsSigned { .. } => {
+                Err("the TUI returned an unasked answer".into())
+            }
         });
     write_json(
         stream,
@@ -331,3 +414,104 @@ pub(super) fn request_signature(
         },
     )
 }
+
+fn open_artifacts(
+    request: &crate::artifact_signing::SigningRequest,
+) -> Result<BTreeMap<String, std::fs::File>, String> {
+    use std::os::unix::fs::MetadataExt;
+    request.validate()?;
+    let store_uid = std::fs::metadata("/nix/store")
+        .map_err(|e| e.to_string())?
+        .uid();
+    let mut files = BTreeMap::new();
+    for artifact in &request.manifest.artifacts {
+        let canonical = std::fs::canonicalize(&artifact.path).map_err(|e| e.to_string())?;
+        if !canonical.starts_with("/nix/store") {
+            return Err("artifact escaped immutable Nix store".into());
+        }
+        let file = std::fs::File::open(canonical).map_err(|e| e.to_string())?;
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file()
+            || metadata.mode() & 0o222 != 0
+            || metadata.uid() != store_uid
+            || metadata.len() != artifact.size
+        {
+            return Err("artifact is mutable or has changed size".into());
+        }
+        files.insert(artifact.role.clone(), file);
+    }
+    Ok(files)
+}
+
+pub(super) fn read_artifact(
+    operators: &Operators,
+    request_id: &str,
+    role: &str,
+    offset: u64,
+) -> Result<Response, String> {
+    use std::os::unix::fs::FileExt;
+    let registry = operators
+        .artifacts
+        .lock()
+        .map_err(|_| "artifact registry poisoned")?;
+    let file = registry
+        .get(request_id)
+        .and_then(|files| files.get(role))
+        .ok_or("no matching pending signing artifact")?;
+    let size = file.metadata().map_err(|e| e.to_string())?.len();
+    if offset >= size {
+        return Err("artifact offset outside file".into());
+    }
+    let mut buffer = vec![0; crate::artifact_signing::CHUNK_BYTES.min((size - offset) as usize)];
+    file.read_exact_at(&mut buffer, offset)
+        .map_err(|e| e.to_string())?;
+    Ok(Response::SigningArtifactChunk {
+        offset,
+        bytes_base64: STANDARD.encode(buffer),
+    })
+}
+
+pub(super) fn request_artifacts(
+    stream: &mut UnixStream,
+    operators: &Operators,
+    peer: u32,
+    request: crate::artifact_signing::SigningRequest,
+    reason: Option<String>,
+    schema: &crate::Schema,
+) -> io::Result<()> {
+    let result = (|| {
+        request.validate()?;
+        let path = SecretPath::parse(&request.identifier).map_err(|e| e.to_string())?;
+        match schema.leaf(&path).map_err(|e| e.to_string())? {
+            crate::LeafSpec::Operator(spec) if spec.signing_only => {}
+            _ => return Err("artifact signing requires a signing-only operator key".into()),
+        }
+        let answer = request_operator(
+            operators,
+            peer,
+            vec![request.identifier.clone()],
+            reason,
+            None,
+            Some(request.clone()),
+            Some(stream),
+        )?;
+        match answer {
+            SecretAnswer::ArtifactsSigned { signatures } => {
+                signatures.validate(&request.manifest)?;
+                Ok(signatures)
+            }
+            SecretAnswer::Denied { reason } => Err(reason),
+            _ => Err("the TUI returned an unasked answer".into()),
+        }
+    })();
+    write_json(
+        stream,
+        &match result {
+            Ok(signatures) => Response::ArtifactSignatures { signatures },
+            Err(message) => Response::Error { message },
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests;

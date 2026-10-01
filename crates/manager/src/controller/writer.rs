@@ -86,6 +86,9 @@ impl SecretWriter for Controller {
     }
     fn reveal(&mut self, path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
         let path = SecretPath::parse(path).map_err(|error| error.to_string())?;
+        if matches!(self.schema.leaf(&path).map_err(|error| error.to_string())?, LeafSpec::Operator(spec) if spec.signing_only) {
+            return Err(format!("{path} is signing-only; plaintext export is forbidden"));
+        }
         if self.public_spec(&path)?.is_some() {
             return self.reveal_public_info(&path);
         }

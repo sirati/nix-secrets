@@ -174,6 +174,10 @@ impl AsyncWriter {
                         self.secret_activity = None;
                         self.completions.push(Completion::SshSignatureFinished { requester, result });
                     }
+                    ChannelEvent::ArtifactSignatureFinished { requester, result } => {
+                        self.secret_activity = None;
+                        self.completions.push(Completion::ArtifactSignatureFinished { requester, result });
+                    }
                     ChannelEvent::Lost(error) => self.completions.push(Completion::Failed(
                         format!("Secret requests from the backend host can no longer reach this TUI: {error}"),
                     )),
@@ -409,7 +413,7 @@ impl SecretWriter for AsyncWriter {
         if approved {
             self.secret_activity = Some(activity(
                 if count == 0 {
-                    "Signing SSH authentication with this client's agent".into()
+                    "Signing on this client; the private key stays here".into()
                 } else {
                     format!(
                         "Decrypting {count} requested value{}",

@@ -141,6 +141,7 @@ pub enum Completion {
         requester: String,
         result: Result<(), String>,
     },
+    ArtifactSignatureFinished { requester: String, result: Result<(), String> },
     /// A commit failed; carries git's full error output.
     CommitFailed(String),
 }

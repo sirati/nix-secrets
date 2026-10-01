@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod approval;
+pub mod artifact_signing;
 pub mod approval_types;
 pub mod backend;
 pub mod framing;

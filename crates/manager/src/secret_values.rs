@@ -35,6 +35,16 @@ pub fn load(
     schema: &Schema,
     identifiers: &[String],
 ) -> Result<Batch, String> {
+    load_with_policy(client, schema, identifiers, false)
+}
+
+/// Used only by the frontend's detached-signature handler. The returned
+/// plaintext remains on the frontend and is never a SecretAnswer::Approved.
+pub(crate) fn load_for_signing(client: &mut BackendClient, schema: &Schema, identifiers: &[String]) -> Result<Batch, String> {
+    load_with_policy(client, schema, identifiers, true)
+}
+
+fn load_with_policy(client: &mut BackendClient, schema: &Schema, identifiers: &[String], signing: bool) -> Result<Batch, String> {
     let mut values = Vec::new();
     let mut records = Vec::new();
     // The agent names each key by its title; listing asks nothing.
@@ -46,6 +56,7 @@ pub fn load(
             .leaf(&path)
             .map_err(|error| format!("{identifier}: {error}"))?;
         let (kind, description) = match &leaf {
+            LeafSpec::Operator(spec) if spec.signing_only && !signing => return Err(format!("{identifier} is signing-only; plaintext export is forbidden")),
             LeafSpec::Stored(spec) if matches!(spec.kind, SecretKind::PublicInfo) => {
                 return Err(format!("{identifier} is public information, not a secret"))
             }

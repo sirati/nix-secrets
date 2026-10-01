@@ -18,6 +18,18 @@ pub struct BackendClient {
 }
 
 impl BackendClient {
+    pub fn read_signing_artifact(&mut self, request_id: &str, role: &str, offset: u64) -> Result<Vec<u8>, String> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        match self.exchange(&Request::ReadSigningArtifact { request_id: request_id.into(), role: role.into(), offset }).map_err(|e| e.to_string())? {
+            Response::SigningArtifactChunk { offset: received, bytes_base64 } if received == offset && bytes_base64.len() <= 4 * nix_secrets_core::artifact_signing::CHUNK_BYTES.div_ceil(3) => {
+                let bytes = STANDARD.decode(bytes_base64).map_err(|_| "invalid artifact chunk encoding")?;
+                if bytes.is_empty() || bytes.len() > nix_secrets_core::artifact_signing::CHUNK_BYTES { return Err("invalid artifact chunk size".into()); }
+                Ok(bytes)
+            },
+            Response::Error { message } => Err(message),
+            _ => Err("unexpected signing artifact chunk".into()),
+        }
+    }
     pub fn new(stream: UnixStream) -> Self {
         Self { stream }
     }

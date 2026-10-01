@@ -15,6 +15,9 @@ pub struct OperatorLeaf {
     /// The host cannot be installed until this value is stored.
     #[serde(rename = "requiredForInstall", default)]
     pub required_for_install: bool,
+    /// This key may produce detached signatures only; never plaintext exports.
+    #[serde(rename = "signingOnly", default)]
+    pub signing_only: bool,
     #[serde(default)]
     pub identity: Option<SecretIdentity>,
     #[serde(default)]
@@ -75,6 +78,7 @@ impl KeypairGenerator {
 
 #[derive(Clone, Debug)]
 pub struct OperatorSpec {
+    pub signing_only: bool,
     pub path: super::SecretPath,
     pub description: Option<String>,
     pub human_facing: bool,
