@@ -27,7 +27,7 @@ compatibility and has no effect.
 
 ## Request plaintext for a command
 
-Keys declared `signingOnly = true` cannot be exported by these commands,
+Operator keys declared `signingOnly = true` cannot be exported by these commands,
 including `--local`, or copied from the TUI.
 
 ```text

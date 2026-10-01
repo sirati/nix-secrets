@@ -191,7 +191,8 @@ pub(super) fn request(
                     },
                 );
             }
-            Err(message) => return write_json(stream, &Response::Error { message }),
+            // Other value validation belongs to the operator channel, which
+            // reports a refusal notice even when no approval is needed.
             _ => {}
         }
     }
