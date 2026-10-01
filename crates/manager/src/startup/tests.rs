@@ -169,3 +169,24 @@ fn ephemeral_tunnel_removes_only_its_socket_on_exit() {
     assert!(!socket.exists());
     drop(listener);
 }
+
+#[test]
+fn captures_noisy_launcher_output_and_reports_its_failure() {
+    // Both pipes exceed their kernel buffers. Startup must drain them together,
+    // retain a bounded diagnostic, and report the actual failure promptly.
+    let spec = CommandSpec {
+        program: "sh".into(),
+        arguments: vec!["-c".into(), "printf 'backend-startup-diagnostic\\n' >&2; head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2; exit 23".into()],
+    };
+    let socket = path();
+    let mut launcher = ProcessLauncher::ephemeral(&socket);
+    let error = match connect_or_start(&socket, &spec, &mut launcher, Duration::from_secs(3)) {
+        Ok(_) => panic!("failed launcher unexpectedly published a backend"),
+        Err(error) => error,
+    };
+    assert_ne!(error.kind(), io::ErrorKind::TimedOut);
+    let message = error.to_string();
+    assert!(message.contains("23"));
+    assert!(message.contains("backend-startup-diagnostic"));
+    assert!(message.len() < 33 * 1024);
+}

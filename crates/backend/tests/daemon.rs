@@ -296,3 +296,87 @@ fn evaluates_with_fixed_nix_arguments_and_persists_only_ciphertext() {
 
 #[path = "daemon/profiles.rs"]
 mod profiles;
+
+#[test]
+fn schema_reload_captures_nix_stderr_without_leaking_to_frontend_terminal() {
+    use std::io::Read;
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let socket = directory.path().join("backend.sock");
+    let generated = directory.path().join("generated.json");
+    let mode = directory.path().join("evaluation-mode");
+    let evaluations = directory.path().join("evaluations");
+    fs::write(&generated, manifest(&socket)).unwrap();
+    fs::write(&mode, "startup").unwrap();
+    let nix = bin.join("nix");
+    // Reuse the daemon's fake-Nix fixture, but exercise real OS pipes and the
+    // schema-loader path used by a RequestSecrets call after readiness.
+    fs::write(&nix, format!(
+        "#!/bin/sh\nprintf 'evaluation\\n' >> '{}'\nprintf 'SCHEMA-EVAL-WARNING-MUST-NOT-REACH-TTY\\n' >&2\nmode=$(cat '{}')\nif [ \"$mode\" = failure ]; then printf 'SCHEMA-EVAL-FAILURE-CAPTURED-DIAGNOSTIC\\n' >&2; fi\nif [ \"$mode\" != startup ]; then head -c 262144 /dev/zero >&2; fi\nif [ \"$mode\" = failure ]; then exit 73; fi\ncat '{}'\n",
+        evaluations.display(), mode.display(), generated.display()
+    )).unwrap();
+    fs::set_permissions(&nix, fs::Permissions::from_mode(0o700)).unwrap();
+    let search_path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    struct OwnedBackend(Child);
+    impl Drop for OwnedBackend {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut backend = OwnedBackend(start(directory.path(), &socket, None, Some(&search_path)));
+    if !await_socket(&mut backend.0, &socket) {
+        return;
+    }
+    let mut stderr = backend.0.stderr.take().unwrap();
+    let captured = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    assert_eq!(fs::read_to_string(&evaluations).unwrap().lines().count(), 1);
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    fs::write(&mode, "success").unwrap();
+    let answer = call(
+        &mut stream,
+        Request::RequestSecrets {
+            identifiers: vec!["host.services.mail.password".into()],
+            reason: Some("reload schema test".into()),
+        },
+    );
+    assert!(
+        matches!(answer, Response::Error { message } if message.contains("no nix-secrets TUI"))
+    );
+    assert_eq!(fs::read_to_string(&evaluations).unwrap().lines().count(), 2);
+    fs::write(&mode, "failure").unwrap();
+    let answer = call(
+        &mut stream,
+        Request::RequestSecrets {
+            identifiers: vec!["host.services.mail.password".into()],
+            reason: Some("failed schema reload test".into()),
+        },
+    );
+    assert!(
+        matches!(answer, Response::Error { message } if message.contains("SCHEMA-EVAL-FAILURE-CAPTURED-DIAGNOSTIC") && message.len() < 100_000)
+    );
+    assert_eq!(fs::read_to_string(&evaluations).unwrap().lines().count(), 3);
+    assert!(backend.0.try_wait().unwrap().is_none());
+    backend.0.kill().unwrap();
+    backend.0.wait().unwrap();
+    let diagnostics = String::from_utf8_lossy(&captured.join().unwrap()).into_owned();
+    assert!(
+        !diagnostics.contains("SCHEMA-EVAL-WARNING-MUST-NOT-REACH-TTY"),
+        "evaluation warning leaked to backend stderr: {diagnostics}"
+    );
+    assert!(
+        !diagnostics.contains("SCHEMA-EVAL-FAILURE-CAPTURED-DIAGNOSTIC"),
+        "failure diagnostics leaked to backend stderr: {diagnostics}"
+    );
+}

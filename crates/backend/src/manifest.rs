@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_DIAGNOSTIC_BYTES: u64 = 16 * 1024;
 
 pub fn load_manifest(path: &Path) -> io::Result<String> {
     read_bounded(File::open(path)?)
@@ -17,8 +18,32 @@ pub fn evaluate_manifest(repository: &Path) -> io::Result<String> {
         .arg(reference)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        // The persistent backend may have been started from an active TUI.
+        // Child warnings must never write to that terminal behind ratatui.
+        .stderr(Stdio::piped())
         .spawn()?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("missing nix stderr"))?;
+    let diagnostics = std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        let read = stderr
+            .by_ref()
+            .take(MAX_DIAGNOSTIC_BYTES + 1)
+            .read_to_end(&mut captured);
+        // Continue draining after the bound so a noisy child cannot deadlock
+        // while its manifest is read on the other pipe.
+        let _ = io::copy(&mut stderr, &mut io::sink());
+        read?;
+        let truncated = captured.len() as u64 > MAX_DIAGNOSTIC_BYTES;
+        captured.truncate(MAX_DIAGNOSTIC_BYTES as usize);
+        let mut text = String::from_utf8_lossy(&captured).trim().to_owned();
+        if truncated {
+            text.push_str("\n[diagnostics truncated]");
+        }
+        Ok::<_, io::Error>(text)
+    });
     let stdout = child
         .stdout
         .take()
@@ -28,12 +53,23 @@ pub fn evaluate_manifest(repository: &Path) -> io::Result<String> {
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = diagnostics.join();
             return Err(error);
         }
     };
     let status = child.wait()?;
+    let diagnostics = diagnostics
+        .join()
+        .map_err(|_| io::Error::other("Nix diagnostic reader failed"))??;
     if !status.success() {
-        return Err(io::Error::other(format!("nix eval failed with {status}")));
+        return Err(io::Error::other(format!(
+            "nix eval failed with {status}{}",
+            if diagnostics.is_empty() {
+                String::new()
+            } else {
+                format!(":\n{diagnostics}")
+            }
+        )));
     }
     Ok(output)
 }
