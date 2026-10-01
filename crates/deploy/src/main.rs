@@ -89,7 +89,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if first.as_deref() != Some(std::ffi::OsStr::new("--manifest")) {
         return Err(
-            "usage: secret-deploy --manifest ABSOLUTE-NIX-STORE-JSON [--age PATH] [--audit-file PATH --audit-group NAME]"
+            "usage: secret-deploy --manifest ABSOLUTE-NIX-STORE-JSON [--age PATH] [--audit-file PATH --audit-group NAME] [--post-deploy STORE-PROGRAM]"
                 .into(),
         );
     }
@@ -108,6 +108,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Some(args.next().ok_or("--audit-file requires a path")?)
         }
         None => None,
+        Some(value) if value == "--post-deploy" => None,
         _ => return Err("unexpected receiver argument".into()),
     };
     let audit_group = if audit_file.is_some() {
@@ -117,6 +118,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(args.next().ok_or("--audit-group requires a name")?)
     } else {
         None
+    };
+    let next = if audit_file.is_some() {
+        args.next()
+    } else {
+        next
+    };
+    let post_deploy = match next.as_deref() {
+        Some(value) if value == "--post-deploy" => {
+            let program = args.next().ok_or("--post-deploy requires a program")?;
+            if !Path::new(&program).starts_with("/nix/store")
+                || Path::new(&program)
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Err("post-deployment program must be in /nix/store".into());
+            }
+            Some(program)
+        }
+        None => None,
+        _ => return Err("unexpected receiver argument".into()),
     };
     if args.next().is_some() {
         return Err("unexpected receiver argument".into());
@@ -206,6 +227,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         eprintln!("nix-secrets-audit: {audit}");
+        if let Some(program) = &post_deploy {
+            let status = std::process::Command::new(program)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+                .map_err(|error| {
+                    format!("secrets published, but post-deployment preparation failed: {error}")
+                })?;
+            if !status.success() {
+                return Err("secrets published, but post-deployment preparation failed".into());
+            }
+        }
         Ok(AppliedOutput {
             versions: current_versions(&deployer, &public_deployer)?,
             generated_public_keys: generated.public_keys,

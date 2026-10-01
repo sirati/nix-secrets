@@ -8,6 +8,20 @@
 
 let
   lib = pkgs.lib;
+  postDeploy = pkgs.runCommandCC "deployment-preparation-test" { nativeBuildInputs = [ pkgs.rustc ]; } ''
+    mkdir -p $out/bin
+    cat > hook.rs <<'EOF'
+    fn main() {
+        let root = std::path::Path::new("/persistent/secrets");
+        assert!(root.join(".current").is_dir(), "preparation ran before publication");
+        let path = root.join(".preparation-count");
+        let count: u64 = std::fs::read_to_string(&path).unwrap_or_default().trim().parse().unwrap_or(0);
+        std::fs::write(path, format!("{}\n", count + 1)).unwrap();
+        println!("hook output must never enter the deployment protocol");
+    }
+    EOF
+    rustc hook.rs -o $out/bin/prepare
+  '';
   secretsLib = import ../lib.nix { inherit lib; };
   operatorPackage = pkgs.callPackage ../packages/test-operator.nix {
     nix-secrets = pkgs.callPackage ../packages/default.nix { };
@@ -326,6 +340,7 @@ let
         publicInfoInventoryFile = toString knownHostsInventory;
         defaultRecipientPublicKeys = [ operatorPublic ];
         receiver.enable = true;
+        receiver.postDeployCommand = "${postDeploy}/bin/prepare";
         forwarder = {
           enable = true;
           authorizedKeys = [ forwarderPublic ];
@@ -506,6 +521,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("dns-update-consumer.service")
     # Generated values: installed here, stored as ciphertext.
     machine.succeed("test -s /persistent/secrets/alpha/service/password")
+    machine.succeed("test $(cat /persistent/secrets/.preparation-count) -ge 1")
     machine.succeed("ssh-keygen -y -f /persistent/secrets/keys/service/local-key | grep -q '^ssh-ed25519 '")
     key = machine.succeed("cat /persistent/secrets/dns/service/transfer-key").strip()
     assert machine.succeed("cat /persistent/secrets/dns/service/transfer-key-file") == f"secret: {key}\n"
@@ -585,6 +601,7 @@ pkgs.testers.runNixOSTest {
     assert "not deployed yet" not in output, output
     machine.wait_for_unit("alpha-consumer.service")
     machine.succeed("runuser -u alpha -- grep -qx token-one /persistent/secrets/alpha/service/token")
+    machine.succeed("test $(cat /persistent/secrets/.preparation-count) -ge 2")
     machine.succeed("test \"$(stat -c %U:%G:%a /persistent/secrets/alpha/service/token)\" = alpha:alpha:400")
     machine.fail("runuser -u dns -- cat /persistent/secrets/alpha/service/token")
     assert machine.succeed("cat /persistent/secrets/dyndns/service/knot-key") == (

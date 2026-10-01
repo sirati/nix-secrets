@@ -45,6 +45,11 @@ in
       default = "root";
       description = "Group allowed to read deployment audit events without accessing secrets.";
     };
+    postDeployCommand = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Trusted executable in /nix/store to prepare newly published secrets before deployment succeeds. Runs inside the receiver sandbox with no protocol input or output.";
+    };
   };
 
   config = lib.mkIf (secrets.enable && cfg.enable) {
@@ -72,7 +77,7 @@ in
         StandardInput = "socket";
         StandardOutput = "socket";
         StandardError = "journal";
-        ExecStart = lib.escapeShellArgs [
+        ExecStart = lib.escapeShellArgs ([
           "${cfg.package}/bin/secret-deploy"
           "--manifest"
           (toString config.system.build.nixSecretsManifest)
@@ -82,7 +87,7 @@ in
           "/run/nix-secrets/audit/%i.json"
           "--audit-group"
           cfg.auditGroup
-        ];
+        ] ++ lib.optionals (cfg.postDeployCommand != null) [ "--post-deploy" cfg.postDeployCommand ]);
         UMask = "0077";
         CapabilityBoundingSet = [
           "CAP_CHOWN"
