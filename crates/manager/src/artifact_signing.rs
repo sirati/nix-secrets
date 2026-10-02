@@ -154,6 +154,7 @@ pub(crate) fn handle(
         reason: request.reason.clone(),
         ssh_signature: false,
         artifact_signature: true,
+        closure_signature: false,
         deadline: Instant::now() + DECISION_TIMEOUT,
     };
     let deadline = prompt.deadline;

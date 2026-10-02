@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
 
-pub mod async_ui;
 pub mod artifact_signing;
+pub mod async_ui;
 pub mod cli;
 pub mod client;
 mod clipboard;
+pub mod closure_signing;
 pub mod command;
 pub mod controller;
 pub mod deploy_command;

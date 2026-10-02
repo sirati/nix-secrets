@@ -285,8 +285,8 @@ fn apply_completion(model: &mut Model, completion: Completion) {
         }
         Completion::ArtifactSignatureFinished { requester, result } => {
             match result {
-                Ok(()) => model.inform(format!("Returned detached artifact signatures to {requester}; the private key stayed on this client.")),
-                Err(error) => { model.secret_prompt = None; model.fail(format!("Artifact signing for {requester} failed: {error}")); }
+                Ok(()) => model.inform(format!("Returned detached signatures to {requester}; the private key stayed on this client.")),
+                Err(error) => { model.secret_prompt = None; model.fail(format!("Signing for {requester} failed: {error}")); }
             }
         }
     }

@@ -107,3 +107,12 @@ Input is a bounded JSON object with `artifacts`: each entry names its `role`,
 `boot-config`, `gen-kernel`, `gen-initrd`, and `rescue-sfs`; `network-stage` is
 optional. Output contains `signatures`, with the same role, digest, and size
 plus `signature_base64`. The caller must reject missing or changed bindings.
+
+### `sign-closure`
+
+`nix-secrets sign-closure --host HOST --reason TEXT IDENTIFIER` reads version 1
+Nix closure metadata from stdin and requests approval in the attached client TUI.
+The client decrypts the signing-only operator key locally and returns standard
+Nix Ed25519 signatures on stdout. The private key never reaches the backend.
+The approval labels the metadata as requester supplied; it does not verify NAR
+contents. This command accepts no local decryption or private-key export mode.

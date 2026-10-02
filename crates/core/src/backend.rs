@@ -165,7 +165,7 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                 continue;
             }
             // The connection becomes the TUI's operator channel for good.
-            Request::AttachOperator => return secrets::attach(&mut stream, operators, session),
+            Request::AttachOperator => return secrets::attach(&mut stream, operators, session, peer_pid),
             Request::RequestSecrets {
                 identifiers,
                 reason,
@@ -187,6 +187,14 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                     Err(message) => { write_json(&mut stream, &Response::Error { message: format!("reloading signing policy failed: {message}") })?; continue; }
                 };
                 secrets::request_artifacts(&mut stream, operators, peer_pid, request, reason, fresh.as_ref().unwrap_or(schema))?;
+                continue;
+            }
+            Request::RequestClosureSignatures { request, reason } => {
+                let fresh = match schema_loader.map(|load| load()).transpose() {
+                    Ok(fresh) => fresh,
+                    Err(message) => { write_json(&mut stream, &Response::Error { message: format!("reloading signing policy failed: {message}") })?; continue; }
+                };
+                secrets::request_closure(&mut stream, operators, peer_pid, request, reason, fresh.as_ref().unwrap_or(schema), store)?;
                 continue;
             }
             request => request,
@@ -212,6 +220,7 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
         let schema = fresh_schema.as_ref().unwrap_or(schema);
         let update = event_after_success(&request, schema);
         let response = match request {
+            Request::CheckClosureSigningRequest { request_id } => secrets::check_closure(operators, &request_id, peer_pid),
             Request::ReadSigningArtifact { request_id, role, offset } => secrets::read_artifact(operators, &request_id, &role, offset),
             Request::Get { path } => store
                 .get(&path)
@@ -393,6 +402,7 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
             | Request::AttachOperator
             | Request::RequestSecrets { .. }
             | Request::RequestArtifactSignatures { .. }
+            | Request::RequestClosureSignatures { .. }
             | Request::RequestSshSignature { .. } => unreachable!("handled above"),
         }
         .unwrap_or_else(|error| Response::Error {

@@ -42,6 +42,7 @@ fn prompt(id: &str, deadline: Instant) -> SecretPrompt {
         id: id.into(),
         ssh_signature: false,
         artifact_signature: false,
+        closure_signature: false,
         reason: Some("Sign and deploy the ns1 boot generation, then reboot the server.".into()),
         values: vec![RequestedValue {
             identifier: "host.services.nmbl.generation-key".into(),
@@ -396,11 +397,45 @@ fn artifact_approval_explains_local_signing_and_wrapped_requester_reason() {
     crate::ui::secret_request_tick_for_tests(&mut model, &mut writer);
     let screen = render(&model, 100, 40);
     assert!(screen.contains("Artifact signing request"), "{screen}");
-    assert!(screen.contains("Requestor provides unvalidated reason"), "{screen}");
+    assert!(
+        screen.contains("Requestor provides unvalidated reason"),
+        "{screen}"
+    );
     assert!(screen.contains("Only detached signatures"), "{screen}");
     assert!(screen.contains("Verified generation-image"), "{screen}");
     reduce(&mut model, UiEvent::Character('d'), &mut writer);
     let details = render(&model, 100, 40);
-    assert!(details.contains("private signing key stays on this client"), "{details}");
+    assert!(
+        details.contains("private signing key stays on this client"),
+        "{details}"
+    );
+    assert!(!details.contains("values go to the backend"), "{details}");
+}
+
+#[test]
+fn closure_approval_labels_unvalidated_metadata_and_never_plaintext_export() {
+    let mut model = model(true);
+    let mut writer = Requests::default();
+    let mut request = prompt("closure", Instant::now() + Duration::from_secs(120));
+    request.closure_signature = true;
+    request.values[0].identifier = "host.services.system-update.signing-key".into();
+    request.values[0].description = Some("Host: host\nNix public key name: host-update\nRequester-supplied metadata: 2 paths\nCanonical metadata SHA256: publichash".into());
+    writer.prompts.push(request);
+    crate::ui::secret_request_tick_for_tests(&mut model, &mut writer);
+    let screen = render(&model, 120, 45);
+    assert!(screen.contains("Closure signing request"), "{screen}");
+    assert!(
+        screen.contains("host.services.system-update.signing-key"),
+        "{screen}"
+    );
+    assert!(screen.contains("has not verified NAR contents"), "{screen}");
+    assert!(screen.contains("Only signatures are returned"), "{screen}");
+    assert!(!screen.contains("verified artifacts"), "{screen}");
+    reduce(&mut model, UiEvent::Character('d'), &mut writer);
+    let details = render(&model, 120, 45);
+    assert!(
+        details.contains("private signing key stays on this client"),
+        "{details}"
+    );
     assert!(!details.contains("values go to the backend"), "{details}");
 }

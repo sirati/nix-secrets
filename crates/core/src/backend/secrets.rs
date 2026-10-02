@@ -47,6 +47,8 @@ struct Job {
 
 #[derive(Default)]
 pub(super) struct Operators {
+    closure_requests: Mutex<BTreeMap<String, (UnixStream, u32)>>,
+    operator_peers: Mutex<BTreeMap<u64, u32>>,
     artifacts: Mutex<BTreeMap<String, BTreeMap<String, std::fs::File>>>,
     /// Attached TUIs in attach order; the last one receives requests.
     attached: Mutex<Vec<(u64, Sender<Job>)>>,
@@ -75,12 +77,12 @@ impl Operators {
             })
     }
 
-    fn latest(&self) -> Option<Sender<Job>> {
+    fn latest(&self) -> Option<(u64, Sender<Job>)> {
         self.attached
             .lock()
             .ok()?
             .last()
-            .map(|(_, sender)| sender.clone())
+            .map(|(id, sender)| (*id, sender.clone()))
     }
 }
 
@@ -89,7 +91,13 @@ pub(super) fn attach(
     stream: &mut UnixStream,
     operators: &Operators,
     session: u64,
+    peer: u32,
 ) -> io::Result<()> {
+    operators
+        .operator_peers
+        .lock()
+        .map_err(|_| io::Error::other("operator peer registry poisoned"))?
+        .insert(session, peer);
     let (sender, jobs) = mpsc::channel::<Job>();
     operators
         .attached
@@ -115,6 +123,9 @@ pub(super) fn attach(
                 }
                 Ok(job) => {
                     let answer = ask(stream, &job.request);
+                    if let Ok(mut requests) = operators.closure_requests.lock() {
+                        requests.remove(&job.request.id);
+                    }
                     let broken = answer.is_err();
                     let _ = job.reply.send(answer.map_err(|error| {
                         format!("the nix-secrets TUI did not answer the request: {error}")
@@ -128,6 +139,9 @@ pub(super) fn attach(
     });
     if let Ok(mut attached) = operators.attached.lock() {
         attached.retain(|(id, _)| *id != session);
+    }
+    if let Ok(mut peers) = operators.operator_peers.lock() {
+        peers.remove(&session);
     }
     result
 }
@@ -260,11 +274,13 @@ fn approved_values(
             return Err(format!("{identifier} is requested twice"));
         }
     }
-    let answer = request_operator(operators, peer, identifiers, reason, None, None, None)?;
+    let answer = request_operator(operators, peer, identifiers, reason, None, None, None, None)?;
     let values = match &answer {
         SecretAnswer::Denied { reason } => return Err(reason.clone()),
         SecretAnswer::Approved { values } => values,
-        SecretAnswer::Signed { .. } | SecretAnswer::ArtifactsSigned { .. } => {
+        SecretAnswer::Signed { .. }
+        | SecretAnswer::ArtifactsSigned { .. }
+        | SecretAnswer::ClosureSigned { .. } => {
             return Err("the TUI returned an unasked signature".into());
         }
     };
@@ -299,6 +315,7 @@ fn request_operator(
     reason: Option<String>,
     ssh_signature: Option<crate::ssh_auth::SignatureRequest>,
     artifact_signature: Option<crate::artifact_signing::SigningRequest>,
+    closure_signature: Option<crate::closure_signing::SigningRequest>,
     requester: Option<&UnixStream>,
 ) -> Result<SecretAnswer, String> {
     if reason
@@ -309,7 +326,7 @@ fn request_operator(
     }
     // At most one request waits for the operator at a time.
     let _pending = operators.claim()?;
-    let operator = operators.latest().ok_or(NO_OPERATOR)?;
+    let (operator_session, operator) = operators.latest().ok_or(NO_OPERATOR)?;
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(|error| error.to_string())?;
     let request = SecretRequest {
@@ -325,6 +342,7 @@ fn request_operator(
         reason,
         ssh_signature,
         artifact_signature,
+        closure_signature,
         requester: ProcessInfo::read(peer),
         parent: parent_pid(peer).map(ProcessInfo::read),
     };
@@ -345,12 +363,32 @@ fn request_operator(
     struct Registered<'a>(&'a Operators, String);
     impl Drop for Registered<'_> {
         fn drop(&mut self) {
+            if let Ok(mut requests) = self.0.closure_requests.lock() {
+                requests.remove(&self.1);
+            }
             if let Ok(mut files) = self.0.artifacts.lock() {
                 files.remove(&self.1);
             }
         }
     }
     let _registered = Registered(operators, request.id.clone());
+    if request.closure_signature.is_some() {
+        let owner = *operators
+            .operator_peers
+            .lock()
+            .map_err(|_| "operator registry poisoned")?
+            .get(&operator_session)
+            .ok_or(NO_OPERATOR)?;
+        let socket = requester
+            .ok_or("missing closure requester")?
+            .try_clone()
+            .map_err(|e| e.to_string())?;
+        operators
+            .closure_requests
+            .lock()
+            .map_err(|_| "closure registry poisoned")?
+            .insert(request.id.clone(), (socket, owner));
+    }
     let (reply, answer) = mpsc::channel();
     operator
         .send(Job {
@@ -395,6 +433,7 @@ pub(super) fn request_signature(
                 Some(request),
                 None,
                 None,
+                None,
             )
         })
         .and_then(|answer| match answer {
@@ -403,7 +442,9 @@ pub(super) fn request_signature(
                 Ok(reply)
             }
             SecretAnswer::Denied { reason } => Err(reason),
-            SecretAnswer::Approved { .. } | SecretAnswer::ArtifactsSigned { .. } => {
+            SecretAnswer::Approved { .. }
+            | SecretAnswer::ArtifactsSigned { .. }
+            | SecretAnswer::ClosureSigned { .. } => {
                 Err("the TUI returned an unasked answer".into())
             }
         });
@@ -494,6 +535,7 @@ pub(super) fn request_artifacts(
             reason,
             None,
             Some(request.clone()),
+            None,
             Some(stream),
         )?;
         match answer {
@@ -516,3 +558,104 @@ pub(super) fn request_artifacts(
 
 #[cfg(test)]
 mod tests;
+
+pub(super) fn request_closure(
+    stream: &mut UnixStream,
+    operators: &Operators,
+    peer: u32,
+    request: crate::closure_signing::SigningRequest,
+    reason: Option<String>,
+    schema: &crate::Schema,
+    store: &crate::SecretStore,
+) -> io::Result<()> {
+    let result = (|| {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use sha2::{Digest, Sha256};
+        request.validate()?;
+        let path = SecretPath::parse(&request.identifier).map_err(|e| e.to_string())?;
+        match schema.leaf(&path).map_err(|e| e.to_string())? {
+            crate::LeafSpec::Operator(spec) if spec.signing_only => {}
+            _ => return Err("closure signing requires a signing-only operator key".into()),
+        }
+        let record = store
+            .get(&path)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing closure signing record")?;
+        let public = STANDARD
+            .decode(
+                record
+                    .public_key
+                    .ok_or("missing closure signing public key")?,
+            )
+            .map_err(|_| "invalid public key envelope")?;
+        let text = std::str::from_utf8(&public).map_err(|_| "invalid public key envelope")?;
+        crate::closure_signing::validate_public_key(text.strip_suffix('\n').unwrap_or(text))?;
+        let fingerprint = format!("{:x}", Sha256::digest(&public));
+        if request.public_key_sha256 != fingerprint {
+            return Err("closure signing public key changed".into());
+        }
+        let answer = request_operator(
+            operators,
+            peer,
+            vec![request.identifier.clone()],
+            reason,
+            None,
+            None,
+            Some(request.clone()),
+            Some(stream),
+        )?;
+        let signatures = closure_answer(answer, &request.manifest)?;
+        let name = text.split_once(':').ok_or("invalid public key envelope")?.0;
+        if signatures
+            .signatures
+            .iter()
+            .any(|s| s.signature.split_once(':').map(|(n, _)| n) != Some(name))
+        {
+            return Err("closure signature key name differs from approved public key".into());
+        }
+        Ok(signatures)
+    })();
+    write_json(
+        stream,
+        &match result {
+            Ok(signatures) => Response::ClosureSignatures { signatures },
+            Err(message) => Response::Error { message },
+        },
+    )
+}
+
+pub(super) fn check_closure(
+    operators: &Operators,
+    id: &str,
+    peer: u32,
+) -> Result<Response, String> {
+    let mut pending = operators
+        .closure_requests
+        .lock()
+        .map_err(|_| "closure registry poisoned")?;
+    let (socket, owner) = pending
+        .get(id)
+        .ok_or("no matching pending closure request")?;
+    if *owner != peer {
+        return Err("closure request belongs to another operator".into());
+    }
+    if peer_done(socket) {
+        pending.remove(id);
+        return Err("closure signing requester disconnected".into());
+    }
+    Ok(Response::Success)
+}
+
+fn closure_answer(
+    answer: SecretAnswer,
+    manifest: &crate::closure_signing::Manifest,
+) -> Result<crate::closure_signing::Signatures, String> {
+    match answer {
+        SecretAnswer::ClosureSigned { signatures } => {
+            signatures.validate(manifest)?;
+            Ok(signatures)
+        }
+        SecretAnswer::Denied { reason } => Err(reason),
+        _ => Err("the TUI returned an unasked answer".into()),
+    }
+}
