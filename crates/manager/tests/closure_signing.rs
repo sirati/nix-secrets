@@ -57,7 +57,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("backend.sock");
+        let runtime = directory.path().join("nix-secrets");
+        std::fs::create_dir(&runtime).unwrap();
+        let socket = runtime.join(nix_secrets_manager::startup::socket_name(directory.path()));
         let schema=Schema::from_json(&serde_json::json!({"host":{"metadata":{"socketPath":socket,"deployment":{"host":"host","destination":"forward@host","port":22}},"services":{"nix":{"closure-key":{"kind":"operator","signingOnly":true,"generator":{"installable":"test#nix-key","args":[]},"recipientPublicKeys":["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f test"],"recipientIds":["operator"]}}}}}).to_string()).unwrap();
         let backend = Backend::bind(
             &socket,
@@ -190,14 +192,15 @@ fn exchange(socket: &std::path::Path, request: &Request) -> std::io::Result<Resp
 }
 
 #[test]
-fn cli_approval_decrypts_once_and_returns_only_native_verified_signatures() {
+fn cli_default_repository_discovers_backend_and_returns_only_native_verified_signatures() {
     let mut f = Fixture::new();
-    let socket = f.socket.clone();
+    let repository = f._directory.path().to_path_buf();
     let manifest = f.manifest.clone();
     let cli = thread::spawn(move || {
         let mut child = Command::new(env!("CARGO_BIN_EXE_nix-secrets"))
-            .args(["sign-closure", "--backend-socket"])
-            .arg(socket)
+            .arg("sign-closure")
+            .current_dir(&repository)
+            .env("XDG_RUNTIME_DIR", &repository)
             .args([
                 "--host",
                 "host",
@@ -387,4 +390,51 @@ fn closed_decision_channel_never_decrypts() {
         .unwrap(),
         Response::Error { .. }
     ));
+}
+
+#[test]
+fn cli_explicit_repository_overrides_unrelated_working_directory() {
+    let mut f = Fixture::new();
+    let repository = f._directory.path().to_path_buf();
+    let unrelated = tempfile::tempdir().unwrap();
+    let cwd = unrelated.path().to_path_buf();
+    let manifest = f.manifest.clone();
+    let cli = thread::spawn(move || {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nix-secrets"))
+            .args(["sign-closure", "--repository"])
+            .arg(&repository)
+            .args([
+                "--host",
+                "host",
+                "--reason",
+                "Sign explicit repository closure",
+                IDENTIFIER,
+            ])
+            .current_dir(cwd)
+            .env("XDG_RUNTIME_DIR", &repository)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    });
+    let prompt = f.prompt();
+    assert!(prompt.closure_signature);
+    f.decide(prompt.id, true);
+    let output = cli.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let signatures: Signatures = serde_json::from_slice(&output.stdout).unwrap();
+    signatures.validate(&f.manifest).unwrap();
+    assert_eq!(f.count.load(Ordering::SeqCst), 1);
 }
