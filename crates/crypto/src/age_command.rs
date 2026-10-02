@@ -224,6 +224,14 @@ impl CryptoProvider for AgeCommandProvider {
             return Err(CryptoError::SecretTooLarge);
         }
         let Some((launcher, prefix)) = &self.launcher else {
+            if !self.uses_one_password() {
+                let workers = std::thread::available_parallelism().map_or(1, usize::from);
+                return ordered_parallel(ciphertexts, workers, |ciphertext| {
+                    self.decrypt(ciphertext)
+                });
+            }
+            // A direct plugin provider has no shared authorization scope.
+            // Keep this fallback serial; normal 1Password clients use the launcher.
             return ciphertexts
                 .iter()
                 .map(|ciphertext| self.decrypt(ciphertext))
@@ -272,6 +280,33 @@ impl CryptoProvider for AgeCommandProvider {
         }
         Ok(plaintexts)
     }
+}
+
+/// Join the entire bounded wave before reporting its first input-order error.
+/// Successful plaintext buffers drop and zeroize if any input fails; later
+/// waves are never started and no partial batch is returned.
+fn ordered_parallel<T: Sync, R: Send, E: Send>(
+    inputs: &[T],
+    workers: usize,
+    run: impl Fn(&T) -> Result<R, E> + Sync,
+) -> Result<Vec<R>, E> {
+    let mut output = Vec::with_capacity(inputs.len());
+    for wave in inputs.chunks(workers.max(1)) {
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = wave
+                .iter()
+                .map(|input| scope.spawn(|| run(input)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("decrypt worker panicked"))
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            output.push(result?);
+        }
+    }
+    Ok(output)
 }
 
 impl AgeCommandProvider {
@@ -367,5 +402,41 @@ mod tests {
         assert!(validate_ssh_recipient("ssh-rsa AAAA comment").is_ok());
         assert!(validate_ssh_recipient("age1example").is_err());
         assert!(validate_ssh_recipient("ssh-ed25519 AAAA\nargument").is_err());
+    }
+}
+
+#[cfg(test)]
+mod parallel_identity_tests {
+    use super::ordered_parallel;
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+    #[test]
+    fn bounded_identity_workers_overlap_keep_order_and_join_on_failure() {
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let finished = AtomicUsize::new(0);
+        let barrier = Barrier::new(2);
+        let result: Result<Vec<usize>, usize> = ordered_parallel(&[0, 1, 2, 3], 2, |value| {
+            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(count, Ordering::SeqCst);
+            barrier.wait();
+            active.fetch_sub(1, Ordering::SeqCst);
+            finished.fetch_add(1, Ordering::SeqCst);
+            Ok(*value)
+        });
+        assert_eq!(result.unwrap(), [0, 1, 2, 3]);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(finished.load(Ordering::SeqCst), 4);
+        finished.store(0, Ordering::SeqCst);
+        let result: Result<Vec<usize>, usize> = ordered_parallel(&[0, 1, 2, 3], 2, |value| {
+            barrier.wait();
+            finished.fetch_add(1, Ordering::SeqCst);
+            Err(*value)
+        });
+        assert_eq!(result, Err(0));
+        assert_eq!(finished.load(Ordering::SeqCst), 2);
     }
 }

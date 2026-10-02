@@ -173,3 +173,32 @@ fn launcher_authorization_failure_reads_as_denied_without_probing_op() {
     );
     assert!(!calls.exists(), "no op call after a denial");
 }
+
+#[test]
+fn identity_batch_runs_actual_age_children_in_input_order_and_reaps_failed_wave() {
+    use nix_secrets_crypto::CryptoProvider;
+    let scripts = Scripts::new();
+    let marker = scripts.0.join("second-finished");
+    let age = scripts.script("identity-batch-age", &format!(
+        "value=$(cat)\ncase \"$value\" in first) sleep 0.05 ;; fail) exit 17 ;; second) sleep 0.10; : > {} ;; esac\nprintf '%s' \"$value\"",
+        marker.display()));
+    let provider = AgeCommandProvider::with_identity_file(&age, scripts.0.join("mock-identity"));
+    let values = provider.decrypt_batch(&[b"first", b"second"]).unwrap();
+    assert_eq!(
+        values.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+        [b"first".as_slice(), b"second".as_slice()]
+    );
+    fs::remove_file(&marker).unwrap();
+    assert!(provider.decrypt_batch(&[b"fail", b"second"]).is_err());
+    if std::thread::available_parallelism().map_or(1, usize::from) >= 2 {
+        assert!(
+            marker.exists(),
+            "the in-flight sibling must finish before the failed batch returns"
+        );
+    } else {
+        assert!(
+            !marker.exists(),
+            "a failed wave must not start the next input"
+        );
+    }
+}
