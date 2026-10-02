@@ -180,6 +180,7 @@ mod tests {
             id: id.into(),
             ssh_signature: false,
             artifact_signature: false,
+            closure_signature: false,
             reason: None,
             values: vec![RequestedValue {
                 identifier: "host.services.a.key".into(),

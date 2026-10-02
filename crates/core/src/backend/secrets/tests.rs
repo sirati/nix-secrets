@@ -41,6 +41,7 @@ fn secret_request(id: &str) -> SecretRequest {
         reason: Some("sign test generation".into()),
         ssh_signature: None,
         artifact_signature: Some(signing_request()),
+        closure_signature: None,
         requester: ProcessInfo::read(std::process::id()),
         parent: None,
     }
@@ -227,6 +228,7 @@ fn artifact_registry_cleans_on_answer_operator_loss_and_requester_disconnect() {
                     None,
                     None,
                     Some(signing_request()),
+                    None,
                     Some(&requester),
                 )
             });
@@ -357,4 +359,136 @@ fn artifact_request_returns_only_signatures_and_rejects_plaintext_answers() {
             assert!(!operators.pending.load(Ordering::SeqCst));
         });
     }
+}
+
+fn closure_request() -> crate::closure_signing::SigningRequest {
+    crate::closure_signing::SigningRequest {
+        identifier: "ns1.services.nmbl.generation-key".into(),
+        host: "ns1".into(),
+        public_key_sha256: "a".repeat(64),
+        manifest: crate::closure_signing::Manifest {
+            version: 1,
+            paths: vec![crate::closure_signing::ManifestPath {
+                path: format!("/nix/store/{}-root", "0".repeat(32)),
+                nar_hash: format!("sha256:{}", "0".repeat(52)),
+                nar_size: 1,
+                references: vec![],
+            }],
+        },
+    }
+}
+
+#[test]
+fn closure_metadata_registry_liveness_owner_denial_disconnect_and_no_replay() {
+    for disconnected in [false, true] {
+        let operators = Operators::default();
+        let (sender, jobs) = mpsc::channel();
+        operators.attached.lock().unwrap().push((1, sender));
+        operators
+            .operator_peers
+            .lock()
+            .unwrap()
+            .insert(1, std::process::id());
+        let (requester, peer) = UnixStream::pair().unwrap();
+        thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                request_operator(
+                    &operators,
+                    std::process::id(),
+                    vec![],
+                    None,
+                    None,
+                    None,
+                    Some(closure_request()),
+                    Some(&requester),
+                )
+            });
+            let job = jobs.recv_timeout(Duration::from_secs(2)).unwrap();
+            let id = job.request.id.clone();
+            assert!(job.request.artifact_signature.is_none());
+            assert!(operators.artifacts.lock().unwrap().is_empty());
+            assert!(check_closure(&operators, &id, std::process::id()).is_ok());
+            assert!(check_closure(&operators, &id, std::process::id() + 1).is_err());
+            assert!(check_closure(&operators, "unknown", std::process::id()).is_err());
+            if disconnected {
+                // Parallel tests can briefly inherit this descriptor across
+                // fork before exec; shutdown closes the connection itself.
+                peer.shutdown(std::net::Shutdown::Both).unwrap();
+                drop(peer);
+                assert!(check_closure(&operators, &id, std::process::id()).is_err());
+                assert!(
+                    handle
+                        .join()
+                        .unwrap()
+                        .unwrap_err()
+                        .contains("requester disconnected")
+                );
+            } else {
+                job.reply
+                    .send(Ok(SecretAnswer::Denied {
+                        reason: "operator denied".into(),
+                    }))
+                    .unwrap();
+                assert!(matches!(
+                    handle.join().unwrap().unwrap(),
+                    SecretAnswer::Denied { .. }
+                ));
+            }
+            assert!(operators.closure_requests.lock().unwrap().is_empty());
+            assert!(check_closure(&operators, &id, std::process::id()).is_err());
+            assert!(!operators.pending.load(Ordering::SeqCst));
+        });
+    }
+}
+
+#[test]
+fn closure_protocol_returns_signatures_only_and_rejects_other_answers() {
+    let request = closure_request();
+    let signatures = crate::closure_signing::Signatures {
+        version: 1,
+        signatures: vec![crate::closure_signing::PathSignature {
+            path: request.manifest.paths[0].path.clone(),
+            signature: format!("cache:{}", STANDARD.encode([0u8; 64])),
+        }],
+    };
+    let answer = SecretAnswer::ClosureSigned {
+        signatures: signatures.clone(),
+    };
+    let wire = serde_json::to_vec(&answer).unwrap();
+    let decoded: SecretAnswer = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(
+        closure_answer(decoded, &request.manifest).unwrap(),
+        signatures
+    );
+    assert!(
+        closure_answer(SecretAnswer::Approved { values: vec![] }, &request.manifest)
+            .unwrap_err()
+            .contains("unasked")
+    );
+    assert!(
+        closure_answer(SecretAnswer::Signed { reply: vec![] }, &request.manifest)
+            .unwrap_err()
+            .contains("unasked")
+    );
+    assert!(
+        closure_answer(
+            SecretAnswer::ArtifactsSigned {
+                signatures: super::tests::signatures(&signing_request().manifest)
+            },
+            &request.manifest
+        )
+        .unwrap_err()
+        .contains("unasked")
+    );
+    assert_eq!(
+        closure_answer(
+            SecretAnswer::Denied {
+                reason: "denied".into()
+            },
+            &request.manifest
+        )
+        .unwrap_err(),
+        "denied"
+    );
+    assert!(serde_json::from_slice::<SecretAnswer>(br#"{"answer":"closure-signed","signatures":{"version":1,"signatures":[]},"values":[]}"#).is_err());
 }

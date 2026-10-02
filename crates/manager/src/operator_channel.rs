@@ -33,6 +33,7 @@ pub struct SecretPrompt {
     pub reason: Option<String>,
     pub ssh_signature: bool,
     pub artifact_signature: bool,
+    pub closure_signature: bool,
     /// When the request denies itself.
     pub deadline: Instant,
 }
@@ -69,7 +70,10 @@ pub enum ChannelEvent {
         requester: String,
         result: Result<(), String>,
     },
-    ArtifactSignatureFinished { requester: String, result: Result<(), String> },
+    ArtifactSignatureFinished {
+        requester: String,
+        result: Result<(), String>,
+    },
     /// The channel stopped; requests can no longer reach this TUI.
     Lost(String),
 }
@@ -163,8 +167,15 @@ fn handle(
     decisions: &Receiver<Decision>,
     agent: Option<&Path>,
 ) -> (SecretAnswer, ChannelEvent) {
+    if let Some(signature) = &request.closure_signature {
+        return crate::closure_signing::handle(
+            request, signature, client, schema, provider, identity, events, decisions,
+        );
+    }
     if let Some(signature) = &request.artifact_signature {
-        return crate::artifact_signing::handle(request, signature, client, schema, provider, identity, events, decisions);
+        return crate::artifact_signing::handle(
+            request, signature, client, schema, provider, identity, events, decisions,
+        );
     }
     if let Some(signature) = &request.ssh_signature {
         return handle_signature(request, signature, schema, events, decisions, agent);
@@ -178,6 +189,7 @@ fn handle(
         reason: request.reason.clone(),
         ssh_signature: false,
         artifact_signature: false,
+        closure_signature: false,
         deadline: Instant::now() + DECISION_TIMEOUT,
     };
     let label = prompt_for(Vec::new()).requester_label();
@@ -264,6 +276,7 @@ fn handle_signature(
         identity: "client SSH agent".into(), requester: request.requester.clone(),
         parent: request.parent.clone(), reason: request.reason.clone(), ssh_signature: true,
         artifact_signature: false,
+        closure_signature: false,
         deadline: Instant::now() + DECISION_TIMEOUT,
     };
     let label = prompt.requester_label();

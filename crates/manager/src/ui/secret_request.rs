@@ -57,7 +57,7 @@ pub(super) fn intercept(
     };
     let id = prompt.id.clone();
     // SSH authentication returns a signature and zero secret values.
-    let count = if prompt.ssh_signature || prompt.artifact_signature {
+    let count = if prompt.ssh_signature || prompt.artifact_signature || prompt.closure_signature {
         0
     } else {
         prompt.values.len()
@@ -141,7 +141,9 @@ fn program_name(process: &ProcessInfo) -> String {
 pub(crate) fn title(prompt: &SecretPrompt) -> String {
     format!(
         "{} from {} (pid {})",
-        if prompt.artifact_signature {
+        if prompt.closure_signature {
+            "Closure signing request"
+        } else if prompt.artifact_signature {
             "Artifact signing request"
         } else if prompt.ssh_signature {
             "SSH authentication request"
@@ -193,7 +195,9 @@ pub(crate) fn remaining_seconds(prompt: &SecretPrompt) -> u64 {
 pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String {
     let source = key_source(&prompt.identity);
     let mut lines = vec![
-        if prompt.artifact_signature {
+        if prompt.closure_signature {
+            format!("Approve to decrypt this signing key once with {source} and sign requester-supplied public Nix closure metadata on this client. This client has not verified NAR contents. Only signatures are returned.")
+        } else if prompt.artifact_signature {
             format!("Approve to decrypt this signing key once with {source} and sign the verified artifacts on this client. Only detached signatures are returned.")
         } else if prompt.ssh_signature {
             "Approve one SSH authentication signature using this client's agent. The private SSH key stays on this client.".into()
@@ -284,8 +288,11 @@ fn details_body(prompt: &SecretPrompt, mut lines: Vec<String>) -> String {
         ));
     }
     lines.push(String::new());
-    if prompt.artifact_signature {
-        lines.push("Only detached signatures are returned. The private signing key stays on this client.".into());
+    if prompt.artifact_signature || prompt.closure_signature {
+        lines.push(
+            "Only detached signatures are returned. The private signing key stays on this client."
+                .into(),
+        );
     } else if prompt.ssh_signature {
         lines.push("Only this SSH authentication signature is returned. The private SSH key stays on this client.".into());
     } else {

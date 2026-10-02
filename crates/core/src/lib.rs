@@ -2,6 +2,7 @@
 
 pub mod approval;
 pub mod artifact_signing;
+pub mod closure_signing;
 pub mod approval_types;
 pub mod backend;
 pub mod framing;

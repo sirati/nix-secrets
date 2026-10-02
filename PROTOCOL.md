@@ -480,3 +480,15 @@ operator leaf refuses `RequestSecrets`, including after schema reload.
 NMBLSIG1 authenticates the artifact digest and role. Size is checked against
 streamed bytes and response metadata. It is not a separate authenticated
 field in the existing sidecar format.
+
+## Native Nix closure signing
+
+`request-closure-signatures` carries an opaque host-scoped signing request and a
+version 1 public manifest (`paths`: `path`, canonical `narHash`, `narSize`, sorted
+unique `references`). The client reconstructs each standard Nix fingerprint,
+approves the exact batch, checks requester liveness, and signs locally.
+`closure-signatures` returns only named detached Ed25519 signatures bound to the
+requested paths. Bounds: 4 MiB manifest, 4096 paths, 4096 references per path.
+This metadata is requester supplied; NAR bytes are not independently verified.
+Signing-only operator keys reject plaintext secret requests. The backend
+compatibility socket version is 20.

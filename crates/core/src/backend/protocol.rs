@@ -137,7 +137,18 @@ pub enum Request {
         request: crate::artifact_signing::SigningRequest,
         reason: Option<String>,
     },
-    ReadSigningArtifact { request_id: String, role: String, offset: u64 },
+    RequestClosureSignatures {
+        request: crate::closure_signing::SigningRequest,
+        reason: Option<String>,
+    },
+    CheckClosureSigningRequest {
+        request_id: String,
+    },
+    ReadSigningArtifact {
+        request_id: String,
+        role: String,
+        offset: u64,
+    },
     /// Asks the registered frontends to deploy every deployable value of
     /// `target`. The backend builds the [`ApprovalRequest`] from its schema
     /// and answers [`Response::DeploymentRequested`]; the requester follows
@@ -153,8 +164,17 @@ pub enum Request {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Response {
-    ArtifactSignatures { signatures: crate::artifact_signing::Signatures },
-    SigningArtifactChunk { offset: u64, bytes_base64: String },
+    Success,
+    ArtifactSignatures {
+        signatures: crate::artifact_signing::Signatures,
+    },
+    ClosureSignatures {
+        signatures: crate::closure_signing::Signatures,
+    },
+    SigningArtifactChunk {
+        offset: u64,
+        bytes_base64: String,
+    },
     Secret {
         envelope: Option<EncryptedSecret>,
     },

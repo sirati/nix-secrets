@@ -100,6 +100,8 @@ pub struct SecretRequest {
     pub ssh_signature: Option<crate::ssh_auth::SignatureRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_signature: Option<crate::artifact_signing::SigningRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure_signature: Option<crate::closure_signing::SigningRequest>,
     /// The process that connected to the backend, read from `/proc`.
     pub requester: ProcessInfo,
     /// Its parent, which is usually the program that wants the values.
@@ -133,10 +135,21 @@ impl std::fmt::Debug for SecretValue {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "answer", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SecretAnswer {
-    Approved { values: Vec<SecretValue> },
-    Signed { reply: Vec<u8> },
-    ArtifactsSigned { signatures: crate::artifact_signing::Signatures },
-    Denied { reason: String },
+    Approved {
+        values: Vec<SecretValue>,
+    },
+    Signed {
+        reply: Vec<u8>,
+    },
+    ArtifactsSigned {
+        signatures: crate::artifact_signing::Signatures,
+    },
+    ClosureSigned {
+        signatures: crate::closure_signing::Signatures,
+    },
+    Denied {
+        reason: String,
+    },
 }
 
 /// Requests on a session socket (`NIX_SECRETS_SESSION`).

@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
+ed25519-dalek = { version = "2.2", features = ["zeroize"] }
 base64 = "0.22"
 crossterm = "0.28"
 getrandom = "0.4.2"
