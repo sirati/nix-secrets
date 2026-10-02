@@ -1,4 +1,4 @@
-{ lib, rustPlatform }:
+{ lib, rustPlatform, acl }:
 
 rustPlatform.buildRustPackage {
   pname = "secrets-ready-waiter";
@@ -7,6 +7,7 @@ rustPlatform.buildRustPackage {
   cargoLock.lockFile = ../../Cargo.lock;
   cargoBuildFlags = [ "-p" "secrets-ready-waiter" ];
   cargoTestFlags = [ "-p" "secrets-ready-waiter" ];
+  nativeCheckInputs = [ acl ];
   strictDeps = true;
 
   meta = {

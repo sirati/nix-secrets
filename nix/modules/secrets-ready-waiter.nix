@@ -43,6 +43,9 @@ let
           group
           mode
           ;
+        runtime_readers = map (reader: { account = reader.account; uid_offset = reader.uidOffset; })
+          (waiter.runtimeReaders.${destination.path} or [ ]);
+        acl_program = "${pkgs.acl}/bin/getfacl";
       }) destinations;
     in
     entry
@@ -115,6 +118,16 @@ in
 {
   options.services.secretsReadyWaiter = {
     enable = lib.mkEnableOption "per-service persistent-secret readiness gates";
+    runtimeReaders = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.listOf (lib.types.submodule {
+        options = {
+          account = lib.mkOption { type = lib.types.str; };
+          uidOffset = lib.mkOption { type = lib.types.ints.unsigned; };
+        };
+      }));
+      default = { };
+      description = "Exact subordinate-UID readers permitted after runtime ACL preparation, keyed by secret destination.";
+    };
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ../packages/secrets-ready-waiter.nix { };

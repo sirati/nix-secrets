@@ -23,6 +23,17 @@ struct ManifestEntry {
     owner: String,
     group: String,
     mode: String,
+    #[serde(default)]
+    runtime_readers: Vec<RuntimeReader>,
+    #[serde(default)]
+    acl_program: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeReader {
+    account: String,
+    uid_offset: u32,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -31,6 +42,8 @@ struct ExpectedSecret {
     uid: u32,
     gid: u32,
     mode: u32,
+    runtime_uids: Vec<u32>,
+    acl_program: Option<PathBuf>,
 }
 
 fn validate_secret_path(path: &Path) -> Result<(), String> {
@@ -59,6 +72,46 @@ fn parse_mode(value: &str) -> Result<u32, String> {
     u32::from_str_radix(value, 8).map_err(|error| format!("invalid mode {value:?}: {error}"))
 }
 
+fn resolve_runtime_uid(contents: &str, reader: &RuntimeReader) -> Result<u32, String> {
+    let mut matches = contents.lines().filter_map(|line| {
+        let fields: Vec<_> = line.split(':').collect();
+        (fields.first().copied() == Some(reader.account.as_str())).then_some(fields)
+    });
+    let fields = matches
+        .next()
+        .ok_or("runtime reader has no subordinate UID range")?;
+    if fields.len() != 3 || matches.next().is_some() {
+        return Err("runtime reader subordinate UID range is ambiguous".into());
+    }
+    let start: u32 = fields[1].parse().map_err(|_| "invalid runtime UID start")?;
+    let count: u32 = fields[2].parse().map_err(|_| "invalid runtime UID count")?;
+    let uid = start
+        .checked_add(reader.uid_offset)
+        .ok_or("runtime UID overflow")?;
+    if start == 0 || reader.uid_offset >= count || uid == u32::MAX {
+        return Err("runtime UID outside declared range".into());
+    }
+    Ok(uid)
+}
+
+fn exact_runtime_acl(text: &str, uids: &[u32]) -> bool {
+    let mut actual: Vec<_> = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut expected = vec![
+        "user::r--".into(),
+        "group::---".into(),
+        "mask::r--".into(),
+        "other::---".into(),
+    ];
+    expected.extend(uids.iter().map(|uid| format!("user:{uid}:r--")));
+    actual.sort();
+    expected.sort();
+    actual == expected
+}
+
 fn resolve_entry(entry: ManifestEntry) -> Result<ExpectedSecret, String> {
     validate_secret_path(&entry.path)?;
     let uid = User::from_name(&entry.owner)
@@ -71,11 +124,45 @@ fn resolve_entry(entry: ManifestEntry) -> Result<ExpectedSecret, String> {
         .ok_or_else(|| format!("unknown group: {}", entry.group))?
         .gid
         .as_raw();
+    let mode = parse_mode(&entry.mode)?;
+    let mut runtime_uids = Vec::new();
+    if !entry.runtime_readers.is_empty() {
+        if uid != 0 || gid != 0 || mode != 0o400 {
+            return Err("runtime reader policy requires root-owned 0400 deployment".into());
+        }
+        let program = entry
+            .acl_program
+            .as_ref()
+            .ok_or("runtime ACL checker missing")?;
+        if !program.starts_with("/nix/store")
+            || program.file_name().is_none_or(|name| name != "getfacl")
+            || program
+                .parent()
+                .and_then(Path::file_name)
+                .is_none_or(|name| name != "bin")
+            || program
+                .components()
+                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+        {
+            return Err("runtime ACL checker must be immutable getfacl".into());
+        }
+        let contents = fs::read_to_string("/etc/subuid")
+            .map_err(|error| format!("reading runtime UID mappings: {error}"))?;
+        for reader in &entry.runtime_readers {
+            let mapped = resolve_runtime_uid(&contents, reader)?;
+            if runtime_uids.contains(&mapped) {
+                return Err("duplicate runtime reader UID".into());
+            }
+            runtime_uids.push(mapped);
+        }
+    }
     Ok(ExpectedSecret {
         path: entry.path,
         uid,
         gid,
-        mode: parse_mode(&entry.mode)?,
+        mode,
+        runtime_uids,
+        acl_program: entry.acl_program,
     })
 }
 
@@ -191,14 +278,38 @@ fn secret_is_ready_at(root: &Path, expected: &ExpectedSecret) -> Result<bool, St
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
     };
-    Ok(metadata.file_type().is_file()
-        && !metadata.file_type().is_symlink()
-        && metadata.uid() == expected.uid
-        && metadata.gid() == expected.gid
-        && metadata.permissions().mode() & 0o7777 == expected.mode)
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != expected.uid
+        || metadata.gid() != expected.gid
+    {
+        return Ok(false);
+    }
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode == expected.mode {
+        return Ok(true);
+    }
+    if mode != 0o440 || expected.runtime_uids.is_empty() {
+        return Ok(false);
+    }
+    let output = std::process::Command::new(
+        expected
+            .acl_program
+            .as_ref()
+            .ok_or("runtime ACL checker missing")?,
+    )
+    .args(["-cpn", "--"])
+    .arg(&path)
+    .output()
+    .map_err(|error| format!("inspecting runtime ACL: {error}"))?;
+    if !output.status.success() || output.stdout.len() > 65536 {
+        return Err("runtime ACL inspection failed".into());
+    }
+    let text = std::str::from_utf8(&output.stdout).map_err(|_| "runtime ACL is not UTF-8")?;
+    Ok(exact_runtime_acl(text, &expected.runtime_uids))
 }
 
-fn run(manifest: &Path) -> Result<(), String> {
+fn run(manifest: &Path, once: bool) -> Result<(), String> {
     let contents = fs::read_to_string(manifest)
         .map_err(|error| format!("cannot read manifest {}: {error}", manifest.display()))?;
     let secrets = parse_manifest(&contents)?;
@@ -212,6 +323,9 @@ fn run(manifest: &Path) -> Result<(), String> {
         {
             return Ok(());
         }
+        if once {
+            return Err("declared secrets are not ready".into());
+        }
         thread::sleep(POLL_INTERVAL);
     }
 }
@@ -219,14 +333,15 @@ fn run(manifest: &Path) -> Result<(), String> {
 fn main() -> ExitCode {
     let mut args = env::args_os();
     let program = args.next().unwrap_or_default();
-    let manifest = match (args.next(), args.next()) {
-        (Some(manifest), None) => manifest,
+    let (manifest, once) = match (args.next(), args.next(), args.next()) {
+        (Some(manifest), None, None) => (manifest, false),
+        (Some(manifest), Some(flag), None) if flag == "--once" => (manifest, true),
         _ => {
-            eprintln!("usage: {} MANIFEST", Path::new(&program).display());
+            eprintln!("usage: {} MANIFEST [--once]", Path::new(&program).display());
             return ExitCode::FAILURE;
         }
     };
-    match run(Path::new(&manifest)) {
+    match run(Path::new(&manifest), once) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("secrets-ready-waiter: {error}");
