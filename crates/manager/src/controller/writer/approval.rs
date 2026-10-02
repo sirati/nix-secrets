@@ -28,7 +28,8 @@ impl Controller {
         else {
             return Ok(None);
         };
-        let set = self.plan_set(&request.secrets)?;
+        let set = self.plan_set(&request.secrets);
+        let set = self.finish_claimed_setup(&request, lease_id, set)?;
         let mut details = match self.approval_details(&request, None, &set) {
             Ok(details) => details,
             Err(error) => {
@@ -73,10 +74,17 @@ impl Controller {
         // Unset public information with a host default is never sent either:
         // the host keeps the default it installs.
         let skippable = unset::plan_unset(&self.schema, &request.secrets, &set)
-            .map(|plan| plan.skippable.into_iter().chain(plan.host_default).collect::<Vec<_>>())
+            .map(|plan| {
+                plan.skippable
+                    .into_iter()
+                    .chain(plan.host_default)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let mut selected = request.clone();
-        selected.secrets.retain(|identifier| !skippable.contains(identifier));
+        selected
+            .secrets
+            .retain(|identifier| !skippable.contains(identifier));
         let expected = match expected_target(&self.schema, &selected) {
             Ok(expected) => expected,
             Err(error) => {
@@ -144,13 +152,44 @@ impl Controller {
                 return Err(error);
             }
             let active = self.active.as_ref().expect("active approval exists");
-            details = self.approval_details(
-                &active.request,
+            let request = active.request.clone();
+            let refreshed = self.approval_details(
+                &request,
                 active.prepared.as_ref().map(PreparedDeployment::state),
                 &set,
-            )?;
+            );
+            details = self.finish_claimed_setup(&request, lease_id, refreshed)?;
         }
         Ok(Some(details))
+    }
+
+    /// Initial poll failures must end their broker claim, even before there is
+    /// an active dialog. Drop any prepared connection and reject with the exact
+    /// failure; never leave the operator renewing a request that cannot appear.
+    fn finish_claimed_setup<T>(
+        &mut self,
+        request: &ApprovalRequest,
+        lease_id: u64,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.request.id == request.id)
+                {
+                    self.active.take();
+                }
+                self.client
+                    .resolve(request.id.clone(), lease_id, false, Some(error.clone()))
+                    .map_err(|resolve| {
+                        format!("{error}; could not resolve failed approval setup: {resolve}")
+                    })?;
+                Err(error)
+            }
+        }
     }
 
     pub(super) fn approval_inner(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
@@ -217,3 +256,7 @@ impl Controller {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+#[path = "approval_setup_tests.rs"]
+mod tests;
