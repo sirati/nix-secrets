@@ -18,16 +18,14 @@ fn executable(path: &std::path::Path, contents: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 fn scenario(mode: &str) {
-    let root = Directory(
-        std::env::temp_dir().join(format!(
+    let root = Directory(std::env::temp_dir().join(format!(
             "ssh-discovery-{mode}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        )),
-    );
+        )));
     fs::create_dir(&root.0).unwrap();
     fs::write(root.0.join("known_hosts"), "").unwrap();
     let diagnostics = format!(
@@ -100,7 +98,7 @@ esac
         attempts,
         match mode {
             "transient" => 3,
-            "permanent" => 8,
+            "permanent" => 6,
             _ => 2,
         }
     );
@@ -110,10 +108,11 @@ esac
     );
     let args = fs::read_to_string(root.0.join("arguments")).unwrap();
     let lines = args.lines().collect::<Vec<_>>();
-    for invocation in lines.chunks_exact(6) {
-        assert_eq!(invocation, ["-T", "9", "-p", "22", "--", "host"]);
+    for invocation in lines.chunks_exact(8) {
+        assert_eq!(&invocation[..5], &["-T", "9", "-p", "22", "-t"]);
+        assert_eq!(&invocation[6..], &["--", "host"]);
     }
-    assert_eq!(lines.len(), attempts * 6);
+    assert_eq!(lines.len(), attempts * 8);
     if mode == "transient" {
         assert!(
             started.elapsed().as_millis() >= 3900,
@@ -122,8 +121,8 @@ esac
     }
     if mode == "permanent" {
         assert!(
-            started.elapsed().as_millis() >= 13900,
-            "eight attempts must retain actual bounded retry delays"
+            started.elapsed().as_millis() >= 9900,
+            "six attempts must retain actual bounded retry delays"
         );
     }
 }
@@ -132,7 +131,7 @@ fn empty_success_then_failed_scan_then_valid_key_recovers() {
     scenario("transient");
 }
 #[test]
-fn permanent_empty_failures_stop_at_eight_and_sanitize_diagnostics() {
+fn permanent_empty_failures_stop_at_six_and_sanitize_diagnostics() {
     scenario("permanent");
 }
 #[test]
@@ -154,7 +153,7 @@ fn discovery_fixture_process() {
         }
         "permanent" => {
             let error = verifier.preflight("host", 22).unwrap_err().to_string();
-            assert!(error.contains("8 attempts"), "{error}");
+            assert!(error.contains("6 attempts"), "{error}");
             assert!(error.contains("60-second discovery budget"), "{error}");
             assert!(error.contains("SCAN-FAILURE-DIAGNOSTIC"), "{error}");
             assert!(error.contains("diagnostics truncated"), "{error}");
