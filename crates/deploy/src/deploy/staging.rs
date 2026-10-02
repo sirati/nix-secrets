@@ -87,6 +87,7 @@ impl Deployer {
             Some(Gid::from_raw(entry.spec.group)),
         )
         .map_err(|error| DeployError::Io(io::Error::from_raw_os_error(error as i32)))?;
+        crate::fsutil::clear_access_acl(&file)?;
         file.set_permissions(fs::Permissions::from_mode(entry.spec.mode))?;
         file.sync_all()?;
         let metadata = file.metadata()?;

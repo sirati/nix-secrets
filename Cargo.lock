@@ -1445,6 +1445,7 @@ dependencies = [
  "nix-secrets-crypto",
  "nix-secrets-storagebox-bootstrap",
  "nix-secrets-transport",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "ssh-key 0.6.7",
