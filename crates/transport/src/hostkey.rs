@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 const MAX_TOOL_OUTPUT: usize = 4 * 1024 * 1024;
-const MAX_DISCOVERY_ATTEMPTS: usize = 8;
+const MAX_DISCOVERY_ATTEMPTS: usize = 6;
 const DISCOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 const DISCOVERY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -239,7 +239,8 @@ impl HostKeyVerifier {
         }
         let mut observed = Vec::new();
         for attempt in 0..3 {
-            let mut current = self.preflight_with(host, port, runner)?;
+            let mut current =
+                self.preflight_selected_with(host, port, runner, Some(&approved.keys))?;
             let complete_scan = approved
                 .keys
                 .iter()
@@ -248,7 +249,11 @@ impl HostKeyVerifier {
             // entire approved set. A replacement alongside a partial set must
             // not be hidden by approved keys observed in an earlier scan.
             if !complete_scan
-                && current.identity.keys.iter().any(|key| !approved.keys.contains(key))
+                && current
+                    .identity
+                    .keys
+                    .iter()
+                    .any(|key| !approved.keys.contains(key))
             {
                 return Err(HostKeyError::Tool(
                     "SSH host keys changed after approval; an approved key is missing or replaced; no connection was opened".into(),
@@ -316,52 +321,16 @@ impl HostKeyVerifier {
         port: u16,
         runner: &impl Runner,
     ) -> Result<HostKeyPreflight, HostKeyError> {
-        let started = std::time::Instant::now();
-        let mut attempts = 0;
-        let mut diagnostic = "no scan completed".to_owned();
-        let scanned = loop {
-            let remaining = DISCOVERY_BUDGET.saturating_sub(runner.elapsed(started));
-            if attempts == MAX_DISCOVERY_ATTEMPTS || remaining < std::time::Duration::from_secs(2) {
-                return Err(HostKeyError::Tool(format!(
-                    "ssh-keyscan failed after {attempts} attempts within the 60-second discovery budget: {diagnostic}"
-                )));
-            }
-            attempts += 1;
-            let timeout = remaining.min(std::time::Duration::from_secs(10));
-            let scan = runner.run_bounded(
-                &self.ssh_keyscan,
-                &[
-                    "-T".into(),
-                    // Reserve a second for normal exit and pipe drain within
-                    // the unchanged hard wall deadline. Subsecond fractions
-                    // cannot extend ssh-keyscan's whole-second timeout.
-                    (timeout.as_secs() - 1).to_string().into(),
-                    "-p".into(),
-                    port.to_string().into(),
-                    "--".into(),
-                    host.into(),
-                ],
-                timeout,
-            )?;
-            let scanned = parse_key_lines(&scan.stdout);
-            // A failed multi-algorithm scan can still emit keys. Inspect those
-            // immediately: never retry away an observed key replacement.
-            if !scanned.is_empty() {
-                break scanned;
-            }
-            diagnostic = if scan.success {
-                "successful ssh-keyscan produced no host keys".into()
-            } else {
-                scan.diagnostic
-            };
-            if attempts < MAX_DISCOVERY_ATTEMPTS {
-                let delay =
-                    DISCOVERY_DELAY.min(DISCOVERY_BUDGET.saturating_sub(runner.elapsed(started)));
-                if !delay.is_zero() {
-                    runner.pause(delay);
-                }
-            }
-        };
+        self.preflight_selected_with(host, port, runner, None)
+    }
+
+    fn preflight_selected_with(
+        &self,
+        host: &str,
+        port: u16,
+        runner: &impl Runner,
+        approved: Option<&[PresentedKey]>,
+    ) -> Result<HostKeyPreflight, HostKeyError> {
         let lookup = lookup_name(host, port);
         let mut known = Vec::new();
         let mut recorded = Vec::new();
@@ -391,6 +360,65 @@ impl HostKeyVerifier {
                 known.extend(lines);
             }
         }
+        let requested = match approved {
+            Some(keys) => scan_types(keys.iter().map(|key| key.algorithm.as_str()))?,
+            None => scan_types(known.iter().map(|key| key.algorithm.as_str()))?,
+        };
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        let mut diagnostic = "no scan completed".to_owned();
+        let scanned = loop {
+            let remaining = DISCOVERY_BUDGET.saturating_sub(runner.elapsed(started));
+            if attempts == MAX_DISCOVERY_ATTEMPTS || remaining < std::time::Duration::from_secs(2) {
+                return Err(HostKeyError::Tool(format!(
+                    "ssh-keyscan failed after {attempts} attempts within the 60-second discovery budget: {diagnostic}"
+                )));
+            }
+            // Prefer Ed25519 for bootstrap; fall back one type at a time.
+            // Existing pins and explicit approvals select only their types.
+            let key_types = if requested.is_empty() {
+                UNKNOWN_SCAN_TYPES[attempts % UNKNOWN_SCAN_TYPES.len()].to_owned()
+            } else {
+                requested.join(",")
+            };
+            attempts += 1;
+            let timeout = remaining.min(std::time::Duration::from_secs(10));
+            let scan = runner.run_bounded(
+                &self.ssh_keyscan,
+                &[
+                    "-T".into(),
+                    // Reserve a second for normal exit and pipe drain within
+                    // the unchanged hard wall deadline. Subsecond fractions
+                    // cannot extend ssh-keyscan's whole-second timeout.
+                    (timeout.as_secs() - 1).to_string().into(),
+                    "-p".into(),
+                    port.to_string().into(),
+                    "-t".into(),
+                    key_types.into(),
+                    "--".into(),
+                    host.into(),
+                ],
+                timeout,
+            )?;
+            let scanned = parse_key_lines(&scan.stdout);
+            // A failed multi-algorithm scan can still emit keys. Inspect those
+            // immediately: never retry away an observed key replacement.
+            if !scanned.is_empty() {
+                break scanned;
+            }
+            diagnostic = if scan.success {
+                "successful ssh-keyscan produced no host keys".into()
+            } else {
+                scan.diagnostic
+            };
+            if attempts < MAX_DISCOVERY_ATTEMPTS {
+                let delay =
+                    DISCOVERY_DELAY.min(DISCOVERY_BUDGET.saturating_sub(runner.elapsed(started)));
+                if !delay.is_zero() {
+                    runner.pause(delay);
+                }
+            }
+        };
         let matching: Vec<KeyLine> = scanned
             .iter()
             .filter(|candidate| known.iter().any(|entry| entry.same_key(candidate)))
@@ -407,10 +435,17 @@ impl HostKeyVerifier {
                 offered,
             })));
         }
-        let (mut accepted, status) = if known.is_empty() {
-            (scanned, HostKeyStatus::Unknown)
+        let status = if known.is_empty() {
+            HostKeyStatus::Unknown
         } else {
-            (matching, HostKeyStatus::Known)
+            HostKeyStatus::Known
+        };
+        // Approval validation must inspect every observed key, including a
+        // replacement alongside another matching known key.
+        let mut accepted = if known.is_empty() || approved.is_some() {
+            scanned
+        } else {
+            matching
         };
         // ssh-keyscan reports keys in no fixed order. Sorted, the identity the
         // operator approved compares equal to a later scan of the same keys.
@@ -467,6 +502,37 @@ impl KeyLine {
     fn for_host(self, host: &str) -> String {
         format!("{host} {} {}", self.algorithm, self.encoded)
     }
+}
+
+// Names accepted by ssh-keyscan -t, ordered by bootstrap preference.
+const UNKNOWN_SCAN_TYPES: &[&str] = &[
+    "ed25519",
+    "ecdsa",
+    "rsa",
+    "ed25519-sk",
+    "ecdsa-sk",
+    "mldsa44-ed25519",
+];
+
+fn scan_types<'a>(algorithms: impl Iterator<Item = &'a str>) -> Result<Vec<String>, HostKeyError> {
+    let mut types = BTreeSet::new();
+    for algorithm in algorithms {
+        let key_type = match algorithm {
+            "ssh-ed25519" => "ed25519",
+            "ssh-rsa" | "rsa-sha2-256" | "rsa-sha2-512" => "rsa",
+            "ecdsa-sha2-nistp256" | "ecdsa-sha2-nistp384" | "ecdsa-sha2-nistp521" => "ecdsa",
+            "sk-ssh-ed25519@openssh.com" => "ed25519-sk",
+            "sk-ecdsa-sha2-nistp256@openssh.com" => "ecdsa-sk",
+            "ssh-mldsa44-ed25519@openssh.com" => "mldsa44-ed25519",
+            _ => {
+                return Err(HostKeyError::Tool(format!(
+                    "unsupported recorded SSH host-key algorithm: {algorithm}"
+                )))
+            }
+        };
+        types.insert(key_type.to_owned());
+    }
+    Ok(types.into_iter().collect())
 }
 
 fn parse_key_lines(bytes: &[u8]) -> Vec<KeyLine> {

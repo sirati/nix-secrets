@@ -354,7 +354,14 @@ fn empty_discovery_stops_at_total_budget_before_attempt_limit() {
         scans: RefCell<usize>,
     }
     impl Runner for Budget {
-        fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+        fn run(&self, program: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+            if program != OsStr::new("ssh-keyscan") {
+                return Ok(Output {
+                    success: false,
+                    stdout: Vec::new(),
+                    diagnostic: String::new(),
+                });
+            }
             *self.scans.borrow_mut() += 1;
             *self.elapsed.borrow_mut() += std::time::Duration::from_secs(10);
             Ok(Output {
@@ -462,8 +469,17 @@ fn real_keyscan_natural_inactivity_exit_is_not_a_runner_timeout() {
 fn fractional_discovery_budget_never_starts_an_over_budget_scan() {
     struct AlmostExpired;
     impl Runner for AlmostExpired {
-        fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
-            panic!("insufficient budget for inactivity timeout plus drain");
+        fn run(&self, program: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+            assert_ne!(
+                program,
+                OsStr::new("ssh-keyscan"),
+                "insufficient budget for inactivity timeout plus drain"
+            );
+            Ok(Output {
+                success: false,
+                stdout: Vec::new(),
+                diagnostic: String::new(),
+            })
         }
         fn elapsed(&self, _: std::time::Instant) -> std::time::Duration {
             DISCOVERY_BUDGET - std::time::Duration::from_millis(1999)
@@ -617,4 +633,178 @@ fn missing_approved_key_diagnostic_names_only_the_unobserved_public_key() {
     )));
     assert!(!error.contains("ssh-ed25519"));
     assert!(!error.contains(&fingerprint("RUQ=")));
+}
+
+#[test]
+fn discovery_selects_pinned_or_approved_types_instead_of_default_multiplexing() {
+    struct Selected {
+        known: Vec<u8>,
+        calls: RefCell<Vec<String>>,
+    }
+    impl Runner for Selected {
+        fn pause(&self, _: std::time::Duration) {}
+        fn run(&self, program: &OsStr, args: &[OsString]) -> Result<Output, HostKeyError> {
+            if program != OsStr::new("ssh-keyscan") {
+                return Ok(Output {
+                    success: !self.known.is_empty(),
+                    stdout: self.known.clone(),
+                    diagnostic: String::new(),
+                });
+            }
+            let selected = args
+                .windows(2)
+                .find(|pair| pair[0] == "-t")
+                .expect("must not use default multiplexing")[1]
+                .to_str()
+                .unwrap();
+            self.calls.borrow_mut().push(selected.into());
+            let data = match selected {
+                "ed25519" => "host ssh-ed25519 ED\n",
+                "rsa" => "host ssh-rsa RSA\n",
+                "ed25519,rsa" => "host ssh-ed25519 ED\nhost ssh-rsa RSA\n",
+                _ => "",
+            };
+            Ok(Output {
+                success: !data.is_empty(),
+                stdout: data.as_bytes().to_vec(),
+                diagnostic: "simulated multiplex failure".into(),
+            })
+        }
+    }
+    for (known, expected) in [
+        ("", "ed25519"),
+        ("host ssh-rsa RSA\n", "rsa"),
+        ("host ssh-rsa RSA\nhost ssh-ed25519 ED\n", "ed25519,rsa"),
+    ] {
+        let runner = Selected {
+            known: known.as_bytes().to_vec(),
+            calls: RefCell::new(Vec::new()),
+        };
+        verifier().preflight_with("host", 22, &runner).unwrap();
+        assert_eq!(*runner.calls.borrow(), vec![expected]);
+    }
+    let approved = HostIdentity {
+        host: "host".into(),
+        port: 22,
+        keys: vec![PresentedKey {
+            algorithm: "ssh-rsa".into(),
+            encoded: "RSA".into(),
+        }],
+        other_names_with_keys: vec![],
+    };
+    let runner = Selected {
+        known: Vec::new(),
+        calls: RefCell::new(Vec::new()),
+    };
+    verifier()
+        .preflight_approved_with("host", 22, &approved, &runner)
+        .unwrap();
+    assert_eq!(*runner.calls.borrow(), vec!["rsa"]);
+}
+
+#[test]
+fn unknown_bootstrap_falls_back_to_rsa_without_default_scan() {
+    struct RsaOnly(RefCell<Vec<String>>);
+    impl Runner for RsaOnly {
+        fn pause(&self, _: std::time::Duration) {}
+        fn run(&self, program: &OsStr, args: &[OsString]) -> Result<Output, HostKeyError> {
+            let mut data = Vec::new();
+            if program == OsStr::new("ssh-keyscan") {
+                let kind = args.windows(2).find(|p| p[0] == "-t").unwrap()[1]
+                    .to_str()
+                    .unwrap();
+                self.0.borrow_mut().push(kind.into());
+                if kind == "rsa" {
+                    data = b"host ssh-rsa RSA\n".to_vec();
+                }
+            }
+            Ok(Output {
+                success: !data.is_empty(),
+                stdout: data,
+                diagnostic: "unsupported algorithm".into(),
+            })
+        }
+    }
+    let runner = RsaOnly(RefCell::new(Vec::new()));
+    let result = verifier().preflight_with("host", 22, &runner).unwrap();
+    assert_eq!(*runner.0.borrow(), vec!["ed25519", "ecdsa", "rsa"]);
+    assert_eq!(result.identity.keys[0].algorithm, "ssh-rsa");
+}
+
+#[test]
+fn scan_type_mapping_covers_all_supported_host_keys() {
+    assert_eq!(
+        scan_types(
+            [
+                "ssh-rsa",
+                "rsa-sha2-256",
+                "rsa-sha2-512",
+                "ssh-ed25519",
+                "ecdsa-sha2-nistp256",
+                "ecdsa-sha2-nistp384",
+                "ecdsa-sha2-nistp521",
+                "sk-ssh-ed25519@openssh.com",
+                "sk-ecdsa-sha2-nistp256@openssh.com",
+                "ssh-mldsa44-ed25519@openssh.com"
+            ]
+            .into_iter()
+        )
+        .unwrap(),
+        vec![
+            "ecdsa",
+            "ecdsa-sk",
+            "ed25519",
+            "ed25519-sk",
+            "mldsa44-ed25519",
+            "rsa"
+        ]
+    );
+    assert!(scan_types(["unknown-key"].into_iter()).is_err());
+}
+
+#[test]
+fn matching_known_key_cannot_hide_replacement_during_approval() {
+    let approved = HostIdentity {
+        host: "host".into(),
+        port: 22,
+        keys: vec![
+            PresentedKey {
+                algorithm: "ssh-ed25519".into(),
+                encoded: "ED".into(),
+            },
+            PresentedKey {
+                algorithm: "ssh-rsa".into(),
+                encoded: "RSA".into(),
+            },
+        ],
+        other_names_with_keys: vec![],
+    };
+    let runner = Fake {
+        find: b"host ssh-ed25519 ED\nhost ssh-rsa RSA\n".to_vec(),
+        scan: b"host ssh-ed25519 ED\nhost ssh-rsa REPLACED\n".to_vec(),
+    };
+    assert!(verifier()
+        .preflight_approved_with("host", 22, &approved, &runner)
+        .unwrap_err()
+        .to_string()
+        .contains("changed after approval"));
+}
+
+#[test]
+fn discovery_type_names_are_accepted_by_actual_openssh_without_network_access() {
+    for kind in UNKNOWN_SCAN_TYPES {
+        // No host operands: validates option parsing and exits with usage,
+        // without opening any network connection.
+        let output = Command::new("ssh-keyscan")
+            .args(["-t", kind])
+            .output()
+            .expect("actual ssh-keyscan is required by transport tests");
+        assert!(!output.status.success());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !diagnostic.contains("Unknown key type"),
+            "{kind}: {diagnostic}"
+        );
+        assert!(diagnostic.contains("usage:"), "{kind}: {diagnostic}");
+    }
 }
