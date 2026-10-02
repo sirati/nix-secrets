@@ -6,6 +6,7 @@
   openssh,
   util-linux,
   perl,
+  acl,
 }:
 
 rustPlatform.buildRustPackage {
@@ -25,6 +26,8 @@ rustPlatform.buildRustPackage {
     util-linux
     # A stand-in for the 1Password launcher's batch framing in a unit test.
     perl
+    # Readiness regressions inspect real POSIX ACL metadata.
+    acl
   ];
 
   cargoBuildFlags = [
