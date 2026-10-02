@@ -37,6 +37,9 @@ pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), Deploy
                 ));
             } else if metadata.is_dir() {
                 create_directory(&target, metadata.permissions().mode() & 0o777)?;
+                let input = open_directory(&entry.path())?;
+                let output = open_directory(&target)?;
+                copy_owner_and_acls(&input, &output)?;
                 directories.push((entry.path(), target));
             } else if metadata.is_file() {
                 copy_file(&entry.path(), &target)?;
@@ -69,15 +72,67 @@ fn copy_file(source: &Path, destination: &Path) -> Result<(), DeployError> {
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
         .open(destination)?;
     io::copy(&mut input, &mut output)?;
-    fchown(
-        output.as_raw_fd(),
-        Some(Uid::from_raw(source_metadata.uid())),
-        Some(Gid::from_raw(source_metadata.gid())),
-    )
-    .map_err(|error| DeployError::Io(io::Error::from_raw_os_error(error as i32)))?;
-    output.set_permissions(fs::Permissions::from_mode(source_metadata.mode() & 0o7777))?;
+    copy_owner_and_acls(&input, &output)?;
     output.sync_all()?;
     Ok(())
+}
+
+fn open_directory(path: &Path) -> Result<File, DeployError> {
+    Ok(OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)?)
+}
+
+const ACCESS_ACL: &str = "system.posix_acl_access";
+const DEFAULT_ACL: &str = "system.posix_acl_default";
+const MAX_ACL_BYTES: usize = 65536;
+
+/// Carried secrets retain the exact runtime reader policy on distinct inodes.
+/// Copy only POSIX ACLs, never capabilities or unrelated security attributes.
+fn copy_owner_and_acls(input: &File, output: &File) -> Result<(), DeployError> {
+    let metadata = input.metadata()?;
+    fchown(
+        output.as_raw_fd(),
+        Some(Uid::from_raw(metadata.uid())),
+        Some(Gid::from_raw(metadata.gid())),
+    )
+    .map_err(|error| DeployError::Io(io::Error::from_raw_os_error(error as i32)))?;
+    output.set_permissions(fs::Permissions::from_mode(metadata.mode() & 0o7777))?;
+    for name in [ACCESS_ACL, DEFAULT_ACL] {
+        let mut value = vec![0u8; MAX_ACL_BYTES];
+        let length = match rustix::fs::fgetxattr(input, name, value.as_mut_slice()) {
+            Ok(length) => length,
+            Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP) => {
+                remove_acl(output, name)?;
+                continue;
+            }
+            Err(error) => return Err(io::Error::from(error).into()),
+        };
+        value.truncate(length);
+        rustix::fs::fsetxattr(output, name, &value, rustix::fs::XattrFlags::empty())
+            .map_err(io::Error::from)?;
+    }
+    if output.metadata()?.mode() & 0o7777 != metadata.mode() & 0o7777 {
+        return Err(DeployError::Invalid(
+            "copied POSIX ACL mode differs from source".into(),
+        ));
+    }
+    output.sync_all()?;
+    Ok(())
+}
+
+fn remove_acl(file: &File, name: &str) -> Result<(), DeployError> {
+    match rustix::fs::fremovexattr(file, name) {
+        // An unsupported ACL namespace cannot contain an inherited ACL.
+        Ok(()) | Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP) => Ok(()),
+        Err(error) => Err(io::Error::from(error).into()),
+    }
+}
+
+/// Changed values start from the manifest, not inherited directory readers.
+pub(crate) fn clear_access_acl(file: &File) -> Result<(), DeployError> {
+    remove_acl(file, ACCESS_ACL)
 }
 
 pub(crate) fn sync_tree(root: &Path) -> Result<(), DeployError> {

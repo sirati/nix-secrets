@@ -194,6 +194,89 @@ fn carried_secrets_use_distinct_inodes_from_rollback_generations() {
 }
 
 #[test]
+fn partial_deploy_preserves_exact_file_and_directory_posix_acls() {
+    fn acl(owner: u16, reader: u32, permission: u16, mask: u16) -> Vec<u8> {
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        for (tag, perms, id) in [
+            (1u16, owner, u32::MAX),
+            (2, permission, reader),
+            (4, 0, u32::MAX),
+            (16, mask, u32::MAX),
+            (32, 0, u32::MAX),
+        ] {
+            bytes.extend(tag.to_le_bytes());
+            bytes.extend(perms.to_le_bytes());
+            bytes.extend(id.to_le_bytes());
+        }
+        bytes
+    }
+    fn set(path: &Path, name: &str, value: &[u8]) -> Result<(), rustix::io::Errno> {
+        let file = File::open(path).unwrap();
+        rustix::fs::fsetxattr(&file, name, value, rustix::fs::XattrFlags::empty())
+    }
+    fn get(path: &Path, name: &str) -> Option<Vec<u8>> {
+        let file = File::open(path).unwrap();
+        let mut value = vec![0; 65536];
+        match rustix::fs::fgetxattr(&file, name, value.as_mut_slice()) {
+            Ok(length) => {
+                value.truncate(length);
+                Some(value)
+            }
+            Err(rustix::io::Errno::NODATA) => None,
+            Err(error) => panic!("cannot read POSIX ACL: {error}"),
+        }
+    }
+    let access = "system.posix_acl_access";
+    let default = "system.posix_acl_default";
+    // The unpacked build source uses the real filesystem; sandbox /tmp may
+    // be tmpfs without POSIX ACL support. TempDir still removes the fixture.
+    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let deployer = Deployer::at(temp.path()).unwrap();
+    deployer.deploy(&batch(b"old-one", b"old-two")).unwrap();
+    let old = temp
+        .path()
+        .join(fs::read_link(temp.path().join(".current")).unwrap());
+    let reader = nix::unistd::geteuid().as_raw();
+    let file_acl = acl(4, reader, 4, 4);
+    let dir_acl = acl(7, reader, 1, 1);
+    let default_acl = acl(7, reader, 4, 4);
+    match set(&old.join("mail/service/first"), access, &file_acl) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::NOTSUP) => {
+            eprintln!("SKIP actual POSIX ACL preservation proof: test filesystem does not support POSIX ACLs; real fleet Btrfs audit remains mandatory");
+            return;
+        }
+        Err(error) => panic!("cannot establish POSIX ACL fixture: {error}"),
+    }
+    set(&old.join("mail/service"), access, &dir_acl).unwrap();
+    set(&old.join("mail/service"), default, &default_acl).unwrap();
+    deployer
+        .deploy(&ResolvedBatch {
+            entries: vec![entry("git", "second", b"new-two")],
+        })
+        .unwrap();
+    let current_file = temp.path().join("mail/service/first");
+    let current_dir = temp.path().join("mail/service");
+    assert_eq!(get(&current_file, access), Some(file_acl.clone()));
+    assert_eq!(get(&current_dir, access), Some(dir_acl));
+    assert_eq!(get(&current_dir, default), Some(default_acl));
+    assert_eq!(fs::metadata(&current_file).unwrap().mode() & 0o777, 0o440);
+    assert_ne!(
+        fs::metadata(&current_file).unwrap().ino(),
+        fs::metadata(old.join("mail/service/first")).unwrap().ino()
+    );
+    assert_eq!(get(&old.join("mail/service/first"), access), Some(file_acl));
+    // A changed manifest value does not acquire readers from a carried default ACL.
+    deployer
+        .deploy(&ResolvedBatch {
+            entries: vec![entry("mail", "first", b"new-one")],
+        })
+        .unwrap();
+    assert_eq!(get(&current_file, access), None);
+    assert_eq!(fs::read(current_file).unwrap(), b"new-one");
+}
+
+#[test]
 fn rejects_store_and_namespace_symlinks() {
     let temp = tempfile::tempdir().unwrap();
     let actual = temp.path().join("actual");
