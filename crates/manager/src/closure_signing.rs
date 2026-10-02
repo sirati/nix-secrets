@@ -238,6 +238,7 @@ pub(crate) fn handle(
 
 pub fn run(arguments: Vec<OsString>, runtime: &Path) -> Result<(), String> {
     let mut options = crate::with_secrets::Options {
+        repository: std::env::current_dir().map_err(|e| e.to_string())?,
         reason: None,
         ..Default::default()
     };
