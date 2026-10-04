@@ -239,3 +239,16 @@ fn a_claim_pruned_by_readers_returns_when_its_owner_disconnects() {
     broker.disconnect(1);
     assert_eq!(broker.pending(2).unwrap(), vec![request("requeued")]);
 }
+
+#[test]
+fn resolved_success_is_never_pending_or_claimable_after_disconnect_and_reregister() {
+    let mut broker=ApprovalBroker::default();broker.register(1).unwrap();
+    broker.submit(request("pubkey-completed")).unwrap();
+    let claim=broker.claim(1,"pubkey-completed",Duration::from_secs(1)).unwrap();
+    broker.resolve(1,"pubkey-completed",claim.lease_id,Decision::Approved,None).unwrap();
+    broker.disconnect(1);broker.register(2).unwrap();
+    assert!(broker.pending(2).unwrap().is_empty());
+    assert!(matches!(broker.claim(2,"pubkey-completed",Duration::from_secs(1)),Err(BrokerError::Unavailable)));
+    broker.submit(request("pubkey-new")).unwrap();
+    assert_eq!(broker.pending(2).unwrap(),vec![request("pubkey-new")]);
+}

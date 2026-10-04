@@ -592,6 +592,7 @@ pub(crate) fn lookup_name(host: &str, port: u16) -> String {
     }
 }
 
+mod persist;
 mod runner;
 #[cfg(test)]
 use runner::Output;

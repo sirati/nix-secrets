@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
 base64 = "0.22"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }

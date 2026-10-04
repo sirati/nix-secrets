@@ -30,7 +30,9 @@ impl Model {
             self.notifications.push_front(displaced);
             return;
         }
-        if self.message.is_none() && !matches!(self.mode, Mode::Approval(_)) {
+        if self.message.is_none()
+            && !matches!(self.mode, Mode::Approval(_))
+            && !(severity == NoticeSeverity::Info && matches!(self.mode, Mode::Edit { .. })) {
             self.message = Some(notice);
         } else {
             self.notifications.push_back(notice);
@@ -48,9 +50,27 @@ impl Model {
     }
 
     pub fn offer_approval(&mut self, request: ApprovalRequest) {
+        if self.completed_approvals.contains(&request.id) { return; }
         self.apply_task_status(&request);
-        self.pending_approvals.push_back(request);
+        if let Some(queued) = self.pending_approvals.iter_mut().find(|queued| queued.id == request.id) {
+            // A stale trust stage must not replace an already advanced final stage.
+            if queued.host_key.is_some() || request.host_key.is_none() { *queued = request; }
+        } else if let Mode::Approval(current) = &mut self.mode {
+            if current.id == request.id {
+                if current.host_key.is_some() && request.host_key.is_none() { *current = request; }
+                return;
+            }
+            self.pending_approvals.push_back(request);
+        } else { self.pending_approvals.push_back(request); }
         self.show_pending_approval();
+    }
+
+    pub fn finish_approval(&mut self, id: &str) {
+        self.completed_approvals.insert(id.to_owned());
+        self.pending_approvals.retain(|request| request.id != id);
+        if matches!(&self.mode, Mode::Approval(request) if request.id == id) {
+            self.mode = Mode::Browse;
+        }
     }
 
     pub fn show_pending_approval(&mut self) {

@@ -77,6 +77,7 @@ fn main() -> ExitCode {
     }
     if one_key {
         let inputs = inputs.expect("--one-key needs --batch");
+        eprintln!("NIX_SECRETS_PROGRESS 0 {} one-password", inputs.len());
         let key = match one_key::list().and_then(|items| {
             let item = one_key::choose(&items, &inputs)?;
             one_key::read(item)
@@ -157,9 +158,14 @@ fn run_batch(
     // subprocesses run concurrently, at most one per available CPU.
     let workers = std::thread::available_parallelism().map_or(1, usize::from);
     let mut outputs = zeroize::Zeroizing::new(Vec::new());
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    eprintln!("NIX_SECRETS_PROGRESS 0 {} decrypting", inputs.len());
     for wave in inputs.chunks(workers) {
         let values = match ordered_parallel(wave, workers, |input| {
-            run_input(program, arguments, input, key)
+            let output = run_input(program, arguments, input, key)?;
+            let count = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            eprintln!("NIX_SECRETS_PROGRESS {count} {} decrypting", inputs.len());
+            Ok(output)
         }) {
             Ok(values) => values,
             Err(status) => return status,
@@ -460,8 +466,8 @@ mod one_key {
 mod parallel_tests {
     use super::ordered_parallel;
     use std::sync::{
-        Barrier,
         atomic::{AtomicUsize, Ordering},
+        Barrier,
     };
 
     #[test]

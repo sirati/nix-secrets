@@ -86,6 +86,11 @@ pub fn drive(
         model.show_pending_approval();
         schedule(&mut redraw_at);
         if action == Action::Quit {
+            if writer.activity().is_some() {
+                model.fail("Wait for pending operations to finish before quitting; submitted values are still being saved");
+                schedule(&mut redraw_at);
+                continue;
+            }
             return Ok(());
         }
     }
@@ -214,6 +219,7 @@ fn apply_completion(model: &mut Model, completion: Completion) {
                 model.mode = Mode::BulkProgress { done, total };
             }
         }
+        Completion::ApprovalTerminated(id) => model.finish_approval(&id),
         Completion::ApprovalDone(Some(request)) => {
             if matches!(model.mode, Mode::Approval(_)) {
                 model.mode = Mode::Browse;
@@ -356,4 +362,21 @@ pub(crate) fn summary_line(summary: &crate::model::DeploySummary) -> String {
         ));
     }
     line
+}
+
+#[cfg(test)]
+mod editor_completion_tests {
+    use super::*;
+    #[test]
+    fn save_completion_does_not_intercept_another_editors_next_character() {
+        let mut model = Model::new(vec![]);
+        model.mode = Mode::Edit {
+            path: "second".into(),
+            value: Zeroizing::new(b"draft".to_vec()),
+        };
+        apply_completion(&mut model, Completion::Saved("first".into()));
+        assert!(model.message.is_none());
+        assert_eq!(model.notifications.len(), 1);
+        assert!(matches!(model.mode, Mode::Edit { .. }));
+    }
 }

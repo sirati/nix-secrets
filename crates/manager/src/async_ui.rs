@@ -44,12 +44,23 @@ enum Command {
 }
 
 enum Event {
+    WorkerStopped,
+    Progress(usize, usize, bool, bool),
+    Phase(&'static str),
+    ApprovalTerminated(String),
     Rows(Vec<Row>),
     Profiles(ProfileSnapshot),
     Approval(Box<ApprovalRequest>),
     Completion(Completion),
     Error(String),
     ApprovalLost(String),
+}
+
+struct WorkerCompletionGuard(Sender<Event>);
+impl Drop for WorkerCompletionGuard {
+    fn drop(&mut self) {
+        let _ = self.0.send(Event::WorkerStopped);
+    }
 }
 
 pub struct AsyncWriter {
@@ -60,6 +71,8 @@ pub struct AsyncWriter {
     approvals: Vec<ApprovalRequest>,
     completions: Vec<Completion>,
     busy: bool,
+    pending: std::collections::VecDeque<Option<crate::model::Activity>>,
+    drafts: std::collections::VecDeque<Option<(String, Zeroizing<Vec<u8>>)>>,
     activity: Option<crate::model::Activity>,
     /// Whether decryption goes through 1Password and may wait for approval.
     one_password: bool,
@@ -78,20 +91,45 @@ impl AsyncWriter {
     pub fn spawn(mut controller: Controller, socket: PathBuf) -> Self {
         let one_password = controller.uses_one_password();
         let check_socket = socket.clone();
-        let (channel, decisions) = spawn_operator_channel(&controller, &socket);
         let (commands, incoming) = mpsc::channel();
         let (outgoing, events) = mpsc::channel();
+        let progress = outgoing.clone();
+        controller.set_progress(move |done, total, waiting| {
+            let _ = progress.send(Event::Progress(done, total, waiting, false));
+        });
+        let phases = outgoing.clone();
+        controller.set_phase(move |label| {
+            let _ = phases.send(Event::Phase(label));
+        });
+        let (channel, decisions) = spawn_operator_channel(&controller, &socket, outgoing.clone());
         std::thread::spawn(move || {
+            let _worker_completion = WorkerCompletionGuard(outgoing.clone());
             controller.start_background_refresh(socket);
             loop {
                 match incoming.recv_timeout(Duration::from_millis(25)) {
                     Ok(command) => {
+                        let approval_id = if matches!(
+                            &command,
+                            Command::Approval(_) | Command::ApprovalWith(_, _)
+                        ) {
+                            controller.active_approval_id()
+                        } else {
+                            None
+                        };
                         let completion = match command {
                             Command::BulkGenerate { paths, kind } => {
                                 execute_bulk(&mut controller, paths, kind, &outgoing)
                             }
                             other => execute(&mut controller, other),
                         };
+                        if matches!(
+                            &completion,
+                            Completion::Deployed { .. } | Completion::ApprovalDone(None)
+                        ) {
+                            if let Some(id) = approval_id {
+                                let _ = outgoing.send(Event::ApprovalTerminated(id));
+                            }
+                        }
                         if outgoing.send(Event::Completion(completion)).is_err() {
                             return;
                         }
@@ -148,6 +186,8 @@ impl AsyncWriter {
             approvals: vec![],
             completions: vec![],
             busy: false,
+            pending: Default::default(),
+            drafts: Default::default(),
             activity: None,
             one_password,
             socket: Some(check_socket),
@@ -184,15 +224,61 @@ impl AsyncWriter {
                 }
             }
         }
-        while let Ok(event) = self.events.try_recv() {
+        loop {
+            let event = match self.events.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.worker_stopped();
+                    break;
+                }
+            };
             match event {
+                Event::WorkerStopped => self.worker_stopped(),
+                Event::ApprovalTerminated(id) => {
+                    self.completions.push(Completion::ApprovalTerminated(id))
+                }
+                Event::Phase(label) => {
+                    if let Some(activity) = &mut self.activity {
+                        activity.label = label.into();
+                        activity.waits_for_one_password = false;
+                    }
+                }
+                Event::Progress(done, total, waiting, secret) => {
+                    let target = if secret {
+                        &mut self.secret_activity
+                    } else {
+                        &mut self.activity
+                    };
+                    if let Some(activity) = target {
+                        activity.label = format!(
+                            "Decrypting {done}/{total}. {}",
+                            if waiting {
+                                "Waiting for 1Password approval"
+                            } else {
+                                "Running decryption workers"
+                            }
+                        );
+                        activity.waits_for_one_password = waiting;
+                    }
+                }
                 Event::Rows(rows) => self.rows = Some(rows),
                 Event::Profiles(snapshot) => self.profiles = Some(snapshot),
                 Event::Approval(request) => self.approvals.push(*request),
-                Event::Completion(result) => {
+                Event::Completion(mut result) => {
                     if !matches!(result, Completion::BulkProgress { .. }) {
-                        self.busy = false;
-                        self.activity = None;
+                        self.pending.pop_front();
+                        if let Some(Some((path, value))) = self.drafts.pop_front() {
+                            if let Completion::Failed(message) = result {
+                                result = Completion::SaveFailed {
+                                    path,
+                                    value,
+                                    message,
+                                };
+                            }
+                        }
+                        self.busy = !self.pending.is_empty();
+                        self.activity = self.pending.front().cloned().flatten();
                     }
                     self.completions.push(result);
                 }
@@ -204,6 +290,25 @@ impl AsyncWriter {
         }
     }
 
+    fn worker_stopped(&mut self) {
+        let had_drafts = self.drafts.iter().any(Option::is_some);
+        for (path, value) in self.drafts.drain(..).flatten() {
+            self.completions.push(Completion::SaveFailed {
+                path,
+                value,
+                message: "backend worker stopped; this submitted value was retained for retry"
+                    .into(),
+            });
+        }
+        if self.busy && !had_drafts {
+            self.completions
+                .push(Completion::Failed("backend worker stopped".into()));
+        }
+        self.pending.clear();
+        self.busy = false;
+        self.activity = None;
+    }
+
     fn queue(&mut self, command: Command) -> Result<(), String> {
         if self.busy {
             return Err("another operation is still running".into());
@@ -213,6 +318,8 @@ impl AsyncWriter {
             .send(command)
             .map_err(|_| "backend worker stopped".to_string())?;
         self.busy = true;
+        self.pending.push_back(activity.clone());
+        self.drafts.push_back(None);
         self.activity = activity;
         Ok(())
     }
@@ -285,19 +392,31 @@ impl SecretWriter for AsyncWriter {
         path: &str,
         value: Zeroizing<Vec<u8>>,
     ) -> Result<Action, (String, Zeroizing<Vec<u8>>)> {
-        if self.busy {
-            return Err(("another operation is still running".into(), value));
+        if value.len() > nix_secrets_crypto::MAX_SECRET_SIZE {
+            return Err(("value exceeds the maximum secret size".into(), value));
         }
+        if self.pending.len() >= 8 {
+            return Err((
+                "save queue is full; keep this value and retry after a save completes".into(),
+                value,
+            ));
+        }
+        let retained = value.clone();
         match self.commands.send(Command::Write {
             path: path.into(),
             value,
         }) {
             Ok(()) => {
                 self.busy = true;
-                self.activity = Some(activity(
+                let next = Some(activity(
                     format!("Encrypting and saving {path}"),
                     self.one_password,
                 ));
+                if self.pending.is_empty() {
+                    self.activity = next.clone();
+                }
+                self.pending.push_back(next);
+                self.drafts.push_back(Some((path.into(), retained)));
                 Ok(Action::Queued)
             }
             Err(mpsc::SendError(Command::Write { value, .. })) => {
@@ -428,9 +547,19 @@ impl SecretWriter for AsyncWriter {
 
     fn activity(&mut self) -> Option<crate::model::Activity> {
         self.pump();
-        self.activity
+        let mut activity = self
+            .activity
             .clone()
             .or_else(|| self.secret_activity.clone())
+            .or_else(|| self.pending.iter().find_map(Clone::clone));
+        if let Some(value) = &mut activity {
+            if self.pending.len() > 1 {
+                value
+                    .label
+                    .push_str(&format!("; {} saves queued", self.pending.len() - 1));
+            }
+        }
+        activity
     }
 }
 
@@ -438,12 +567,16 @@ impl SecretWriter for AsyncWriter {
 fn spawn_operator_channel(
     controller: &Controller,
     socket: &std::path::Path,
+    progress: Sender<Event>,
 ) -> (
     Receiver<crate::operator_channel::ChannelEvent>,
     Sender<crate::operator_channel::Decision>,
 ) {
     use crate::operator_channel::{run, ChannelEvent};
-    let (schema, provider) = controller.schema_and_provider();
+    let (schema, mut provider) = controller.schema_and_provider();
+    provider.set_progress(move |done, total, waiting| {
+        let _ = progress.send(Event::Progress(done, total, waiting, true));
+    });
     let identity = provider.identity_description();
     let socket = socket.to_owned();
     let (events, channel) = mpsc::channel();

@@ -218,6 +218,10 @@ impl Controller {
                 .ok_or("no claimed approval request")?
                 .target_approved
             {
+                let active = self.active.as_ref().expect("active approval exists");
+                let verifier = nix_secrets_transport::HostKeyVerifier::new(self.known_hosts.clone());
+                verifier.preflight_approved(&active.connection.host, active.connection.port, &active.identity).map_err(|e| e.to_string())?;
+                verifier.persist_accepted(&active.identity).map_err(|e| e.to_string())?;
                 self.prepare_active()?;
                 let active = self.active.as_mut().expect("active approval exists");
                 active.target_approved = true;

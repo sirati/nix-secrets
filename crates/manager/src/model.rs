@@ -366,6 +366,8 @@ pub struct Model {
     pub hover: Option<crate::ui::MouseTarget>,
     pub notifications: VecDeque<Notice>,
     pub pending_approvals: VecDeque<ApprovalRequest>,
+    /// Terminal IDs stay suppressed for this frontend session, including late events.
+    completed_approvals: std::collections::BTreeSet<String>,
     pub pending_dialogs: VecDeque<Mode>,
     pub filter: ViewFilter,
     pub human_only: bool,
@@ -461,6 +463,7 @@ impl Model {
             hover: None,
             notifications: VecDeque::new(),
             pending_approvals: VecDeque::new(),
+            completed_approvals: Default::default(),
             pending_dialogs: VecDeque::new(),
             filter: ViewFilter::Required,
             human_only: false,

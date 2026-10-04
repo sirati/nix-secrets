@@ -8,9 +8,9 @@ use std::{
 use zeroize::Zeroizing;
 
 use crate::{
-    AgeFailure, CryptoError, CryptoProvider,
     age_failure::CAPTURED_BYTES,
     secret::{MAX_CIPHERTEXT_SIZE, MAX_PLAINTEXT_SIZE},
+    AgeFailure, CryptoError, CryptoProvider,
 };
 
 /// Encrypts and decrypts whole secrets with age through anonymous pipes.
@@ -21,6 +21,7 @@ pub struct AgeCommandProvider {
     launcher: Option<(PathBuf, Vec<OsString>)>,
     decryption: DecryptionMode,
     op_program: OsString,
+    progress: Option<std::sync::Arc<dyn Fn(usize, usize, bool) + Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -35,17 +36,22 @@ impl Default for AgeCommandProvider {
             program: OsString::from("age"),
             decryption: DecryptionMode::OnePassword,
             op_program: OsString::from("op"),
+            progress: None,
             launcher: None,
         }
     }
 }
 
 impl AgeCommandProvider {
+    pub fn set_progress(&mut self, callback: impl Fn(usize, usize, bool) + Send + Sync + 'static) {
+        self.progress = Some(std::sync::Arc::new(callback));
+    }
     pub fn new(program: impl Into<OsString>) -> Self {
         Self {
             program: program.into(),
             decryption: DecryptionMode::OnePassword,
             op_program: OsString::from("op"),
+            progress: None,
             launcher: None,
         }
     }
@@ -90,6 +96,7 @@ impl AgeCommandProvider {
             program: program.into(),
             decryption: DecryptionMode::IdentityFile(identity.into()),
             op_program: OsString::from("op"),
+            progress: None,
             launcher: None,
         }
     }
@@ -143,11 +150,34 @@ impl AgeCommandProvider {
             let writer = scope.spawn(move || stdin.write_all(&input));
             let diagnostics = scope.spawn(move || {
                 let mut captured = Vec::new();
-                let _ = stderr
-                    .by_ref()
-                    .take(CAPTURED_BYTES)
-                    .read_to_end(&mut captured);
-                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+                let mut line = Vec::new();
+                let mut last = (0, 0);
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let count = match stderr.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    for byte in &chunk[..count] {
+                        if captured.len() < CAPTURED_BYTES as usize {
+                            captured.push(*byte);
+                        }
+                        if *byte == b'\n' {
+                            if let (Some(callback), Some((done, total, waiting))) =
+                                (&self.progress, parse_progress(&line))
+                            {
+                                if last.1 != total {
+                                    last = (0, total);
+                                }
+                                last.0 = last.0.max(done);
+                                callback(last.0, total, waiting);
+                            }
+                            line.clear();
+                        } else if line.len() < 128 {
+                            line.push(*byte);
+                        }
+                    }
+                }
                 captured
             });
             let read = stdout
@@ -223,18 +253,41 @@ impl CryptoProvider for AgeCommandProvider {
         {
             return Err(CryptoError::SecretTooLarge);
         }
+        if ciphertexts.is_empty() {
+            return Ok(Vec::new());
+        }
         let Some((launcher, prefix)) = &self.launcher else {
             if !self.uses_one_password() {
                 let workers = std::thread::available_parallelism().map_or(1, usize::from);
+                let done = std::sync::Mutex::new(0_usize);
+                if let Some(callback) = &self.progress {
+                    callback(0, ciphertexts.len(), false);
+                }
                 return ordered_parallel(ciphertexts, workers, |ciphertext| {
-                    self.decrypt(ciphertext)
+                    let value = self.decrypt(ciphertext)?;
+                    let mut count = done.lock().expect("progress counter poisoned");
+                    *count += 1;
+                    if let Some(callback) = &self.progress {
+                        callback(*count, ciphertexts.len(), false);
+                    }
+                    Ok(value)
                 });
             }
             // A direct plugin provider has no shared authorization scope.
             // Keep this fallback serial; normal 1Password clients use the launcher.
             return ciphertexts
                 .iter()
-                .map(|ciphertext| self.decrypt(ciphertext))
+                .enumerate()
+                .map(|(index, ciphertext)| {
+                    if let Some(callback) = &self.progress {
+                        callback(index, ciphertexts.len(), true);
+                    }
+                    let value = self.decrypt(ciphertext)?;
+                    if let Some(callback) = &self.progress {
+                        callback(index + 1, ciphertexts.len(), false);
+                    }
+                    Ok(value)
+                })
                 .collect();
         };
         if ciphertexts.is_empty() {
@@ -409,8 +462,8 @@ mod tests {
 mod parallel_identity_tests {
     use super::ordered_parallel;
     use std::sync::{
-        Barrier,
         atomic::{AtomicUsize, Ordering},
+        Barrier,
     };
     #[test]
     fn bounded_identity_workers_overlap_keep_order_and_join_on_failure() {
@@ -438,5 +491,122 @@ mod parallel_identity_tests {
         });
         assert_eq!(result, Err(0));
         assert_eq!(finished.load(Ordering::SeqCst), 2);
+    }
+}
+
+// Only fixed public progress records are interpreted; child diagnostics are never labels.
+fn parse_progress(line: &[u8]) -> Option<(usize, usize, bool)> {
+    let text = std::str::from_utf8(line)
+        .ok()?
+        .strip_prefix("NIX_SECRETS_PROGRESS ")?;
+    let parts: Vec<_> = text.split(' ').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let done = parts[0].parse::<usize>().ok()?;
+    let total = parts[1].parse::<usize>().ok()?;
+    if total == 0 || total > 4096 || done > total {
+        return None;
+    }
+    Some((
+        done,
+        total,
+        match parts[2] {
+            "one-password" => true,
+            "decrypting" => false,
+            _ => return None,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::parse_progress;
+    #[test]
+    fn public_progress_parser_rejects_diagnostics_and_invalid_counts() {
+        assert_eq!(
+            parse_progress(b"NIX_SECRETS_PROGRESS 0 17 one-password"),
+            Some((0, 17, true))
+        );
+        assert_eq!(
+            parse_progress(b"NIX_SECRETS_PROGRESS 3 17 decrypting"),
+            Some((3, 17, false))
+        );
+        for value in [
+            b"secret diagnostic".as_slice(),
+            b"NIX_SECRETS_PROGRESS 18 17 decrypting",
+            b"NIX_SECRETS_PROGRESS 1 5000 decrypting",
+            b"NIX_SECRETS_PROGRESS 1 2 private-label",
+            b"NIX_SECRETS_PROGRESS 0 0 decrypting",
+        ] {
+            assert_eq!(parse_progress(value), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_progress_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    };
+
+    #[test]
+    #[ignore = "subprocess fixture invoked by live_stderr_progress_arrives_before_completion"]
+    fn progress_child() {
+        eprintln!("NIX_SECRETS_PROGRESS 0 3 one-password");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        eprintln!("NIX_SECRETS_PROGRESS 2 3 decrypting");
+        eprintln!("NIX_SECRETS_PROGRESS 1 3 decrypting");
+    }
+
+    #[test]
+    fn live_stderr_progress_arrives_before_completion() {
+        let (send, receive) = mpsc::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_worker = finished.clone();
+        let mut provider = AgeCommandProvider::new(std::env::current_exe().unwrap());
+        provider.set_progress(move |done, total, waiting| {
+            send.send((done, total, waiting)).unwrap();
+        });
+        let worker = std::thread::spawn(move || {
+            let result = provider.run(
+                &[
+                    "--exact".into(),
+                    "age_command::live_progress_tests::progress_child".into(),
+                    "--ignored".into(),
+                    "--nocapture".into(),
+                ],
+                &[],
+                4096,
+            );
+            finished_worker.store(true, Ordering::SeqCst);
+            result
+        });
+        assert_eq!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            (0, 3, true)
+        );
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "progress must stream while approval/child is pending"
+        );
+        assert_eq!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            (2, 3, false)
+        );
+        assert_eq!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            (2, 3, false),
+            "progress never goes backwards"
+        );
+        worker.join().unwrap().unwrap();
     }
 }

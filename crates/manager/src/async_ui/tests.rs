@@ -84,6 +84,8 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
         approvals: vec![],
         completions: vec![],
         busy: false,
+        pending: Default::default(),
+        drafts: Default::default(),
         activity: None,
         one_password: true,
         socket: None,
@@ -144,6 +146,8 @@ fn slow_commands_describe_their_activity_until_completion() {
         approvals: vec![],
         completions: vec![],
         busy: false,
+        pending: Default::default(),
+        drafts: Default::default(),
         activity: None,
         one_password: true,
         socket: None,
@@ -184,6 +188,8 @@ fn deployment_and_failed_save_keep_the_draft_until_retry_succeeds() {
         approvals: vec![],
         completions: vec![],
         busy: false,
+        pending: Default::default(),
+        drafts: Default::default(),
         activity: None,
         one_password: true,
         socket: None,
@@ -229,10 +235,7 @@ fn deployment_and_failed_save_keep_the_draft_until_retry_succeeds() {
             if event == UiEvent::Tick {
                 let completion = match self.ticks {
                     0 => {
-                        assert!(
-                            self.incoming.try_recv().is_err(),
-                            "busy saves must not execute"
-                        );
+                        // The save is safely queued behind deployment.
                         Completion::Deployed {
                             generated: vec![],
                             skipped: vec![],
@@ -264,15 +267,12 @@ fn deployment_and_failed_save_keep_the_draft_until_retry_succeeds() {
     }
     let mut terminal = Terminal {
         events: VecDeque::from([
-            UiEvent::Paste(b"draft".to_vec()),
             UiEvent::Enter,
-            // Dismiss the busy failure and continue editing the same value.
-            UiEvent::Escape,
+            UiEvent::Paste(b"draft".to_vec()),
             UiEvent::Character('!'),
             UiEvent::Enter,
             UiEvent::Tick,
-            // Dismiss deployment notice, then retry the retained value.
-            UiEvent::Enter,
+            // Dismiss deployment notice; the queued save then fails with its draft.
             UiEvent::Enter,
             UiEvent::Tick,
             // Provider failure also returns to the draft on Escape.
@@ -290,4 +290,151 @@ fn deployment_and_failed_save_keep_the_draft_until_retry_succeeds() {
     assert_eq!(terminal.ticks, 3);
     assert!(model.rows[0].is_set);
     assert!(matches!(model.mode, Mode::Browse));
+}
+
+#[test]
+fn submitted_values_queue_in_order_and_remain_owned_when_full() {
+    let (commands, incoming) = mpsc::channel();
+    let (outgoing, events) = mpsc::channel();
+    let mut writer = AsyncWriter {
+        commands,
+        events,
+        rows: None,
+        profiles: None,
+        approvals: vec![],
+        completions: vec![],
+        busy: false,
+        pending: Default::default(),
+        drafts: Default::default(),
+        activity: None,
+        one_password: true,
+        socket: None,
+        channel: None,
+        decisions: None,
+        secret_prompts: vec![],
+        secret_activity: None,
+    };
+    for index in 0..8 {
+        assert_eq!(
+            writer.write(&format!("value-{index}"), Zeroizing::new(vec![index])),
+            Ok(Action::Queued)
+        );
+    }
+    let (_, retained) = writer
+        .write("overflow", Zeroizing::new(vec![99]))
+        .unwrap_err();
+    assert_eq!(retained.as_slice(), &[99]);
+    for index in 0..8 {
+        match incoming.recv().unwrap() {
+            Command::Write { path, value } => {
+                assert_eq!(path, format!("value-{index}"));
+                assert_eq!(value.as_slice(), &[index]);
+            }
+            _ => panic!("expected queued write"),
+        }
+        outgoing
+            .send(Event::Completion(Completion::Saved(format!(
+                "value-{index}"
+            ))))
+            .unwrap();
+        writer.pump();
+        assert_eq!(writer.pending.len(), 7 - index as usize);
+        assert_eq!(writer.busy, index != 7);
+    }
+    assert!(writer.activity().is_none());
+}
+
+#[test]
+fn stopped_worker_returns_every_accepted_draft_even_with_another_event_sender() {
+    let (commands, incoming) = mpsc::channel();
+    let (outgoing, events) = mpsc::channel();
+    let mut writer = AsyncWriter {
+        commands,
+        events,
+        rows: None,
+        profiles: None,
+        approvals: vec![],
+        completions: vec![],
+        busy: false,
+        pending: Default::default(),
+        drafts: Default::default(),
+        activity: None,
+        one_password: true,
+        socket: None,
+        channel: None,
+        decisions: None,
+        secret_prompts: vec![],
+        secret_activity: None,
+    };
+    for index in 0..3 {
+        assert_eq!(
+            writer.write(&format!("value-{index}"), Zeroizing::new(vec![index])),
+            Ok(Action::Queued)
+        );
+    }
+    drop(incoming);
+    // The independent operator channel still owns an event sender in production.
+    let guard = WorkerCompletionGuard(outgoing.clone());
+    drop(guard);
+    writer.pump();
+    assert!(!writer.busy);
+    assert!(writer.drafts.is_empty());
+    assert_eq!(writer.completions.len(), 3);
+    for (index, result) in writer.completions.drain(..).enumerate() {
+        match result {
+            Completion::SaveFailed { path, value, .. } => {
+                assert_eq!(path, format!("value-{index}"));
+                assert_eq!(value.as_slice(), &[index as u8]);
+            }
+            _ => panic!("unsaved draft must be returned"),
+        }
+    }
+    writer.pump();
+    assert!(writer.completions.is_empty(), "disconnect is reported once");
+}
+
+#[test]
+fn real_counts_and_wait_phases_keep_queued_save_activity() {
+    let (commands, _incoming) = mpsc::channel();
+    let (outgoing, events) = mpsc::channel();
+    let mut writer = AsyncWriter {
+        commands,
+        events,
+        rows: None,
+        profiles: None,
+        approvals: vec![],
+        completions: vec![],
+        busy: false,
+        pending: Default::default(),
+        drafts: Default::default(),
+        activity: None,
+        one_password: true,
+        socket: None,
+        channel: None,
+        decisions: None,
+        secret_prompts: vec![],
+        secret_activity: None,
+    };
+    assert!(writer.approval(true).is_err());
+    assert_eq!(
+        writer.write("next", Zeroizing::new(vec![42])),
+        Ok(Action::Queued)
+    );
+    outgoing.send(Event::Progress(0, 12, true, false)).unwrap();
+    writer.pump();
+    let progress = writer.activity().unwrap();
+    assert!(progress.label.contains("0/12"));
+    assert!(progress.label.contains("1Password approval"));
+    assert!(progress.label.contains("1 saves queued"));
+    outgoing.send(Event::Progress(7, 12, false, false)).unwrap();
+    writer.pump();
+    assert!(writer.activity().unwrap().label.contains("7/12"));
+    outgoing
+        .send(Event::Phase(
+            "Waiting for SSH deployment and target generators",
+        ))
+        .unwrap();
+    writer.pump();
+    assert!(writer.activity().unwrap().label.contains("Waiting for SSH"));
+    assert_eq!(writer.drafts.len(), 2);
 }

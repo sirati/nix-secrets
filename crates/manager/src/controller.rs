@@ -52,6 +52,7 @@ pub struct Controller {
     last_summary: Option<crate::model::DeploySummary>,
     /// Runs operator keypair generators; tests replace it.
     keypair_runner: KeypairRunner,
+    phase: Option<std::sync::Arc<dyn Fn(&'static str) + Send + Sync>>,
 }
 
 pub type KeypairRunner =
@@ -65,6 +66,17 @@ enum BackgroundUpdate {
 }
 
 impl Controller {
+    pub fn set_phase(&mut self, callback: impl Fn(&'static str) + Send + Sync + 'static) {
+        self.phase = Some(std::sync::Arc::new(callback));
+    }
+    fn phase(&self, label: &'static str) {
+        if let Some(callback) = &self.phase {
+            callback(label);
+        }
+    }
+    pub fn set_progress(&mut self, callback: impl Fn(usize, usize, bool) + Send + Sync + 'static) {
+        self.provider.set_progress(callback);
+    }
     /// The schema and decryption provider, for the secret-request channel.
     pub fn schema_and_provider(&self) -> (Schema, AgeCommandProvider) {
         (self.schema.clone(), self.provider.clone())
@@ -81,6 +93,11 @@ impl Controller {
     }
 
     /// Values the last deployment generated on its target, for the notice.
+    /// Capture before an approval operation; terminal success clears active state.
+    pub fn active_approval_id(&self) -> Option<String> {
+        self.active.as_ref().map(|active| active.request.id.clone())
+    }
+
     pub fn take_generated(&mut self) -> Vec<String> {
         std::mem::take(&mut self.last_generated)
     }
@@ -119,6 +136,7 @@ impl Controller {
             last_skipped: Vec::new(),
             last_summary: None,
             keypair_runner: crate::keypair::generate,
+            phase: None,
         })
     }
 
@@ -168,7 +186,12 @@ impl Controller {
         // Values not in the target selection: missing ones and public
         // information the host installs its own default for.
         let skippable = unset::plan_unset(&self.schema, &request.secrets, set)
-            .map(|plan| plan.skippable.into_iter().chain(plan.host_default).collect::<Vec<_>>())
+            .map(|plan| {
+                plan.skippable
+                    .into_iter()
+                    .chain(plan.host_default)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let mut create = Vec::new();
         let mut replace = Vec::new();
@@ -276,6 +299,7 @@ impl Controller {
     }
 
     fn deploy_active(&mut self) -> Result<(), String> {
+        self.phase("Waiting for backend deployment records");
         let active = self.active.as_ref().ok_or("no claimed approval request")?;
         let mut identifiers = active.request.secrets.clone();
         // Missing values never block: two hosts that need each other's
@@ -293,8 +317,13 @@ impl Controller {
         let mut skipped = if allow_partial {
             plan.skippable.clone()
         } else {
-            plan.skippable.iter().filter(|id| plan.reasons.get(*id) == Some(&unset::MissingKind::Optional)).cloned().collect()
+            plan.skippable
+                .iter()
+                .filter(|id| plan.reasons.get(*id) == Some(&unset::MissingKind::Optional))
+                .cloned()
+                .collect()
         };
+        self.materialize_host_defaults(&identifiers, &plan.host_default)?;
         identifiers.retain(|identifier| {
             !skipped.contains(identifier) && !plan.host_default.contains(identifier)
         });
@@ -302,7 +331,11 @@ impl Controller {
         // wait for another host. It is never reopened: each connection costs
         // the operator an agent prompt.
         let opened = {
-            let expected = &self.active.as_ref().expect("active approval exists").expected;
+            let expected = &self
+                .active
+                .as_ref()
+                .expect("active approval exists")
+                .expected;
             expected
                 .secrets
                 .iter()
@@ -327,7 +360,9 @@ impl Controller {
             .prepared
             .is_none()
         {
-            return Err("the connection to the target is gone; request the deployment again".into());
+            return Err(
+                "the connection to the target is gone; request the deployment again".into(),
+            );
         }
         let source_host = self
             .active
@@ -351,8 +386,10 @@ impl Controller {
             .filter(|identifier| unchecked.contains(*identifier))
             .cloned()
             .collect::<Vec<_>>();
-        plan.generate.retain(|(identifier, _)| !unchecked.contains(identifier));
-        plan.shared.retain(|(identifier, _)| !unchecked.contains(identifier));
+        plan.generate
+            .retain(|(identifier, _)| !unchecked.contains(identifier));
+        plan.shared
+            .retain(|(identifier, _)| !unchecked.contains(identifier));
         let generated_sources = plan
             .generate
             .iter()
@@ -375,7 +412,8 @@ impl Controller {
             .as_ref()
             .and_then(|active| active.prepared.as_ref())
             .is_some_and(|prepared| {
-                prepared.state().protocol_version >= nix_secrets_transport::NOT_DEPLOYED_PROTOCOL_VERSION
+                prepared.state().protocol_version
+                    >= nix_secrets_transport::NOT_DEPLOYED_PROTOCOL_VERSION
             });
         if !left_out.is_empty() && !subset_ok {
             return Err(format!(
@@ -431,7 +469,12 @@ impl Controller {
             .filter(|inventory| entries.contains_key(inventory))
             .collect::<BTreeSet<_>>();
         let mut wanted = identifiers.clone();
-        wanted.extend(inventories.iter().filter(|id| !identifiers.contains(id)).cloned());
+        wanted.extend(
+            inventories
+                .iter()
+                .filter(|id| !identifiers.contains(id))
+                .cloned(),
+        );
         let plaintexts = self.decrypt_for_deployment(
             &wanted,
             &generating,
@@ -456,7 +499,12 @@ impl Controller {
                 continue;
             }
             if let Some(source) = derived.get(identifier) {
-                deploy_entries.push(self.derived_entry(identifier, source, &entries, &plaintexts)?);
+                deploy_entries.push(self.derived_entry(
+                    identifier,
+                    source,
+                    &entries,
+                    &plaintexts,
+                )?);
                 continue;
             }
             let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
@@ -467,16 +515,7 @@ impl Controller {
                         .shared_public_id
                         .as_deref()
                         .ok_or("public info has no shared ID")?;
-                    // The stored value, else the leaf's own defaultValue.
-                    let record = match self
-                        .client
-                        .get_public_info(id)
-                        .map_err(|error| error.to_string())?
-                    {
-                        Some(record) => record,
-                        None => public_info::default_record(public)
-                            .ok_or_else(|| format!("required public info is unset: {identifier}"))?,
-                    };
+                    let record = self.materialize_public_default(&path, public)?;
                     nix_secrets_core::schema::validate_ssh_known_hosts(
                         &record.value,
                         &public.ssh_hosts(),
@@ -543,6 +582,7 @@ impl Controller {
             .expect("prepared above");
         let deploy_entries_count = deploy_entries.len() + derive_on_target.len();
         let task_entries_count = task_entries.len();
+        self.phase("Waiting for SSH deployment and target generators");
         let applied = deployment::deploy(
             prepared,
             deploy_entries,
@@ -550,17 +590,18 @@ impl Controller {
             generate_entries,
             derive_on_target,
         )?;
+        self.phase("Saving target results to the backend");
         // Store generated values first: they are the only copy outside the target.
         let stored = self.store_generated(&applied.generated_records);
-        let registered = self.register_public_keys(&source_host, &applied.generated_public_keys, &prefetched);
+        let registered =
+            self.register_public_keys(&source_host, &applied.generated_public_keys, &prefetched);
         let active = self.active.take().expect("approval remains active");
         // Values the target left out because a prerequisite is absent there.
         skipped.extend(applied.not_deployed.keys().cloned());
         plan.missing.extend(
-            applied
-                .not_deployed
-                .iter()
-                .map(|(identifier, reason)| (identifier.clone(), format!("not deployed: {reason}"))),
+            applied.not_deployed.iter().map(|(identifier, reason)| {
+                (identifier.clone(), format!("not deployed: {reason}"))
+            }),
         );
         let skipped = skipped
             .iter()
@@ -589,7 +630,12 @@ impl Controller {
             stored.as_ref().err().or(registered.as_ref().err()),
         );
         self.client
-            .resolve(active.request.id, active.lease_id, stored.is_ok() && registered.is_ok(), Some(summary))
+            .resolve(
+                active.request.id,
+                active.lease_id,
+                stored.is_ok() && registered.is_ok(),
+                Some(summary),
+            )
             .map_err(|error| error.to_string())?;
         let stored = stored?;
         registered?;

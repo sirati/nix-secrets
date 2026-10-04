@@ -2,6 +2,42 @@ use super::*;
 use nix_secrets_core::{PublicInfoRecord, SecretKind};
 
 impl Controller {
+    pub(super) fn materialize_host_defaults(
+        &mut self,
+        requested: &[String],
+        host_defaults: &[String],
+    ) -> Result<(), String> {
+        let selected = selected_host_defaults(requested, host_defaults, |identifier| {
+            let path = SecretPath::parse(identifier).map_err(|e| e.to_string())?;
+            let spec = self.public_spec(&path)?.ok_or("host default is not public information")?;
+            let id = spec.shared_public_id.clone().ok_or("host default has no shared ID")?;
+            Ok((id, (path, spec)))
+        })?;
+        for (path, spec) in selected {
+            self.materialize_public_default(&path, &spec)?;
+        }
+        Ok(())
+    }
+
+    /// Called only while fulfilling an approved deployment, never while browsing.
+    pub(super) fn materialize_public_default(
+        &mut self,
+        path: &SecretPath,
+        spec: &nix_secrets_core::SecretSpec,
+    ) -> Result<PublicInfoRecord, String> {
+        let id = spec.shared_public_id.as_deref().ok_or("public info has no shared ID")?;
+        if let Some(record) = self.client.get_public_info(id).map_err(|e| e.to_string())? {
+            return Ok(record);
+        }
+        let record = default_record(spec).ok_or("required public info is unset")?;
+        nix_secrets_core::schema::validate_ssh_known_hosts(
+            &record.value, &spec.ssh_hosts(), spec.expected_ssh_port.ok_or("missing expected SSH port")?,
+        ).map_err(str::to_owned)?;
+        let write = self.client.set_public_info_if_version(path, record.clone(), None);
+        let stored = self.client.get_public_info(id).map_err(|e| e.to_string())?;
+        materialized_result(record, write.map_err(|e| e.to_string()), stored)
+    }
+
     pub(super) fn public_spec(
         &self,
         path: &SecretPath,
@@ -142,4 +178,69 @@ pub(super) fn default_record(
     let digest = sha2::Sha256::digest(value.as_bytes());
     let version_id = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     Some(nix_secrets_core::PublicInfoRecord { version_id, value })
+}
+
+/// Select defaults before the deployment removes host-installed values.
+/// Resolve only approved requested identifiers, and publish a shared value once.
+fn selected_host_defaults<T>(
+    requested: &[String], defaults: &[String],
+    mut resolve: impl FnMut(&str) -> Result<(String, T), String>,
+) -> Result<Vec<T>, String> {
+    let mut seen = BTreeSet::new();
+    let mut selected = Vec::new();
+    for id in requested.iter().filter(|id| defaults.contains(*id)) {
+        let (shared, value) = resolve(id)?;
+        if seen.insert(shared) { selected.push(value); }
+    }
+    Ok(selected)
+}
+
+/// A concurrent operator write wins over the schema default. Absence after a
+/// rejected write, or a missing read-back after success, is always an error.
+fn materialized_result(
+    proposed: PublicInfoRecord,
+    write: Result<(), String>,
+    stored: Option<PublicInfoRecord>,
+) -> Result<PublicInfoRecord, String> {
+    match (write, stored) {
+        (_, Some(record)) => Ok(record),
+        (Err(error), None) => Err(error),
+        (Ok(()), None) => Err(format!("public default save failed read-back verification for version {}", proposed.version_id)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn record(version: &str) -> PublicInfoRecord {
+        PublicInfoRecord { version_id: version.into(), value: "public known-hosts fixture".into() }
+    }
+    #[test]
+    fn host_installed_defaults_are_selected_before_target_exclusion() {
+        let requested = vec!["host.public-default".into(), "host.secret".into(), "other.shared-default".into()];
+        let defaults = Vec::from(["host.public-default".into(), "other.shared-default".into(), "unrequested.default".into()]);
+        let selected = selected_host_defaults(&requested, &defaults, |id| {
+            assert_ne!(id, "host.secret");
+            assert_ne!(id, "unrequested.default");
+            Ok(("shared/public-id".into(), id.to_owned()))
+        }).unwrap();
+        assert_eq!(selected, ["host.public-default"]);
+        let sent = requested.iter().filter(|id| !defaults.contains(*id)).collect::<Vec<_>>();
+        assert_eq!(sent, [&"host.secret".to_string()]);
+        assert!(!selected.is_empty()); // Host-installed exclusion cannot omit store sync.
+    }
+
+    #[test]
+    fn materialization_preserves_a_concurrent_explicit_value() {
+        let explicit = record("operator-version");
+        assert_eq!(materialized_result(record("default-version"), Err("CAS conflict".into()), Some(explicit.clone())).unwrap(), explicit);
+        assert_eq!(materialized_result(record("default-version"), Ok(()), Some(explicit.clone())).unwrap(), explicit);
+    }
+    #[test]
+    fn materialization_requires_durable_readback() {
+        let default = record("default-version");
+        assert_eq!(materialized_result(default.clone(), Ok(()), Some(default.clone())).unwrap(), default);
+        assert!(materialized_result(default.clone(), Ok(()), None).is_err());
+        assert_eq!(materialized_result(default, Err("write refused".into()), None).unwrap_err(), "write refused");
+    }
 }
