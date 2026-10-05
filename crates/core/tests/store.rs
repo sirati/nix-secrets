@@ -415,3 +415,79 @@ fn schema_with_many_secrets(count: usize) -> nix_secrets_core::Schema {
         }
     })).unwrap()
 }
+
+#[test]
+fn public_info_accepts_default_sha256_and_editor_versions_but_rejects_other_formats() {
+    use nix_secrets_core::PublicInfoRecord;
+    use sha2::{Digest, Sha256};
+    let directory = tempfile::tempdir().unwrap();
+    let store = SecretStore::new(directory.path().join("nix-secrets.toml"));
+    let key = ED25519_PUBLIC.split_ascii_whitespace().nth(1).unwrap();
+    let value = format!("[box.example]:23 ssh-ed25519 {key}\n");
+    let document = serde_json::json!({ "host": {
+        "metadata": { "socketPath":"/run/backend.sock", "deployment": {"host":"host", "destination":"forward@host", "port":22}},
+        "services": {"backup": {"known-hosts": {
+            "kind":"public-info", "sharedPublicId":"storage-box/known-hosts",
+            "expectedSshHost":"box.example", "expectedSshPort":23,
+            "defaultValue":value,
+            "destination":{"path":"/persistent/public-info/storage-box/known-hosts", "category":"public-info", "owner":"root", "group":"root", "mode":"0644", "contentType":"ssh-known-hosts"},
+            "consumerUnits":[]
+        }}}
+    }});
+    let schema = nix_secrets_core::Schema::from_json(&document.to_string()).unwrap();
+    let path = SecretPath::parse("host.services.backup.known-hosts").unwrap();
+    for invalid in [
+        "",
+        "a",
+        &"0".repeat(31),
+        &"0".repeat(33),
+        &"0".repeat(63),
+        &"0".repeat(65),
+        &"x".repeat(32),
+        &"x".repeat(64),
+    ] {
+        let record = PublicInfoRecord {
+            version_id: invalid.into(),
+            value: value.clone(),
+        };
+        assert!(matches!(
+            store.set_public_info_if_version(&schema, &path, record, None),
+            Err(StoreError::InvalidPublicInfo)
+        ));
+        assert_eq!(
+            store.get_public_info("storage-box/known-hosts").unwrap(),
+            None
+        );
+    }
+    let version_id = Sha256::digest(value.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(version_id.len(), 64);
+    let default = PublicInfoRecord {
+        version_id,
+        value: value.clone(),
+    };
+    store
+        .set_public_info_if_version(&schema, &path, default.clone(), None)
+        .unwrap();
+    assert_eq!(
+        store.get_public_info("storage-box/known-hosts").unwrap(),
+        Some(default.clone())
+    );
+    let editor = PublicInfoRecord {
+        version_id: "01".repeat(16),
+        value,
+    };
+    assert!(matches!(
+        store.set_public_info_if_version(&schema, &path, editor.clone(), None),
+        Err(StoreError::VersionConflict)
+    ));
+    store
+        .set_public_info_if_version(&schema, &path, editor.clone(), Some(&default.version_id))
+        .unwrap();
+    assert_eq!(
+        store.get_public_info("storage-box/known-hosts").unwrap(),
+        Some(editor)
+    );
+}

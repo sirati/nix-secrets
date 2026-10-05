@@ -30,7 +30,10 @@ impl SecretStore {
             return Err(StoreError::InvalidPublicInfo);
         };
         let hosts = spec.ssh_hosts();
-        if value.version_id.len() != 32
+        // Explicit edits use 16 random bytes (32 hex characters); host
+        // defaults use the full SHA-256 content hash (64 hex characters).
+        // Both are persisted unchanged so target-installed defaults match.
+        if !matches!(value.version_id.len(), 32 | 64)
             || !value.version_id.bytes().all(|b| b.is_ascii_hexdigit())
             || validate_ssh_known_hosts(&value.value, &hosts, port).is_err()
         {

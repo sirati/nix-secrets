@@ -35,7 +35,7 @@ impl Controller {
         ).map_err(str::to_owned)?;
         let write = self.client.set_public_info_if_version(path, record.clone(), None);
         let stored = self.client.get_public_info(id).map_err(|e| e.to_string())?;
-        materialized_result(record, write.map_err(|e| e.to_string()), stored)
+        materialized_result(record, write.map_err(|e| format!("materializing public-info default {path} (shared ID {id}): {e}")), stored)
     }
 
     pub(super) fn public_spec(
@@ -242,5 +242,40 @@ mod tests {
         assert_eq!(materialized_result(default.clone(), Ok(()), Some(default.clone())).unwrap(), default);
         assert!(materialized_result(default.clone(), Ok(()), None).is_err());
         assert_eq!(materialized_result(default, Err("write refused".into()), None).unwrap_err(), "write refused");
+    }
+    #[test]
+    fn approved_host_default_is_persisted_with_exact_target_sha256_version() {
+        let value = "[box.example]:23 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f\n";
+        let document = serde_json::json!({ "host": {
+            "metadata": {"socketPath":"/run/backend.sock", "deployment":{"host":"host", "destination":"forward@host", "port":22}},
+            "services": {"backup": {"known-hosts": {
+                "kind":"public-info", "sharedPublicId":"storage-box/known-hosts",
+                "expectedSshHost":"box.example", "expectedSshPort":23, "defaultValue":value,
+                "destination":{"path":"/persistent/public-info/storage-box/known-hosts", "category":"public-info", "owner":"root", "group":"root", "mode":"0644", "contentType":"ssh-known-hosts"},
+                "consumerUnits":[]
+            }}}
+        }});
+        let schema = nix_secrets_core::Schema::from_json(&document.to_string()).unwrap();
+        let path = SecretPath::parse("host.services.backup.known-hosts").unwrap();
+        let spec = schema.secret(&path).unwrap();
+        let proposed = default_record(&spec).unwrap();
+        assert_eq!(proposed.version_id.len(), 64);
+        let dir = tempfile::tempdir().unwrap();
+        let store = nix_secrets_core::SecretStore::new(dir.path().join("nix-secrets.toml"));
+        let write = store.set_public_info_if_version(&schema, &path, proposed.clone(), None);
+        let stored = store.get_public_info("storage-box/known-hosts").unwrap();
+        assert_eq!(
+            materialized_result(proposed.clone(), write.map_err(|e| e.to_string()), stored)
+                .unwrap(),
+            proposed
+        );
+        assert_eq!(
+            store
+                .get_public_info("storage-box/known-hosts")
+                .unwrap()
+                .unwrap()
+                .value,
+            value
+        );
     }
 }
