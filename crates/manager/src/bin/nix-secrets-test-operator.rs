@@ -39,7 +39,15 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+struct RemoteOptions {
+    destination: String,
+    repository: PathBuf,
+    socket: PathBuf,
+    control: PathBuf,
+}
+
 struct Options {
+    remote: Option<RemoteOptions>,
     socket: PathBuf,
     schema: PathBuf,
     identity: PathBuf,
@@ -61,6 +69,7 @@ fn parse() -> Result<Options, String> {
     let mut requests = 1;
     let mut set = Vec::new();
     let mut launcher = None;
+    let (mut remote_backend, mut remote_repository, mut remote_socket, mut control_socket) = (None,None,None,None);
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -68,6 +77,10 @@ fn parse() -> Result<Options, String> {
                 .ok_or(format!("{argument} requires a value"))
         };
         match argument.as_str() {
+            "--remote-backend" => remote_backend = Some(value()?),
+            "--remote-repository" => remote_repository = Some(PathBuf::from(value()?)),
+            "--remote-backend-socket" => remote_socket = Some(PathBuf::from(value()?)),
+            "--control-socket" => control_socket = Some(PathBuf::from(value()?)),
             "--backend-socket" => socket = Some(PathBuf::from(value()?)),
             "--schema-file" => schema = Some(PathBuf::from(value()?)),
             "--secret-identity" => identity = Some(PathBuf::from(value()?)),
@@ -108,7 +121,16 @@ fn parse() -> Result<Options, String> {
             other => return Err(format!("unexpected argument {other}")),
         }
     }
+    let remote = if remote_backend.is_some() || remote_repository.is_some() || remote_socket.is_some() || control_socket.is_some() {
+        Some(RemoteOptions {
+            destination: remote_backend.ok_or("--remote-backend is required for remote mode")?,
+            repository: remote_repository.ok_or("--remote-repository is required for remote mode")?,
+            socket: remote_socket.ok_or("--remote-backend-socket is required for remote mode")?,
+            control: control_socket.ok_or("--control-socket is required for remote mode")?,
+        })
+    } else { None };
     Ok(Options {
+        remote,
         socket: socket.ok_or("--backend-socket is required")?,
         schema: schema.ok_or("--schema-file is required")?,
         identity: identity.ok_or("--secret-identity is required")?,
@@ -170,12 +192,8 @@ impl Frontend for Scripted {
         // The host-key question and the deployment dialog are separate steps
         // of the same request.
         let stage = if !request.host_mutations.is_empty() {
-            2
-        } else if request.host_key.is_some() {
-            0
-        } else {
-            1
-        };
+            if request.host_mutations_before_deploy { 1 } else { 3 }
+        } else if request.host_key.is_some() { 0 } else { 2 };
         let step = (
             request.id.clone(),
             stage,
@@ -186,6 +204,9 @@ impl Frontend for Scripted {
                 self.queued.push_back(UiEvent::Character('n'));
             }
             return Ok(());
+        }
+        for warning in &request.connection_warnings {
+            println!("connection-warning: {}", warning.replace(['\n', '\r'], " | "));
         }
         println!(
             "dialog: {} host-key={} allow-partial={} create={:?} replace={:?} generate={:?} missing={:?} skippable={:?}",
@@ -247,8 +268,19 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let options = parse()?;
     let schema = Schema::from_json(&std::fs::read_to_string(&options.schema)?)?;
+    let (backend, route, _remote_connection) = if let Some(remote) = &options.remote {
+        let ssh_arguments = vec![
+            "-T".into(), "-o".into(), "BatchMode=yes".into(), "-o".into(), "StrictHostKeyChecking=yes".into(),
+            "-i".into(), options.identity.clone().into_os_string(), "-o".into(),
+            format!("UserKnownHostsFile={}",options.known_hosts.display()).into(),
+            remote.destination.clone().into(),
+        ];
+        let (connection,route) = nix_secrets_manager::startup::connect_remote(
+            &remote.repository,&ssh_arguments,&options.socket,&remote.socket,&remote.control,Duration::from_secs(60))?;
+        (BackendClient::new(connection.stream.try_clone()?),Some(route),Some(connection))
+    } else { (BackendClient::new(connect_verified(&options.socket)?),None,None) };
     let controller = Controller::new(
-        BackendClient::new(connect_verified(&options.socket)?),
+        backend,
         schema,
         match &options.launcher {
             // The 1Password provider, as the TUI runs it; the test's `op`
@@ -261,6 +293,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         vec![options.known_hosts.clone()],
     )?;
     let mut controller = controller;
+    if let Some(route) = route { controller.set_backend_route(route); }
     for (identifier, value) in &options.set {
         nix_secrets_manager::ui::SecretWriter::write(
             &mut controller,

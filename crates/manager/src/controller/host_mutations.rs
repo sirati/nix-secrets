@@ -10,8 +10,28 @@ use std::collections::BTreeMap;
 pub(super) struct HostMutationBatch {
     pub mutations: Vec<HostMutation>,
     pub followups: BTreeMap<String, BTreeSet<String>>,
+    /// Trust already installed by the original deployment, grouped with
+    /// generated-key destinations when their separate permission is accepted.
+    pub committed_followups: BTreeMap<String, BTreeSet<String>>,
+}
+#[derive(Clone)]
+pub(super) struct IdentityPublication {
+    pub path: SecretPath,
+    pub shared_id: String,
+    pub record: PublicInfoRecord,
+    pub request_id: String,
+    pub lease_id: u64,
+    pub followups: BTreeMap<String, BTreeSet<String>>,
+}
+impl IdentityPublication {
+    pub fn was_sent(&self, selected: &[String], not_deployed: &BTreeMap<String, String>) -> bool {
+        selected.contains(&self.path.to_string())
+            && !not_deployed.contains_key(&self.path.to_string())
+    }
 }
 pub(super) struct PendingHostMutations {
+    pub before_deploy: bool,
+    pub publication: Option<IdentityPublication>,
     pub batch: HostMutationBatch,
     pub token: String,
     pub request_id: String,
@@ -161,6 +181,139 @@ pub(super) fn named_key_fingerprints(value: &str) -> Vec<String> {
 }
 
 impl Controller {
+    pub(super) fn producer_identity_in_scope(&self, request: &ApprovalRequest) -> Option<String> {
+        let identifier = self
+            .schema
+            .0
+            .get(&request.target)?
+            .metadata
+            .deployment
+            .publish_host_identity_to
+            .as_ref()?;
+        request
+            .secrets
+            .contains(identifier)
+            .then(|| identifier.clone())
+    }
+    fn deployment_details_after_identity(&mut self) -> Result<UiApproval, String> {
+        let active = self.active.as_ref().ok_or("no claimed approval request")?;
+        let request = active.request.clone();
+        let state = active
+            .prepared
+            .as_ref()
+            .ok_or("the authenticated deployment connection is gone")?
+            .state()
+            .clone();
+        let set = self.plan_set(&request.secrets)?;
+        self.approval_details(&request, Some(&state), &set)
+    }
+    pub(super) fn prepare_identity_for_active(&mut self) -> Result<UiApproval, String> {
+        let active = self.active.as_ref().ok_or("no claimed approval request")?;
+        let request = active.request.clone();
+        let lease_id = active.lease_id;
+        let identity = active.identity.clone();
+        let Some(identifier) = self.producer_identity_in_scope(&request) else {
+            return self.deployment_details_after_identity();
+        };
+        if active.prepared.is_none() || !active.target_approved {
+            return Err(
+                "host identity publication requires the original authenticated connection".into(),
+            );
+        }
+        self.client
+            .renew_for(request.id.clone(), lease_id, 900_000)
+            .map_err(|e| format!("host identity preparation lease was lost: {e}"))?;
+        let mut batch = HostMutationBatch::default();
+        self.stage_host_identity(&request.target, &identity, &mut batch)?;
+        let path = SecretPath::parse(&identifier).map_err(|e| e.to_string())?;
+        let spec = self
+            .public_spec(&path)?
+            .ok_or("producer identity destination is not public information")?;
+        let shared_id = spec
+            .shared_public_id
+            .ok_or("producer identity destination has no shared ID")?;
+        let record = match batch.mutations.iter().find_map(|mutation| match mutation {
+            HostMutation::Identity { proposed, .. } => Some(proposed.clone()),
+            _ => None,
+        }) {
+            Some(record) => record,
+            None => self
+                .client
+                .get_public_info(&shared_id)
+                .map_err(|e| e.to_string())?
+                .ok_or("verified identity record disappeared")?,
+        };
+        let followups = std::mem::take(&mut batch.followups);
+        let publication = IdentityPublication {
+            path,
+            shared_id,
+            record,
+            request_id: request.id.clone(),
+            lease_id,
+            followups,
+        };
+        if !batch.reviews().is_empty() {
+            let pending = PendingHostMutations {
+                batch,
+                token: random_token()?,
+                request_id: request.id,
+                lease_id,
+                before_deploy: true,
+                publication: Some(publication),
+                generated: vec![],
+                skipped: vec![],
+            };
+            let review = self.host_mutation_review(&pending)?;
+            self.host_mutations = Some(pending);
+            return Ok(review);
+        }
+        self.apply_host_mutations(batch)?;
+        self.identity_publication = Some(publication);
+        self.deployment_details_after_identity()
+    }
+    pub(super) fn verify_identity_publication(
+        &mut self,
+        selected: &[String],
+    ) -> Result<(), String> {
+        let Some(publication) = &self.identity_publication else {
+            return Ok(());
+        };
+        let active = self.active.as_ref().ok_or("no claimed approval request")?;
+        if publication.request_id != active.request.id || publication.lease_id != active.lease_id {
+            return Err("prepared identity belongs to another deployment request".into());
+        }
+        if selected.contains(&publication.path.to_string())
+            && self
+                .client
+                .get_public_info(&publication.shared_id)
+                .map_err(|e| e.to_string())?
+                != Some(publication.record.clone())
+        {
+            return Err(
+                "host identity changed after preparation; request a new deployment review".into(),
+            );
+        }
+        Ok(())
+    }
+    fn submit_host_followups(
+        &mut self,
+        followups: BTreeMap<String, BTreeSet<String>>,
+    ) -> Result<(), String> {
+        for (target, identifiers) in followups {
+            if identifiers.is_empty() {
+                continue;
+            }
+            self.client
+                .submit_approval(ApprovalRequest {
+                    id: format!("pubkey-{}", random_token()?),
+                    target,
+                    secrets: identifiers.into_iter().collect(),
+                    allow_partial: false,
+                })
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
     pub(super) fn stage_host_identity(
         &mut self,
         source: &str,
@@ -214,8 +367,8 @@ impl Controller {
             value,
         };
         let mut consumers = BTreeSet::new();
-        // Only already deployed reporter hosts, plus the current source. A new
-        // host receives the current shared value in its own first deployment.
+        // The source receives this value in its original deployment. Only
+        // other already deployed reporters need a separate deployment consent.
         for row in crate::tree::rows_with_public(&self.schema, &BTreeSet::new(), &BTreeSet::new()) {
             let Some(identifier) = row.path else {
                 continue;
@@ -232,7 +385,7 @@ impl Controller {
             let Some(consumer) = path.components().first() else {
                 continue;
             };
-            if consumer == source || self.has_reporter_metadata(consumer)? {
+            if consumer != source && self.has_reporter_metadata(consumer)? {
                 consumers.insert(path.to_string());
                 batch.followup(&path)?;
             }
@@ -247,16 +400,12 @@ impl Controller {
         Ok(())
     }
     fn has_reporter_metadata(&mut self, host: &str) -> Result<bool, String> {
-        for row in crate::tree::rows_with_public(&self.schema, &BTreeSet::new(), &BTreeSet::new()) {
-            let Some(identifier) = row.path else {
-                continue;
-            };
-            let Ok(path) = SecretPath::parse(&identifier) else {
-                continue;
-            };
-            if path.components().first().map(String::as_str) != Some(host) {
-                continue;
-            }
+        for identifier in self
+            .schema
+            .deployable_identifiers(host)
+            .map_err(|e| e.to_string())?
+        {
+            let path = SecretPath::parse(&identifier).map_err(|e| e.to_string())?;
             let Ok(LeafSpec::Generated(spec)) = self.schema.leaf(&path) else {
                 continue;
             };
@@ -277,51 +426,62 @@ impl Controller {
     pub(super) fn apply_host_mutations(&mut self, batch: HostMutationBatch) -> Result<(), String> {
         // Check the complete review against current versions before any write.
         // CAS repeats that check under the store lock; never silently rebase.
-        for mutation in &batch.mutations {
-            let unchanged = match mutation {
-                HostMutation::Generated { path, previous, .. } => {
-                    self.client
-                        .generated_public_key(path)
-                        .map_err(|e| e.to_string())?
-                        == *previous
-                }
-                HostMutation::Attached {
-                    path,
-                    version,
-                    previous,
-                    ..
-                } => self
-                    .client
-                    .get(path)
-                    .map_err(|e| e.to_string())?
-                    .is_some_and(|old| old.version_id == *version && old.public_key == *previous),
-                HostMutation::Inventory {
-                    path,
-                    previous_version,
-                    ..
-                } => {
-                    self.client
+        let checked = (|| -> Result<(), String> {
+            for mutation in &batch.mutations {
+                let unchanged = match mutation {
+                    HostMutation::Generated { path, previous, .. } => {
+                        self.client
+                            .generated_public_key(path)
+                            .map_err(|e| e.to_string())?
+                            == *previous
+                    }
+                    HostMutation::Attached {
+                        path,
+                        version,
+                        previous,
+                        ..
+                    } => self
+                        .client
                         .get(path)
                         .map_err(|e| e.to_string())?
-                        .map(|old| old.version_id)
-                        == *previous_version
+                        .is_some_and(|old| {
+                            old.version_id == *version && old.public_key == *previous
+                        }),
+                    HostMutation::Inventory {
+                        path,
+                        previous_version,
+                        ..
+                    } => {
+                        self.client
+                            .get(path)
+                            .map_err(|e| e.to_string())?
+                            .map(|old| old.version_id)
+                            == *previous_version
+                    }
+                    HostMutation::Identity {
+                        shared_id,
+                        previous,
+                        ..
+                    } => {
+                        self.client
+                            .get_public_info(shared_id)
+                            .map_err(|e| e.to_string())?
+                            == *previous
+                    }
+                };
+                if !unchanged {
+                    return Err(
+                        "host-provided values changed after review; request new approval".into(),
+                    );
                 }
-                HostMutation::Identity {
-                    shared_id,
-                    previous,
-                    ..
-                } => {
-                    self.client
-                        .get_public_info(shared_id)
-                        .map_err(|e| e.to_string())?
-                        == *previous
-                }
-            };
-            if !unchanged {
-                return Err(
-                    "host-provided values changed after review; request new approval".into(),
-                );
             }
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            // The original deployment already installed this trust value;
+            // preserve only those consumer consents, never failed mutations.
+            self.submit_host_followups(batch.committed_followups)?;
+            return Err(error);
         }
         let mut changed = BTreeSet::new();
         let result = (|| -> Result<(), String> {
@@ -432,23 +592,14 @@ impl Controller {
         })();
         // Preserve consent requests for writes already completed if a later
         // CAS fails. No consumer connection or deployment occurs here.
+        let mut followups = batch.committed_followups;
         for (target, identifiers) in batch.followups {
-            let secrets = identifiers
-                .into_iter()
-                .filter(|id| changed.contains(id))
-                .collect::<Vec<_>>();
-            if secrets.is_empty() {
-                continue;
-            }
-            self.client
-                .submit_approval(ApprovalRequest {
-                    id: format!("pubkey-{}", random_token()?),
-                    target,
-                    secrets,
-                    allow_partial: false,
-                })
-                .map_err(|e| e.to_string())?;
+            followups
+                .entry(target)
+                .or_default()
+                .extend(identifiers.into_iter().filter(|id| changed.contains(id)));
         }
+        self.submit_host_followups(followups)?;
         result
     }
     pub(super) fn host_mutation_review(
@@ -463,6 +614,7 @@ impl Controller {
             .clone();
         let set = self.plan_set(&request.secrets)?;
         let mut review = self.approval_details(&request, None, &set)?;
+        review.host_mutations_before_deploy = pending.before_deploy;
         review.host_mutations = pending.batch.reviews();
         review.host_mutation_token = Some(pending.token.clone());
         Ok(review)
@@ -473,6 +625,7 @@ impl Controller {
         skipped: Vec<String>,
     ) -> Result<(), String> {
         let active = self.active.take().ok_or("no claimed approval request")?;
+        self.identity_publication = None;
         let summary = deployment_summary(&active.request.target, &generated, &skipped, None);
         self.client
             .resolve(active.request.id, active.lease_id, true, Some(summary))
@@ -504,6 +657,7 @@ impl Controller {
                 .renew_for(active.request.id.clone(), active.lease_id, 900_000)
         {
             self.host_mutations = None;
+            self.identity_publication = None;
             self.active = None;
             return Err(format!(
                 "host-provided change approval lease was lost: {error}"
@@ -511,8 +665,22 @@ impl Controller {
         }
         let pending = self.host_mutations.take().expect("pending checked");
         if !accepted {
+            self.submit_host_followups(pending.batch.committed_followups)?;
             let active = self.active.take().expect("active checked");
-            self.client.resolve(active.request.id, active.lease_id, false, Some("target deployment completed; host-provided changes rejected, existing values kept".into())).map_err(|e| e.to_string())?;
+            self.identity_publication = None;
+            let reason = if pending.before_deploy {
+                "host-provided identity change rejected; no deployment sent and existing values kept"
+            } else {
+                "target deployment completed; host-provided changes rejected, existing values kept"
+            };
+            self.client
+                .resolve(
+                    active.request.id,
+                    active.lease_id,
+                    false,
+                    Some(reason.into()),
+                )
+                .map_err(|e| e.to_string())?;
             return Ok(None);
         }
         if let Err(error) = self.apply_host_mutations(pending.batch) {
@@ -525,6 +693,24 @@ impl Controller {
                 );
             }
             return Err(error);
+        }
+        if pending.before_deploy {
+            self.identity_publication = pending.publication;
+            return match self.deployment_details_after_identity() {
+                Ok(review) => Ok(Some(review)),
+                Err(error) => {
+                    self.identity_publication = None;
+                    if let Some(active) = self.active.take() {
+                        let _ = self.client.resolve(
+                            active.request.id,
+                            active.lease_id,
+                            false,
+                            Some(error.clone()),
+                        );
+                    }
+                    Err(error)
+                }
+            };
         }
         self.complete_host_deployment(pending.generated, pending.skipped)?;
         Ok(None)

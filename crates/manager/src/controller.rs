@@ -38,8 +38,11 @@ pub struct Controller {
     schema: Schema,
     provider: AgeCommandProvider,
     known_hosts: Vec<PathBuf>,
+    backend_route: Option<std::sync::Arc<nix_secrets_transport::BackendRoute>>,
+    connection_warnings: Vec<String>,
     active: Option<ActiveApproval>,
     host_mutations: Option<host_mutations::PendingHostMutations>,
+    identity_publication: Option<host_mutations::IdentityPublication>,
     background: Option<Receiver<BackgroundUpdate>>,
     pending_rows: Option<Vec<Row>>,
     pending_profiles: Option<ProfileSnapshot>,
@@ -95,6 +98,19 @@ impl Controller {
 
     /// Values the last deployment generated on its target, for the notice.
     /// Capture before an approval operation; terminal success clears active state.
+    pub fn set_backend_route(
+        &mut self,
+        route: std::sync::Arc<nix_secrets_transport::BackendRoute>,
+    ) {
+        self.backend_route = Some(route);
+    }
+
+    pub fn host_mutations_before_deploy(&self) -> bool {
+        self.host_mutations
+            .as_ref()
+            .is_some_and(|pending| pending.before_deploy)
+    }
+
     pub fn active_approval_id(&self) -> Option<String> {
         self.active.as_ref().map(|active| active.request.id.clone())
     }
@@ -127,8 +143,11 @@ impl Controller {
             schema,
             provider,
             known_hosts,
+            backend_route: None,
+            connection_warnings: vec![],
             active: None,
             host_mutations: None,
+            identity_publication: None,
             background: None,
             pending_rows: None,
             pending_profiles: None,
@@ -280,6 +299,8 @@ impl Controller {
             },
             host_key: None,
             host_mutations: vec![],
+            host_mutations_before_deploy: false,
+            connection_warnings: self.connection_warnings.clone(),
             host_mutation_token: None,
             tasks,
             generate: plan
@@ -523,7 +544,14 @@ impl Controller {
                         .shared_public_id
                         .as_deref()
                         .ok_or("public info has no shared ID")?;
-                    let record = self.materialize_public_default(&path, public)?;
+                    let record = match self
+                        .identity_publication
+                        .as_ref()
+                        .filter(|publication| publication.path == path)
+                    {
+                        Some(publication) => publication.record.clone(),
+                        None => self.materialize_public_default(&path, public)?,
+                    };
                     nix_secrets_core::schema::validate_ssh_known_hosts(
                         &record.value,
                         &public.ssh_hosts(),
@@ -581,6 +609,7 @@ impl Controller {
                 }
             }
         }
+        self.verify_identity_publication(&identifiers)?;
         let prepared = self
             .active
             .as_mut()
@@ -615,13 +644,11 @@ impl Controller {
             &prefetched,
             &mut batch,
         )?;
-        let identity = self
-            .active
-            .as_ref()
-            .expect("approval remains active")
-            .identity
-            .clone();
-        self.stage_host_identity(&source_host, &identity, &mut batch)?;
+        if let Some(publication) = self.identity_publication.take() {
+            if publication.was_sent(&identifiers, &applied.not_deployed) {
+                batch.committed_followups = publication.followups;
+            }
+        }
         // Values the target left out because a prerequisite is absent there.
         skipped.extend(applied.not_deployed.keys().cloned());
         plan.missing.extend(
@@ -652,6 +679,8 @@ impl Controller {
         if !batch.reviews().is_empty() {
             let pending = host_mutations::PendingHostMutations {
                 batch,
+                before_deploy: false,
+                publication: None,
                 request_id: self
                     .active
                     .as_ref()

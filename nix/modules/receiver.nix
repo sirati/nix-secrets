@@ -40,6 +40,11 @@ in
       default = "nix-secrets-deploy";
       description = "Group allowed to reach the fixed deployment socket.";
     };
+    auditDirectory = lib.mkOption {
+      type = lib.types.strMatching "/.*";
+      default = "/run/nix-secrets/audit";
+      description = "Root-owned directory for value-free deployment audit records.";
+    };
     auditGroup = lib.mkOption {
       type = lib.types.str;
       default = "root";
@@ -84,7 +89,7 @@ in
           "--age"
           "${pkgs.age}/bin/age"
           "--audit-file"
-          "/run/nix-secrets/audit/%i.json"
+          "${cfg.auditDirectory}/%i.json"
           "--audit-group"
           cfg.auditGroup
         ] ++ lib.optionals (cfg.postDeployCommand != null) [ "--post-deploy" cfg.postDeployCommand ]);
@@ -109,7 +114,7 @@ in
         ReadWritePaths = [
           "/persistent/secrets"
           "/persistent/public-info"
-          "/run/nix-secrets/audit"
+          cfg.auditDirectory
         ];
         RestrictAddressFamilies = [
           "AF_UNIX"
@@ -133,7 +138,7 @@ in
 
     systemd.tmpfiles.rules = [
       "d /run/nix-secrets 0711 root root - -"
-      "d /run/nix-secrets/audit 0750 root ${cfg.auditGroup} - -"
+      "d ${cfg.auditDirectory} 0750 root ${cfg.auditGroup} - -"
       "d /persistent/secrets 0711 root root - -"
       "d /persistent/public-info 0711 root root - -"
       "d /persistent/secrets/.generations 0711 root root - -"

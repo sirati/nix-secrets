@@ -176,9 +176,11 @@ fn unknown_key_requires_explicit_acceptance() {
         assert_eq!(identity.keys[0].encoded, "NEW");
         Decision::Accept
     };
-    assert!(verifier()
-        .verify_with("host", 22, &mut accept, &fake)
-        .is_ok());
+    assert!(
+        verifier()
+            .verify_with("host", 22, &mut accept, &fake)
+            .is_ok()
+    );
 }
 
 /// ssh-keyscan reports a host's keys in no fixed order. The identity an
@@ -273,9 +275,11 @@ fn a_non_default_port_is_quoted_for_ssh_keygen() {
         }],
         offered: vec![],
     };
-    assert!(changed
-        .to_string()
-        .contains("`ssh-keygen -R '[ns1]:2222' -f /k`"));
+    assert!(
+        changed
+            .to_string()
+            .contains("`ssh-keygen -R '[ns1]:2222' -f /k`")
+    );
 }
 
 #[test]
@@ -526,9 +530,11 @@ fn scanner_inactivity_timeout_leaves_a_whole_second_for_drain() {
         std::time::Duration::from_millis(2999),
         std::time::Duration::from_secs(2),
     ] {
-        assert!(verifier()
-            .preflight_with("host", 22, &Budget(remaining))
-            .is_ok());
+        assert!(
+            verifier()
+                .preflight_with("host", 22, &Budget(remaining))
+                .is_ok()
+        );
     }
 }
 
@@ -583,20 +589,26 @@ fn complementary_approved_subsets_accumulate_but_later_replacements_do_not() {
         let result = verifier().preflight_approved_with("host", 22, &approved, &runner);
         assert_eq!(*runner.scans.borrow(), 2);
         if replacement {
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("changed after approval"));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("changed after approval")
+            );
         } else {
             let checked = result.unwrap();
             assert_eq!(checked.identity, approved);
             assert_eq!(checked.known_host_lines.len(), 2);
-            assert!(checked
-                .known_host_lines
-                .contains(&"host ssh-rsa RSA".to_owned()));
-            assert!(checked
-                .known_host_lines
-                .contains(&"host ssh-ed25519 ED".to_owned()));
+            assert!(
+                checked
+                    .known_host_lines
+                    .contains(&"host ssh-rsa RSA".to_owned())
+            );
+            assert!(
+                checked
+                    .known_host_lines
+                    .contains(&"host ssh-ed25519 ED".to_owned())
+            );
         }
     }
 }
@@ -783,11 +795,13 @@ fn matching_known_key_cannot_hide_replacement_during_approval() {
         find: b"host ssh-ed25519 ED\nhost ssh-rsa RSA\n".to_vec(),
         scan: b"host ssh-ed25519 ED\nhost ssh-rsa REPLACED\n".to_vec(),
     };
-    assert!(verifier()
-        .preflight_approved_with("host", 22, &approved, &runner)
-        .unwrap_err()
-        .to_string()
-        .contains("changed after approval"));
+    assert!(
+        verifier()
+            .preflight_approved_with("host", 22, &approved, &runner)
+            .unwrap_err()
+            .to_string()
+            .contains("changed after approval")
+    );
 }
 
 #[test]
@@ -807,4 +821,282 @@ fn discovery_type_names_are_accepted_by_actual_openssh_without_network_access() 
         );
         assert!(diagnostic.contains("usage:"), "{kind}: {diagnostic}");
     }
+}
+
+struct DirectComparison {
+    data: &'static str,
+    success: bool,
+}
+impl Runner for DirectComparison {
+    fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+        panic!("unbounded direct probe");
+    }
+    fn run_bounded(
+        &self,
+        program: &OsStr,
+        args: &[OsString],
+        timeout: std::time::Duration,
+    ) -> Result<Output, HostKeyError> {
+        assert_eq!(program, OsStr::new("ssh-keyscan"));
+        assert!(timeout <= std::time::Duration::from_secs(3));
+        assert!(
+            args.windows(2)
+                .any(|a| a == [OsString::from("-p"), OsString::from("22222")])
+        );
+        assert_eq!(args.last().unwrap(), "real.target");
+        Ok(Output {
+            success: self.success,
+            stdout: self.data.as_bytes().to_vec(),
+            diagnostic: "unreachable".into(),
+        })
+    }
+}
+#[test]
+fn direct_probe_is_supplemental_bounded_and_order_independent() {
+    let tunnel = parse_key_lines(b"loopback ssh-ed25519 ED\nloopback ssh-rsa RSA\n");
+    let matching = DirectComparison {
+        data: "real.target ssh-rsa RSA\nreal.target ssh-ed25519 ED\n",
+        success: true,
+    };
+    assert!(
+        verifier()
+            .compare_direct("real.target", 22222, &tunnel, &matching)
+            .unwrap()
+            .is_empty()
+    );
+    for probe in [
+        DirectComparison {
+            data: "",
+            success: false,
+        },
+        DirectComparison {
+            data: "real.target ssh-ed25519 ED\n",
+            success: false,
+        },
+    ] {
+        assert_eq!(
+            verifier()
+                .compare_direct("real.target", 22222, &tunnel, &probe)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+#[test]
+fn direct_probe_never_hides_mismatch_behind_matching_key_or_partial_failure() {
+    let tunnel = parse_key_lines(b"loopback ssh-ed25519 ED\nloopback ssh-rsa RSA\n");
+    for success in [true, false] {
+        let probe = DirectComparison {
+            data: "real.target ssh-ed25519 ED\nreal.target ssh-rsa DIFFERENT\n",
+            success,
+        };
+        let error = verifier()
+            .compare_direct("real.target", 22222, &tunnel, &probe)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("SSH HOST KEY ROUTE MISMATCH"));
+    }
+}
+
+struct DirectAlgorithmReplacement(std::cell::Cell<usize>);
+impl Runner for DirectAlgorithmReplacement {
+    fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+        panic!("unbounded probe");
+    }
+    fn run_bounded(
+        &self,
+        _: &OsStr,
+        args: &[OsString],
+        timeout: std::time::Duration,
+    ) -> Result<Output, HostKeyError> {
+        assert!(timeout <= std::time::Duration::from_secs(3));
+        let count = self.0.get();
+        self.0.set(count + 1);
+        if count < 2 {
+            assert!(args.iter().any(|a| a == "ed25519"));
+            Ok(Output {
+                success: false,
+                stdout: vec![],
+                diagnostic: "no matching algorithm".into(),
+            })
+        } else {
+            assert!(args.iter().any(|a| a.to_string_lossy().contains("rsa")));
+            Ok(Output {
+                success: false,
+                stdout: b"real.target ssh-rsa DIRECT_RSA\n".to_vec(),
+                diagnostic: "partial".into(),
+            })
+        }
+    }
+}
+#[test]
+fn reachable_direct_rsa_only_endpoint_is_not_an_unavailable_ed25519_probe() {
+    let probe = DirectAlgorithmReplacement(std::cell::Cell::new(0));
+    let tunnel = parse_key_lines(b"loopback ssh-ed25519 TUNNELED_ED\n");
+    assert!(
+        verifier()
+            .compare_direct("real.target", 22222, &tunnel, &probe)
+            .unwrap_err()
+            .to_string()
+            .contains("ROUTE MISMATCH")
+    );
+    assert_eq!(probe.0.get(), 3);
+}
+
+struct DirectFamilies {
+    ipv4: &'static str,
+    ipv6: &'static str,
+    calls: std::cell::RefCell<Vec<String>>,
+}
+impl Runner for DirectFamilies {
+    fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+        panic!("unbounded direct-family probe");
+    }
+    fn run_bounded(
+        &self,
+        _: &OsStr,
+        args: &[OsString],
+        timeout: std::time::Duration,
+    ) -> Result<Output, HostKeyError> {
+        assert!(timeout <= std::time::Duration::from_millis(750));
+        let family = args[0].to_str().unwrap();
+        self.calls.borrow_mut().push(family.into());
+        let data = match family {
+            "-4" => self.ipv4,
+            "-6" => self.ipv6,
+            _ => panic!("implicit address family"),
+        };
+        Ok(Output {
+            success: !data.is_empty(),
+            stdout: data.as_bytes().to_vec(),
+            diagnostic: "family probe".into(),
+        })
+    }
+}
+#[test]
+fn unreachable_preferred_ipv6_does_not_hide_observed_ipv4_mismatch() {
+    let probe = DirectFamilies {
+        ipv4: "real.target ssh-ed25519 OTHER\n",
+        ipv6: "",
+        calls: Default::default(),
+    };
+    let tunnel = parse_key_lines(b"loopback ssh-ed25519 EXPECTED\n");
+    assert!(
+        verifier()
+            .compare_direct("real.target", 22222, &tunnel, &probe)
+            .unwrap_err()
+            .to_string()
+            .contains("ROUTE MISMATCH")
+    );
+    assert_eq!(*probe.calls.borrow(), ["-4"]);
+}
+#[test]
+fn matching_ipv4_does_not_hide_observed_ipv6_mismatch() {
+    let probe = DirectFamilies {
+        ipv4: "real.target ssh-ed25519 EXPECTED\n",
+        ipv6: "real.target ssh-ed25519 OTHER\n",
+        calls: Default::default(),
+    };
+    let tunnel = parse_key_lines(b"loopback ssh-ed25519 EXPECTED\n");
+    assert!(
+        verifier()
+            .compare_direct("real.target", 22222, &tunnel, &probe)
+            .unwrap_err()
+            .to_string()
+            .contains("ROUTE MISMATCH")
+    );
+    assert_eq!(*probe.calls.borrow(), ["-4", "-6"]);
+}
+
+struct DirectBudget {
+    elapsed: std::cell::Cell<std::time::Duration>,
+    calls: std::cell::RefCell<Vec<(String, String, std::time::Duration)>>,
+    mismatch_second: bool,
+}
+impl Runner for DirectBudget {
+    fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+        panic!("unbounded direct budget probe");
+    }
+    fn elapsed(&self, _: std::time::Instant) -> std::time::Duration {
+        self.elapsed.get()
+    }
+    fn run_bounded(
+        &self,
+        _: &OsStr,
+        args: &[OsString],
+        timeout: std::time::Duration,
+    ) -> Result<Output, HostKeyError> {
+        assert!(!timeout.is_zero());
+        let next = self.elapsed.get() + timeout;
+        assert!(
+            next <= std::time::Duration::from_secs(3),
+            "probe exceeded total deadline"
+        );
+        self.elapsed.set(next);
+        let type_index = args.iter().position(|arg| arg == "-t").unwrap() + 1;
+        self.calls.borrow_mut().push((
+            args[0].to_string_lossy().into_owned(),
+            args[type_index].to_string_lossy().into_owned(),
+            timeout,
+        ));
+        let mismatch = self.mismatch_second && self.calls.borrow().len() == 2;
+        Ok(Output {
+            success: false,
+            stdout: if mismatch {
+                b"real.target ssh-ed25519 OTHER\n".to_vec()
+            } else {
+                vec![]
+            },
+            diagnostic: "simulated full probe deadline".into(),
+        })
+    }
+}
+#[test]
+fn first_family_full_deadline_reserves_second_family_mismatch_check() {
+    let probe = DirectBudget {
+        elapsed: Default::default(),
+        calls: Default::default(),
+        mismatch_second: true,
+    };
+    let tunnel = parse_key_lines(b"loopback ssh-ed25519 EXPECTED\n");
+    assert!(
+        verifier()
+            .compare_direct("real.target", 22222, &tunnel, &probe)
+            .unwrap_err()
+            .to_string()
+            .contains("ROUTE MISMATCH")
+    );
+    let calls = probe.calls.borrow();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0, "-4");
+    assert_eq!(calls[1].0, "-6");
+    assert_eq!(calls[0].2, std::time::Duration::from_millis(750));
+    assert_eq!(probe.elapsed.get(), std::time::Duration::from_millis(1500));
+}
+#[test]
+fn empty_both_families_complete_all_algorithm_fallbacks_within_total_deadline() {
+    let probe = DirectBudget {
+        elapsed: Default::default(),
+        calls: Default::default(),
+        mismatch_second: false,
+    };
+    let tunnel = parse_key_lines(b"loopback ssh-ed25519 EXPECTED\n");
+    let warnings = verifier()
+        .compare_direct("real.target", 22222, &tunnel, &probe)
+        .unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("unavailable"));
+    let calls = probe.calls.borrow();
+    assert_eq!(calls.len(), 8);
+    for pair in calls.chunks_exact(2) {
+        assert_eq!(pair[0].0, "-4");
+        assert_eq!(pair[1].0, "-6");
+        assert_eq!(pair[0].1, pair[1].1);
+    }
+    assert_eq!(calls[0].1, "ed25519");
+    assert!(calls[2].1.contains("rsa"));
+    assert!(calls[4].1.contains("ed25519-sk"));
+    assert!(calls[6].1.contains("mldsa44"));
+    assert_eq!(probe.elapsed.get(), std::time::Duration::from_secs(3));
 }

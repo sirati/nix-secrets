@@ -18,7 +18,9 @@ fn safe_file(file: &fs::File, owner: u32) -> Result<(), HostKeyError> {
         || meta.mode() & 0o022 != 0
         || meta.len() > LIMIT
     {
-        return Err(refusal("known_hosts must be a bounded, owned regular file without writable group or other access"));
+        return Err(refusal(
+            "known_hosts must be a bounded, owned regular file without writable group or other access",
+        ));
     }
     Ok(())
 }
@@ -57,7 +59,9 @@ impl HostKeyVerifier {
             || metadata.mode() & 0o022 != 0
             || parent.canonicalize()? != parent
         {
-            return Err(refusal("known_hosts parent must be an owned directory without symlinks or untrusted writes"));
+            return Err(refusal(
+                "known_hosts parent must be an owned directory without symlinks or untrusted writes",
+            ));
         }
         // Lock the exact no-follow file. Atomic replacement by another writer
         // is detected before publication; callers never overwrite their data.
@@ -86,8 +90,11 @@ impl HostKeyVerifier {
                     .to_str()
                     .ok_or_else(|| refusal("known_hosts filename is not UTF-8"))?
             ))?;
-        rustix::fs::flock(&target, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .map_err(|e| refusal(&e.to_string()))?;
+        rustix::fs::flock(
+            &target,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .map_err(|e| refusal(&e.to_string()))?;
         safe_file(&target, uid)?;
         if identity.keys.is_empty()
             || identity.host.is_empty()
@@ -161,7 +168,9 @@ impl HostKeyVerifier {
                 let text = std::str::from_utf8(&output.stdout)
                     .map_err(|_| refusal("known_hosts output is not UTF-8"))?;
                 if text.lines().any(|line| line.starts_with('@')) {
-                    return Err(refusal("host has a revoked or certificate-authority entry; refusing to alter trust"));
+                    return Err(refusal(
+                        "host has a revoked or certificate-authority entry; refusing to alter trust",
+                    ));
                 }
                 let lines = parse_key_lines(&output.stdout);
                 if lines.is_empty() {
@@ -258,9 +267,20 @@ mod tests {
     }
     struct ScanKnown;
     impl Runner for ScanKnown {
-        fn run(&self, program:&OsStr, arguments:&[OsString])->Result<runner::Output,HostKeyError> {
-            if program==OsStr::new("ssh-keyscan") {Ok(runner::Output{success:true,stdout:b"[ns1.example]:2222 ssh-ed25519 AAAA\n".to_vec(),diagnostic:String::new()})}
-            else {ProcessRunner.run(program,arguments)}
+        fn run(
+            &self,
+            program: &OsStr,
+            arguments: &[OsString],
+        ) -> Result<runner::Output, HostKeyError> {
+            if program == OsStr::new("ssh-keyscan") {
+                Ok(runner::Output {
+                    success: true,
+                    stdout: b"[ns1.example]:2222 ssh-ed25519 AAAA\n".to_vec(),
+                    diagnostic: String::new(),
+                })
+            } else {
+                ProcessRunner.run(program, arguments)
+            }
         }
     }
     #[test]
@@ -271,7 +291,13 @@ mod tests {
         let approved = identity();
         verifier.persist_accepted(&approved).unwrap();
         let original = fs::read(&path).unwrap();
-        assert_eq!(verifier.preflight_with("ns1.example",2222,&ScanKnown).unwrap().status,HostKeyStatus::Known);
+        assert_eq!(
+            verifier
+                .preflight_with("ns1.example", 2222, &ScanKnown)
+                .unwrap()
+                .status,
+            HostKeyStatus::Known
+        );
 
         assert_eq!(original, b"[ns1.example]:2222 ssh-ed25519 AAAA\n");
         verifier.persist_accepted(&approved).unwrap();
@@ -305,17 +331,21 @@ mod tests {
         let fixture = Fixture::new();
         let path = fixture.0.join("known_hosts");
         fs::write(&path, b"[ns1.example]:2222 ssh-ed25519 BBBB\n").unwrap();
-        assert!(Command::new("ssh-keygen")
-            .args(["-H", "-f"])
-            .arg(&path)
-            .output()
-            .unwrap()
-            .status
-            .success());
+        assert!(
+            Command::new("ssh-keygen")
+                .args(["-H", "-f"])
+                .arg(&path)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
         let before = fs::read(&path).unwrap();
-        assert!(HostKeyVerifier::new(vec![path.clone()])
-            .persist_accepted(&identity())
-            .is_err());
+        assert!(
+            HostKeyVerifier::new(vec![path.clone()])
+                .persist_accepted(&identity())
+                .is_err()
+        );
         assert_eq!(fs::read(&path).unwrap(), before);
     }
 }

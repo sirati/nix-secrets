@@ -11,6 +11,7 @@ impl Controller {
             if let Err(error) = self.client.renew(id, lease_id) {
                 self.active.take();
                 self.host_mutations = None;
+                self.identity_publication = None;
                 return Err(format!("approval lease was lost: {error}"));
             }
             self.active
@@ -20,6 +21,8 @@ impl Controller {
             return Ok(None);
         }
         self.host_mutations = None;
+        self.identity_publication = None;
+        self.connection_warnings.clear();
         if self.background.is_some() && !std::mem::take(&mut self.approvals_ready) {
             return Ok(None);
         }
@@ -69,6 +72,7 @@ impl Controller {
             host: host.metadata.deployment.host.clone(),
             port: host.metadata.deployment.port,
             known_hosts: self.known_hosts.clone(),
+            backend_route: self.backend_route.clone(),
         };
         // The one connection selects only what can be deployed: values that
         // wait for another host are left out, so a partial deployment needs
@@ -84,9 +88,11 @@ impl Controller {
             })
             .unwrap_or_default();
         let mut selected = request.clone();
-        selected
-            .secrets
-            .retain(|identifier| !skippable.contains(identifier));
+        let producer_identity = self.producer_identity_in_scope(&request);
+        selected.secrets.retain(|identifier| {
+            !skippable.contains(identifier)
+                || producer_identity.as_deref() == Some(identifier.as_str())
+        });
         let expected = match expected_target(&self.schema, &selected) {
             Ok(expected) => expected,
             Err(error) => {
@@ -126,6 +132,7 @@ impl Controller {
                 return Err(error);
             }
         };
+        self.connection_warnings = host_key.connection_warnings.clone();
         let known = host_key.status == HostKeyStatus::Known;
         details.host_key = deployment::unknown_description(&connection, &host_key);
         self.active = Some(ActiveApproval {
@@ -153,13 +160,13 @@ impl Controller {
                     .map_err(|resolve| resolve.to_string())?;
                 return Err(error);
             }
-            let active = self.active.as_ref().expect("active approval exists");
-            let request = active.request.clone();
-            let refreshed = self.approval_details(
-                &request,
-                active.prepared.as_ref().map(PreparedDeployment::state),
-                &set,
-            );
+            let request = self
+                .active
+                .as_ref()
+                .expect("active approval exists")
+                .request
+                .clone();
+            let refreshed = self.prepare_identity_for_active();
             details = self.finish_claimed_setup(&request, lease_id, refreshed)?;
         }
         Ok(Some(details))
@@ -183,6 +190,8 @@ impl Controller {
                     .is_some_and(|active| active.request.id == request.id)
                 {
                     self.active.take();
+                    self.host_mutations = None;
+                    self.identity_publication = None;
                 }
                 self.client
                     .resolve(request.id.clone(), lease_id, false, Some(error.clone()))
@@ -201,6 +210,7 @@ impl Controller {
         // connection, and with it another agent or 1Password prompt.
         if let Err(error) = &result {
             self.host_mutations = None;
+            self.identity_publication = None;
             if let Some(active) = self.active.take() {
                 let _ = self.client.resolve(
                     active.request.id,
@@ -226,7 +236,8 @@ impl Controller {
             {
                 let active = self.active.as_ref().expect("active approval exists");
                 let verifier =
-                    nix_secrets_transport::HostKeyVerifier::new(self.known_hosts.clone());
+                    nix_secrets_transport::HostKeyVerifier::new(self.known_hosts.clone())
+                        .with_route(self.backend_route.clone());
                 verifier
                     .preflight_approved(
                         &active.connection.host,
@@ -240,22 +251,14 @@ impl Controller {
                 self.prepare_active()?;
                 let active = self.active.as_mut().expect("active approval exists");
                 active.target_approved = true;
-                let request = active.request.clone();
-                let state = active
-                    .prepared
-                    .as_ref()
-                    .map(PreparedDeployment::state)
-                    .cloned();
-                let set = self.plan_set(&request.secrets)?;
-                return self
-                    .approval_details(&request, state.as_ref(), &set)
-                    .map(Some);
+                return self.prepare_identity_for_active().map(Some);
             }
             let active = self.active.as_mut().expect("active approval exists");
             let (id, lease_id) = (active.request.id.clone(), active.lease_id);
             if let Err(error) = self.client.renew_for(id, lease_id, 900_000) {
                 self.active.take();
                 self.host_mutations = None;
+                self.identity_publication = None;
                 return Err(format!("approval lease was lost: {error}"));
             }
             self.active

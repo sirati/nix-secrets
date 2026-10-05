@@ -110,7 +110,7 @@ pub enum Completion {
         total: usize,
     },
     ApprovalDone(Option<Box<ApprovalRequest>>),
-    HostMutationsDeclined,
+    HostMutationsDeclined { before_deploy: bool },
     /// A deployment finished; lists values its target generated and stored,
     /// and those a partial deployment skipped.
     Deployed {

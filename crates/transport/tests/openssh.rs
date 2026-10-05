@@ -128,6 +128,7 @@ fn launch_approved_rsa_in_fixture_process() {
     let checked = verifier.preflight_approved("host", 22, &approved).unwrap();
     assert_eq!(checked.identity, approved);
     let ssh = OpenSsh {
+        backend_route: None,
         program: root.join("ssh").into_os_string(),
         destination: "forward@host".into(),
         host: "host".into(),

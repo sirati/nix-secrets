@@ -50,7 +50,7 @@ pub struct HostMetadata {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeploymentMetadata {
-    /// Publish only the identity verified for a successful deployment.
+    /// Publish only the identity verified by an authenticated deployment session.
     #[serde(rename = "publishHostIdentityTo", default, skip_serializing_if = "Option::is_none")]
     pub publish_host_identity_to: Option<String>,
     pub host: String,

@@ -154,6 +154,45 @@ pub struct Connection<G> {
     _backend: Option<G>,
 }
 
+/// Shared production bootstrap for remote terminal and headless test frontends.
+/// The returned guard owns the sole authenticated SSH master for this frontend.
+pub fn connect_remote(
+    repository: &Path,
+    ssh_arguments: &[std::ffi::OsString],
+    local_socket: &Path,
+    remote_socket: &Path,
+    control_socket: &Path,
+    timeout: Duration,
+) -> io::Result<(
+    Connection<ProcessGuard>,
+    Arc<nix_secrets_transport::BackendRoute>,
+)> {
+    let destination = ssh_arguments.last().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "missing backend SSH destination",
+        )
+    })?;
+    let command = crate::command::remote_backend_routed(
+        ssh_arguments,
+        repository,
+        local_socket,
+        remote_socket,
+        control_socket,
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut launcher = ProcessLauncher::ephemeral(local_socket);
+    let connection = connect_or_start(local_socket, &command, &mut launcher, timeout)?;
+    let route = Arc::new(nix_secrets_transport::BackendRoute::new(
+        control_socket.to_owned(),
+        destination.clone(),
+    ));
+    route
+        .check_master()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    Ok((connection, route))
+}
+
 pub fn connect_or_start<L: Launcher>(
     path: &Path,
     command: &CommandSpec,

@@ -111,6 +111,7 @@ fn refreshed_details_error_clears_active_and_terminally_rejects_exact_claim() {
             host: "unused".into(),
             port: 22,
             known_hosts: vec![],
+            backend_route: None,
             identity_public_keys: vec![],
         },
         expected,

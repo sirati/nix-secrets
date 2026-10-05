@@ -90,6 +90,7 @@ pub struct OpenSsh {
     pub verifier: HostKeyVerifier,
     /// The only keys offered. Empty: ssh's own defaults.
     pub identities: Vec<Offer>,
+    pub backend_route: Option<Arc<crate::BackendRoute>>,
 }
 
 impl OpenSsh {
@@ -141,11 +142,36 @@ impl OpenSsh {
         if !self.identities.is_empty() {
             identity_arguments.extend(["-o".into(), "IdentitiesOnly=yes".into()]);
         }
+        let (endpoint_host, endpoint_port) = match &self.backend_route {
+            Some(route) => route.endpoint(&self.host, self.port)?,
+            None => (self.host.clone(), self.port),
+        };
+        let route_arguments: Vec<OsString> = if self.backend_route.is_some() {
+            vec![
+                "-o".into(),
+                format!("HostName={endpoint_host}").into(),
+                "-o".into(),
+                format!(
+                    "HostKeyAlias={}",
+                    crate::hostkey::lookup_name(&self.host, self.port)
+                )
+                .into(),
+                "-o".into(),
+                "ProxyCommand=none".into(),
+                "-o".into(),
+                "ProxyJump=none".into(),
+                "-o".into(),
+                "AddressFamily=inet".into(),
+            ]
+        } else {
+            Vec::new()
+        };
         let mut child = Command::new(&self.program)
+            .args(route_arguments)
             .args([
                 "-T",
                 "-p",
-                &self.port.to_string(),
+                &endpoint_port.to_string(),
                 "-o",
                 "BatchMode=yes",
                 "-o",

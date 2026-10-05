@@ -151,3 +151,17 @@ fn host_mutation_review_advances_same_request_and_stale_deploy_cannot_replace_it
     model.offer_approval(review);
     assert!(matches!(model.mode, Mode::Browse));
 }
+
+#[test]
+fn predeployment_identity_review_continues_to_deploy_and_cannot_rewind_post_review() {
+    let mut before=ApprovalRequest {id:"same".into(),host_mutations_before_deploy:true,host_mutation_token:Some("before".into()),..Default::default()};
+    before.host_mutations.push(HostMutationReview {identifier:"shared.receiver-known-hosts".into(),kind:"receiver host identity".into(),previous:vec!["SHA256:old".into()],proposed:vec!["SHA256:new".into()]});
+    let deployment=ApprovalRequest {id:"same".into(),..Default::default()};
+    let mut after=before.clone(); after.host_mutations_before_deploy=false; after.host_mutation_token=Some("after".into());
+    let mut model=Model::new(vec![]); model.offer_approval(before.clone()); model.offer_approval(deployment.clone());
+    assert!(matches!(&model.mode,Mode::Approval(current) if current.host_mutations.is_empty()));
+    model.offer_approval(before.clone());
+    assert!(matches!(&model.mode,Mode::Approval(current) if current.host_mutations.is_empty()));
+    model.offer_approval(after.clone()); model.offer_approval(deployment); model.offer_approval(before);
+    assert!(matches!(&model.mode,Mode::Approval(current) if current.host_mutation_token.as_deref()==Some("after")));
+}

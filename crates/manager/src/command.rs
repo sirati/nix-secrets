@@ -89,6 +89,28 @@ pub fn remote_backend(
     ssh(&forwarding, &remote)
 }
 
+/// The foreground backend SSH connection also owns target forwarding channels.
+/// ControlPersist is disabled: losing this authenticated connection fails closed.
+pub fn remote_backend_routed(
+    ssh_arguments: &[OsString],
+    repository: &Path,
+    local_socket: &Path,
+    remote_socket: &Path,
+    control_socket: &Path,
+) -> Result<CommandSpec, BuildError> {
+    let mut spec = remote_backend(ssh_arguments, repository, local_socket, remote_socket)?;
+    let mut options = vec![
+        "-M".into(),
+        "-S".into(),
+        control_socket.as_os_str().into(),
+        "-o".into(),
+        "ControlPersist=no".into(),
+    ];
+    options.extend(spec.arguments);
+    spec.arguments = options;
+    Ok(spec)
+}
+
 fn quoted_remote_command(arguments: &[OsString]) -> Result<String, BuildError> {
     arguments
         .iter()

@@ -111,6 +111,10 @@ by the remote backend. The launcher evaluates the inventory and starts a backend
 when needed. The workstation needs Nix and SSH access to the repository; startup
 uses its `secrets-backend` flake application.
 
+Target connections use that workstation's existing SSH tunnel. The client also
+checks the host key directly: an unreachable direct route shows a warning;
+different keys stop deployment before any secrets are sent.
+
 ## Edit and deploy
 
 | Key | Action |

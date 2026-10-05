@@ -287,30 +287,33 @@ fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         socket_directory.join(format!("frontend-{}-{socket_name}", std::process::id()))
     };
-    let backend = if invocation.is_local() {
-        command::backend(&repository, &local_socket)
+    let control_socket = socket_directory.join(format!("master-{}.sock", std::process::id()));
+    progress("Starting/Connecting backend...")?;
+    let (connection, backend_route) = if invocation.is_local() {
+        let backend = command::backend(&repository, &local_socket);
+        let mut launcher = startup::ProcessLauncher::persistent();
+        (
+            startup::connect_or_start(
+                &local_socket,
+                &backend,
+                &mut launcher,
+                Duration::from_secs(20),
+            )?,
+            None,
+        )
     } else {
         let uid = remote_uid.expect("remote UID was resolved above");
         let remote_socket = PathBuf::from(format!("/run/user/{uid}/nix-secrets/{socket_name}"));
-        command::remote_backend(
-            &invocation.ssh_args,
+        let (connection, route) = startup::connect_remote(
             &repository,
+            &invocation.ssh_args,
             &local_socket,
             &remote_socket,
-        )?
+            &control_socket,
+            Duration::from_secs(20),
+        )?;
+        (connection, Some(route))
     };
-    progress("Starting/Connecting backend...")?;
-    let mut launcher = if invocation.is_local() {
-        startup::ProcessLauncher::persistent()
-    } else {
-        startup::ProcessLauncher::ephemeral(&local_socket)
-    };
-    let connection = startup::connect_or_start(
-        &local_socket,
-        &backend,
-        &mut launcher,
-        Duration::from_secs(20),
-    )?;
     if remote_uid.is_none() {
         progress("Connected.")?;
     }
@@ -333,6 +336,9 @@ fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
         provider,
         known_hosts,
     )?;
+    if let Some(route) = backend_route {
+        controller.set_backend_route(route);
+    }
     let rows = controller.rows()?;
     let mut writer = AsyncWriter::spawn(controller, local_socket);
     ui::run(rows, &mut writer)?;

@@ -137,6 +137,7 @@ pub enum HostKeyStatus {
 pub struct HostKeyPreflight {
     pub identity: HostIdentity,
     pub status: HostKeyStatus,
+    pub connection_warnings: Vec<String>,
     /// Where known_hosts records the accepted keys; empty for an unknown host.
     pub known: Vec<KnownKey>,
     pub(crate) known_host_lines: Vec<String>,
@@ -186,14 +187,21 @@ pub struct HostKeyVerifier {
     known_hosts: Vec<PathBuf>,
     ssh_keyscan: OsString,
     ssh_keygen: OsString,
+    route: Option<std::sync::Arc<crate::BackendRoute>>,
 }
 
 impl HostKeyVerifier {
+    pub fn with_route(mut self, route: Option<std::sync::Arc<crate::BackendRoute>>) -> Self {
+        self.route = route;
+        self
+    }
+
     pub fn new(known_hosts: Vec<PathBuf>) -> Self {
         Self {
             known_hosts,
             ssh_keyscan: "ssh-keyscan".into(),
             ssh_keygen: "ssh-keygen".into(),
+            route: None,
         }
     }
 
@@ -324,6 +332,97 @@ impl HostKeyVerifier {
         self.preflight_selected_with(host, port, runner, None)
     }
 
+    fn compare_direct(
+        &self,
+        host: &str,
+        port: u16,
+        tunneled: &[KeyLine],
+        runner: &impl Runner,
+    ) -> Result<Vec<String>, HostKeyError> {
+        let selected = scan_types(tunneled.iter().map(|key| key.algorithm.as_str()))?;
+        let started = std::time::Instant::now();
+        let unavailable = || {
+            vec!["Direct client host-key probe unavailable; discovery and deployment use the existing backend tunnel.".into()]
+        };
+        let mut direct = Vec::new();
+        let mut complete_output = false;
+        let mut observed_family = [false; 2];
+        // Explicit families are essential: ssh-keyscan may select an
+        // unreachable IPv6 address without probing a reachable IPv4 identity.
+        // Each family is checked even if the other already matches.
+        for (types, per_probe) in [
+            (selected.join(","), std::time::Duration::from_millis(750)),
+            (
+                "ed25519,ecdsa,rsa".into(),
+                std::time::Duration::from_millis(500),
+            ),
+            (
+                "ed25519-sk,ecdsa-sk".into(),
+                std::time::Duration::from_millis(125),
+            ),
+            (
+                "mldsa44-ed25519".into(),
+                std::time::Duration::from_millis(125),
+            ),
+        ] {
+            for (family_index, family) in ["-4", "-6"].iter().enumerate() {
+                if observed_family[family_index] {
+                    continue;
+                }
+                let remaining =
+                    std::time::Duration::from_secs(3).saturating_sub(runner.elapsed(started));
+                if remaining.is_zero() {
+                    break;
+                }
+                let result = runner.run_bounded(
+                    &self.ssh_keyscan,
+                    &[
+                        (*family).into(),
+                        "-T".into(),
+                        "1".into(),
+                        "-p".into(),
+                        port.to_string().into(),
+                        "-t".into(),
+                        types.clone().into(),
+                        "--".into(),
+                        host.into(),
+                    ],
+                    remaining.min(per_probe),
+                );
+                if let Ok(output) = result {
+                    let keys = parse_key_lines(&output.stdout);
+                    if keys.is_empty() {
+                        continue;
+                    }
+                    // Inspect partial/failed output before any further probe:
+                    // neither a matching family nor retry may hide a mismatch.
+                    for key in &keys {
+                        if !tunneled.iter().any(|other| other.same_key(key)) {
+                            return Err(HostKeyError::Tool(format!(
+                                "SSH HOST KEY ROUTE MISMATCH for {host}:{port}: direct and backend-tunneled {} keys differ; no authenticated target connection was opened",
+                                key.algorithm
+                            )));
+                        }
+                    }
+                    observed_family[family_index] = true;
+                    complete_output |= output.success;
+                    direct.extend(keys);
+                }
+            }
+        }
+        if direct.is_empty() {
+            return Ok(unavailable());
+        }
+        let complete = complete_output
+            && tunneled
+                .iter()
+                .all(|key| direct.iter().any(|other| other.same_key(key)));
+        if !complete {
+            return Ok(vec!["Direct client host-key probe was partial; observed keys match the tunnel, and deployment uses the existing backend tunnel.".into()]);
+        }
+        Ok(Vec::new())
+    }
+
     fn preflight_selected_with(
         &self,
         host: &str,
@@ -364,6 +463,10 @@ impl HostKeyVerifier {
             Some(keys) => scan_types(keys.iter().map(|key| key.algorithm.as_str()))?,
             None => scan_types(known.iter().map(|key| key.algorithm.as_str()))?,
         };
+        let (scan_host, scan_port) = match &self.route {
+            Some(route) => route.endpoint(host, port)?,
+            None => (host.to_owned(), port),
+        };
         let started = std::time::Instant::now();
         let mut attempts = 0;
         let mut diagnostic = "no scan completed".to_owned();
@@ -392,11 +495,11 @@ impl HostKeyVerifier {
                     // cannot extend ssh-keyscan's whole-second timeout.
                     (timeout.as_secs() - 1).to_string().into(),
                     "-p".into(),
-                    port.to_string().into(),
+                    scan_port.to_string().into(),
                     "-t".into(),
                     key_types.into(),
                     "--".into(),
-                    host.into(),
+                    scan_host.clone().into(),
                 ],
                 timeout,
             )?;
@@ -418,6 +521,11 @@ impl HostKeyVerifier {
                     runner.pause(delay);
                 }
             }
+        };
+        let connection_warnings = if self.route.is_some() {
+            self.compare_direct(host, port, &scanned, runner)?
+        } else {
+            Vec::new()
         };
         let matching: Vec<KeyLine> = scanned
             .iter()
@@ -469,6 +577,7 @@ impl HostKeyVerifier {
             identity,
             status,
             known,
+            connection_warnings,
             known_host_lines: accepted
                 .into_iter()
                 .map(|key| key.for_host(&lookup))
@@ -527,7 +636,7 @@ fn scan_types<'a>(algorithms: impl Iterator<Item = &'a str>) -> Result<Vec<Strin
             _ => {
                 return Err(HostKeyError::Tool(format!(
                     "unsupported recorded SSH host-key algorithm: {algorithm}"
-                )))
+                )));
             }
         };
         types.insert(key_type.to_owned());
@@ -593,7 +702,7 @@ pub(crate) fn lookup_name(host: &str, port: u16) -> String {
 }
 
 mod persist;
-mod runner;
+pub(crate) mod runner;
 #[cfg(test)]
 use runner::Output;
 use runner::{ProcessRunner, Runner};

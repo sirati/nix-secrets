@@ -115,9 +115,11 @@ Multiple host-key pins are allowed. All leaves sharing an ID must
 agree on their validation settings. These features need receiver protocol 4.
 
 Set `deployment.publishHostIdentityTo` to this host's shared public-info leaf
-to publish the SSH identity verified by the client during deployment. Empty
-entries are filled automatically. Replacing an existing identity requires
-separate client TUI approval, followed by normal deployment to its consumers.
+to publish the SSH identity verified by the client. When that leaf is selected,
+empty entries are filled during preparation and sent in the original deployment.
+Replacing an existing identity requires separate client TUI approval before
+that deployment. Other deployed consumers receive separate deployment requests;
+the producer does not receive a redundant request for its own trust file.
 
 Set `installDefaultIfMissing = true` on a public-info leaf and
 `publicInfoInventoryFile = "/absolute/path/to/nix-secrets.toml"` to embed only

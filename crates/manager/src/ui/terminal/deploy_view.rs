@@ -175,6 +175,10 @@ pub(crate) fn approval_lines(
         lines.push(Line::styled(failure.to_owned(), bold(Color::Red)));
         lines.push(Line::default());
     }
+    for warning in &request.connection_warnings {
+        lines.push(Line::styled(format!("Connection warning: {warning}"), Style::default().fg(Color::Yellow)));
+        lines.push(Line::default());
+    }
     if let Some(host_key) = &request.host_key {
         lines.push(Line::styled(
             "Connect to the target over SSH as its forwarder account.".to_owned(),
@@ -365,11 +369,22 @@ fn host_mutation_lines(request: &ApprovalRequest, failure: Option<&str>) -> Vec<
         Line::raw(format!("Request: {}", request.id)),
         Line::raw(format!("Source host: {}", request.target)),
         Line::default(),
-        Line::styled("The target deployment already completed. Existing nonempty TOML values have not been replaced.", dim()),
-        Line::styled("Save exactly the changes below? Rejecting keeps the existing values.", bold(Color::Yellow)),
+        Line::styled(if request.host_mutations_before_deploy {
+            "Deployment has not started. The verified SSH identity differs from an existing nonempty TOML value."
+        } else {
+            "The target deployment already completed. Existing nonempty TOML values have not been replaced."
+        }, dim()),
+        Line::styled(if request.host_mutations_before_deploy {
+            "Save exactly the changes below before deployment? Rejecting keeps existing values and cancels deployment."
+        } else {
+            "Save exactly the changes below? Rejecting keeps the existing values."
+        }, bold(Color::Yellow)),
     ];
     if let Some(failure) = failure {
         lines.push(Line::styled(failure.to_owned(), bold(Color::Red)));
+    }
+    for warning in &request.connection_warnings {
+        lines.push(Line::styled(format!("Connection warning: {warning}"), Style::default().fg(Color::Yellow)));
     }
     for change in &request.host_mutations {
         lines.push(Line::default());

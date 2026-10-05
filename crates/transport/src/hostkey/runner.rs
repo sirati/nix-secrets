@@ -1,11 +1,11 @@
 use super::*;
 
-pub(super) struct Output {
-    pub(super) success: bool,
-    pub(super) stdout: Vec<u8>,
-    pub(super) diagnostic: String,
+pub(crate) struct Output {
+    pub(crate) success: bool,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) diagnostic: String,
 }
-pub(super) trait Runner {
+pub(crate) trait Runner {
     fn run(&self, program: &OsStr, arguments: &[OsString]) -> Result<Output, HostKeyError>;
     fn run_bounded(
         &self,
@@ -23,7 +23,7 @@ pub(super) trait Runner {
         started.elapsed()
     }
 }
-pub(super) struct ProcessRunner;
+pub(crate) struct ProcessRunner;
 impl Runner for ProcessRunner {
     fn run(&self, program: &OsStr, arguments: &[OsString]) -> Result<Output, HostKeyError> {
         self.run_bounded(program, arguments, std::time::Duration::from_secs(12))

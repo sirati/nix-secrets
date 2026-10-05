@@ -187,7 +187,8 @@ mod tests {
     use super::*;
 
     const RIGHT: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f forwarder";
-    const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8eHRwbGhkYFxYVFBMSERAPDg0MCwoJCAcGBQQDAgEA other";
+    const OTHER: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8eHRwbGhkYFxYVFBMSERAPDg0MCwoJCAcGBQQDAgEA other";
 
     fn config(files: &[&str]) -> ClientConfig {
         ClientConfig {
@@ -204,7 +205,9 @@ mod tests {
         let offers = choose(&[RIGHT.into()], &config(&[]), Ok(agent), &|_| None).unwrap();
         assert_eq!(offers, [Offer::Agent(named)]);
         assert!(
-            offers[0].describe().starts_with("\"IT Secrets\" (ssh-ed25519 SHA256:"),
+            offers[0]
+                .describe()
+                .starts_with("\"IT Secrets\" (ssh-ed25519 SHA256:"),
             "{}",
             offers[0].describe()
         );
@@ -235,7 +238,10 @@ mod tests {
             error.contains("the forwarder key \"forwarder\" (ssh-ed25519 SHA256:"),
             "{error}"
         );
-        assert!(error.contains("not in your ssh-agent (/agent.sock)"), "{error}");
+        assert!(
+            error.contains("not in your ssh-agent (/agent.sock)"),
+            "{error}"
+        );
     }
 
     #[test]

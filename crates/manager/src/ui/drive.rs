@@ -226,9 +226,13 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             }
             model.offer_approval(*request);
         }
-        Completion::HostMutationsDeclined => {
+        Completion::HostMutationsDeclined { before_deploy } => {
             if matches!(model.mode, Mode::Approval(_)) { model.mode = Mode::Browse; }
-            model.inform("Host-provided changes rejected; existing values were kept. The target deployment already completed.");
+            model.inform(if before_deploy {
+                "Host-provided changes rejected; existing values were kept and deployment was cancelled."
+            } else {
+                "Host-provided changes rejected; existing values were kept. The target deployment already completed."
+            });
         }
         Completion::ApprovalDone(None) => {
             if matches!(model.mode, Mode::Approval(_)) {

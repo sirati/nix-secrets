@@ -40,6 +40,8 @@ pub struct ApprovalRequest {
     pub id: String,
     pub target: String,
     pub host_mutations: Vec<HostMutationReview>,
+    pub host_mutations_before_deploy: bool,
+    pub connection_warnings: Vec<String>,
     /// Identifies the immutable batch shown here; ordinary deploy consent cannot save it.
     pub host_mutation_token: Option<String>,
     pub create: Vec<String>,
@@ -73,12 +75,8 @@ pub struct ApprovalRequest {
 impl ApprovalRequest {
     pub(crate) fn approval_stage(&self) -> u8 {
         if !self.host_mutations.is_empty() {
-            2
-        } else if self.host_key.is_some() {
-            0
-        } else {
-            1
-        }
+            if self.host_mutations_before_deploy { 1 } else { 3 }
+        } else if self.host_key.is_some() { 0 } else { 2 }
     }
 
     /// Whether a partial deployment can proceed: something is missing and

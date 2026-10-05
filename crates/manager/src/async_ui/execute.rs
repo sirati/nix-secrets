@@ -52,9 +52,10 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
             approval_done(controller, accepted, result)
         }
         Command::HostMutations(accepted, token) => {
+            let before_deploy = controller.host_mutations_before_deploy();
             let result = controller.approve_host_mutations(accepted, &token);
             match result {
-                Ok(None) if !accepted => Completion::HostMutationsDeclined,
+                Ok(None) if !accepted => Completion::HostMutationsDeclined { before_deploy },
                 other => approval_done(controller, accepted, other),
             }
         }

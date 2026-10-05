@@ -70,6 +70,11 @@ impl Fixture {
         document["ns1"]["metadata"]["deployment"]["publishHostIdentityTo"] =
             serde_json::json!("ns1.services.reporting-trust.receiver-known-hosts");
         document["ns1"]["metadata"]["deployment"]["port"] = serde_json::json!(23220);
+        document["ns2"]["services"]["consumer-report"]["key"] = serde_json::json!({
+            "kind":"generated", "recipientPublicKeys":[public], "recipientIds":["operator"], "consumerUnits":[],
+            "generatedSecret":{"type":"local-ssh-key", "bootstrap":null, "registerAt":"ns1.services.report-authorized.fault",
+                "output":{"path":"/persistent/secrets/consumer-report/service/key","category":"service","owner":"root","group":"root","mode":"0400","contentType":"openssh-private-key"}}
+        });
         let schema = Schema::from_json(&document.to_string()).unwrap();
         let socket = root.path().join("backend.sock");
         let store = root.path().join("secrets.toml");
@@ -334,6 +339,7 @@ impl Fixture {
                 host: self.source.clone(),
                 port: 22,
                 known_hosts: vec![],
+                backend_route: None,
                 identity_public_keys: vec![],
             },
             identity: HostIdentity {
@@ -351,6 +357,8 @@ impl Fixture {
         let token = super::host_mutations::random_token().unwrap();
         self.controller.host_mutations = Some(super::host_mutations::PendingHostMutations {
             batch,
+            before_deploy: false,
+            publication: None,
             request_id: self.controller.active.as_ref().unwrap().request.id.clone(),
             lease_id: self.controller.active.as_ref().unwrap().lease_id,
             token: token.clone(),
@@ -519,7 +527,7 @@ impl Fixture {
     }
 }
 #[test]
-fn first_verified_identity_and_report_registration_share_one_consumer_request() {
+fn own_identity_is_not_queued_with_report_registration() {
     let mut fixture = Fixture::new("ns1", false);
     let mut batch = fixture.staged(7);
     let identity = fixture.trusted_identity(7);
@@ -548,9 +556,9 @@ fn first_verified_identity_and_report_registration_share_one_consumer_request() 
     assert!(!record.value.contains(":23220"));
     let (request, lease) = fixture.controller.client.poll_and_claim().unwrap().unwrap();
     assert_eq!(request.target, "ns1");
-    assert_eq!(request.secrets.len(), 4);
+    assert_eq!(request.secrets.len(), 3);
     assert!(
-        request
+        !request
             .secrets
             .contains(&"ns1.services.reporting-trust.receiver-known-hosts".into())
     );
@@ -586,7 +594,7 @@ fn first_verified_identity_and_report_registration_share_one_consumer_request() 
     );
 }
 #[test]
-fn host_identity_rotation_denial_preserves_record_and_acceptance_queues_consumer_consent() {
+fn host_identity_rotation_denial_preserves_record_and_does_not_redeploy_itself() {
     let mut fixture = Fixture::new("ns1", false);
     fixture.initial_identity();
     let before = std::fs::read(&fixture.store).unwrap();
@@ -614,19 +622,14 @@ fn host_identity_rotation_denial_preserves_record_and_acceptance_queues_consumer
         .approve_host_mutations_inner(true, &token)
         .unwrap();
     assert_ne!(std::fs::read(&fixture.store).unwrap(), before);
-    let (request, _) = fixture.controller.client.poll_and_claim().unwrap().unwrap();
-    assert_eq!(request.target, "ns1");
-    assert_eq!(
-        request.secrets,
-        ["ns1.services.reporting-trust.receiver-known-hosts"]
-    );
     assert!(
         fixture
             .controller
             .client
             .poll_and_claim()
             .unwrap()
-            .is_none()
+            .is_none(),
+        "the producer never receives a redundant trust-only followup"
     );
 }
 #[test]
@@ -781,4 +784,251 @@ fn expired_original_lease_cannot_commit_reviewed_values() {
     assert_eq!(std::fs::read(&fixture.store).unwrap(), before);
     assert!(fixture.controller.host_mutations.is_none());
     assert!(fixture.controller.active.is_none());
+}
+
+#[test]
+fn partial_receiver_inventory_request_cannot_publish_or_expand_host_identity_scope() {
+    let mut fixture = Fixture::new("ns1", false);
+    let request = ApprovalRequest {
+        id: "deploy-inventory-only".into(),
+        target: "ns1".into(),
+        secrets: vec!["ns1.services.report-authorized.fault".into()],
+        allow_partial: false,
+    };
+    assert!(
+        fixture
+            .controller
+            .producer_identity_in_scope(&request)
+            .is_none()
+    );
+    assert!(
+        fixture
+            .controller
+            .client
+            .get_public_info("reporting/receiver-known-hosts")
+            .unwrap()
+            .is_none()
+    );
+    let mut full = request;
+    full.secrets
+        .push("ns1.services.reporting-trust.receiver-known-hosts".into());
+    assert_eq!(
+        fixture
+            .controller
+            .producer_identity_in_scope(&full)
+            .as_deref(),
+        Some("ns1.services.reporting-trust.receiver-known-hosts")
+    );
+}
+#[test]
+fn initial_missing_identity_is_part_of_the_original_expected_selection() {
+    let mut fixture = Fixture::new("ns1", false);
+    let request = ApprovalRequest {
+        id: "deploy-initial-identity".into(),
+        target: "ns1".into(),
+        secrets: vec!["ns1.services.reporting-trust.receiver-known-hosts".into()],
+        allow_partial: false,
+    };
+    let set = fixture.controller.plan_set(&request.secrets).unwrap();
+    let plan =
+        super::unset::plan_unset(&fixture.controller.schema, &request.secrets, &set).unwrap();
+    assert!(plan.skippable.contains(&request.secrets[0]));
+    let producer = fixture.controller.producer_identity_in_scope(&request);
+    let mut selected = request.clone();
+    selected
+        .secrets
+        .retain(|id| !plan.skippable.contains(id) || producer.as_deref() == Some(id.as_str()));
+    let expected = expected_target(&fixture.controller.schema, &selected).unwrap();
+    assert_eq!(expected.secrets.len(), 1);
+    assert_eq!(expected.secrets[0].identifier, request.secrets[0]);
+    let batch = fixture.staged_identity(7);
+    fixture.controller.apply_host_mutations(batch).unwrap();
+    let set = fixture.controller.plan_set(&request.secrets).unwrap();
+    let details = fixture
+        .controller
+        .approval_details(&request, None, &set)
+        .unwrap();
+    assert!(!details.skippable.contains(&request.secrets[0]));
+    assert!(
+        fixture
+            .controller
+            .client
+            .poll_and_claim()
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn predeployment_identity_denial_never_changes_store_or_queues_consumers() {
+    let mut fixture = Fixture::new("ns1", false);
+    fixture.initial_identity();
+    let before = std::fs::read(&fixture.store).unwrap();
+    let batch = fixture.staged_identity(9);
+    let token = fixture.pending(batch);
+    fixture
+        .controller
+        .host_mutations
+        .as_mut()
+        .unwrap()
+        .before_deploy = true;
+    let id = fixture.controller.active_approval_id().unwrap();
+    assert!(fixture.controller.host_mutations_before_deploy());
+    let result = fixture
+        .controller
+        .approve_host_mutations_inner(false, &token)
+        .unwrap();
+    assert!(result.is_none());
+    assert_eq!(std::fs::read(&fixture.store).unwrap(), before);
+    assert!(
+        fixture
+            .controller
+            .client
+            .poll_and_claim()
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        matches!(fixture.controller.client.approval_status(&id).unwrap(), ApprovalStatus::Resolved {decision:Decision::Rejected,message:Some(message)} if message.contains("no deployment sent"))
+    );
+}
+#[test]
+fn predeployment_continuation_error_clears_claim_after_approved_value_is_saved() {
+    let mut fixture = Fixture::new("ns1", false);
+    fixture.initial_identity();
+    let batch = fixture.staged_identity(9);
+    let token = fixture.pending(batch);
+    fixture
+        .controller
+        .host_mutations
+        .as_mut()
+        .unwrap()
+        .before_deploy = true;
+    let id = fixture.controller.active_approval_id().unwrap();
+    // A lost prepared connection cannot silently reopen or orphan the claim.
+    assert!(
+        fixture
+            .controller
+            .approve_host_mutations_inner(true, &token)
+            .unwrap_err()
+            .contains("connection is gone")
+    );
+    assert!(fixture.controller.active.is_none());
+    assert!(fixture.controller.host_mutations.is_none());
+    assert!(matches!(
+        fixture.controller.client.approval_status(&id).unwrap(),
+        ApprovalStatus::Resolved {
+            decision: Decision::Rejected,
+            ..
+        }
+    ));
+    assert!(
+        fixture
+            .controller
+            .client
+            .poll_and_claim()
+            .unwrap()
+            .is_none()
+    );
+}
+#[test]
+fn identity_publication_requires_prepared_authenticated_session() {
+    let mut fixture = Fixture::new("ns1", false);
+    let batch = super::host_mutations::HostMutationBatch::default();
+    let _token = fixture.pending(batch);
+    fixture.controller.host_mutations = None;
+    fixture
+        .controller
+        .active
+        .as_mut()
+        .unwrap()
+        .request
+        .secrets
+        .push("ns1.services.reporting-trust.receiver-known-hosts".into());
+    assert!(
+        fixture
+            .controller
+            .prepare_identity_for_active()
+            .unwrap_err()
+            .contains("original authenticated connection")
+    );
+    assert!(
+        fixture
+            .controller
+            .client
+            .get_public_info("reporting/receiver-known-hosts")
+            .unwrap()
+            .is_none()
+    );
+}
+#[test]
+fn other_deployed_consumers_are_deferred_until_original_selected_send() {
+    let mut fixture = Fixture::new("ns1", false);
+    let identity = fixture.trusted_identity(7);
+    let key = format!("ssh-ed25519 {}", identity.keys[0].encoded);
+    fixture
+        .controller
+        .client
+        .set_generated_public_key_if_version(
+            &SecretPath::parse("ns2.services.consumer-report.key").unwrap(),
+            nix_secrets_core::GeneratedPublicKey {
+                version_id: "local-generated-test".into(),
+                public_key: key,
+            },
+            None,
+        )
+        .unwrap();
+    let mut batch = fixture.staged_identity(7);
+    assert_eq!(batch.followups.len(), 1);
+    assert!(!batch.followups.contains_key("ns1"));
+    let followups = std::mem::take(&mut batch.followups);
+    let record = match &batch.mutations[0] {
+        super::host_mutations::HostMutation::Identity { proposed, .. } => proposed.clone(),
+        _ => panic!("identity proposal expected"),
+    };
+    fixture.controller.apply_host_mutations(batch).unwrap();
+    assert!(
+        fixture
+            .controller
+            .client
+            .poll_and_claim()
+            .unwrap()
+            .is_none(),
+        "prepared identity does not enqueue early or own-host deployment"
+    );
+    let publication = super::host_mutations::IdentityPublication {
+        path: SecretPath::parse("ns1.services.reporting-trust.receiver-known-hosts").unwrap(),
+        shared_id: "reporting/receiver-known-hosts".into(),
+        record,
+        request_id: "request".into(),
+        lease_id: 1,
+        followups,
+    };
+    assert!(
+        !publication.was_sent(&[], &BTreeMap::new()),
+        "unchecked trust value forces no followup"
+    );
+    let selected = vec![publication.path.to_string()];
+    assert!(!publication.was_sent(
+        &selected,
+        &BTreeMap::from([(publication.path.to_string(), "not deployed".into())])
+    ));
+    assert!(publication.was_sent(&selected, &BTreeMap::new()));
+    let mut after = super::host_mutations::HostMutationBatch::default();
+    after.committed_followups = publication.followups;
+    fixture.controller.apply_host_mutations(after).unwrap();
+    let (request, _) = fixture.controller.client.poll_and_claim().unwrap().unwrap();
+    assert_eq!(request.target, "ns2");
+    assert_eq!(
+        request.secrets,
+        ["ns2.services.reporting-trust.receiver-known-hosts"]
+    );
+    assert!(
+        fixture
+            .controller
+            .client
+            .poll_and_claim()
+            .unwrap()
+            .is_none()
+    );
 }

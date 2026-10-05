@@ -158,10 +158,13 @@ compatibility version to 9.
 
 ## Deployment transport
 
-The frontend constructs a direct SSH session to the final target. Intermediate
-components expose only a byte-transparent forwarding channel, equivalent to a
-strict ProxyCommand. They cannot supply host-key decisions on behalf of the
-frontend.
+The frontend authenticates an SSH session to the final target. With a remote
+backend, its existing SSH master forwards target TCP connections; the frontend
+checks the original target's host key and decrypts locally. A lost master stops
+deployment without reconnecting or falling back to a direct target connection.
+The supplemental direct host-key probe has a three-second budget. An unreachable
+direct route warns; any observed key differing from the tunneled endpoint aborts
+before target authentication or secret transmission.
 
 The frontend uses the user's OpenSSH host-key policy and `known_hosts` files.
 A changed key aborts. For an unknown key, the UI shows the presented key and

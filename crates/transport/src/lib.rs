@@ -6,6 +6,8 @@ mod invocation;
 mod openssh;
 mod protocol;
 mod receiver;
+mod route;
+pub use route::BackendRoute;
 
 pub use deployment::{
     read_wire_json, serve_deployment, write_wire_json, AppliedOutput, DeployEntry, DeploymentBatch,

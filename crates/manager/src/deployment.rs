@@ -17,6 +17,7 @@ pub struct Connection {
     /// The public keys the target's forwarder authorizes; the only ones
     /// offered. Empty: ssh's own choice.
     pub identity_public_keys: Vec<String>,
+    pub backend_route: Option<std::sync::Arc<nix_secrets_transport::BackendRoute>>,
 }
 
 impl Connection {
@@ -86,6 +87,7 @@ pub fn host_key_error(connection: &Connection, error: HostKeyError) -> String {
 
 pub fn preflight(connection: &Connection) -> Result<HostKeyPreflight, String> {
     HostKeyVerifier::new(connection.known_hosts.clone())
+        .with_route(connection.backend_route.clone())
         .preflight(&connection.host, connection.port)
         .map_err(|error| host_key_error(connection, error))
 }
@@ -157,7 +159,9 @@ pub fn prepare(
         destination: OsString::from(&connection.destination),
         host: connection.host.clone(),
         port: connection.port,
-        verifier: HostKeyVerifier::new(connection.known_hosts.clone()),
+        verifier: HostKeyVerifier::new(connection.known_hosts.clone())
+            .with_route(connection.backend_route.clone()),
+        backend_route: connection.backend_route.clone(),
         identities: connection.identities()?,
     };
     let current = open
@@ -231,6 +235,7 @@ mod tests {
 
     fn connection(known_hosts: PathBuf) -> Connection {
         Connection {
+            backend_route: None,
             name: "ns1".into(),
             destination: "nix-secrets-forward@ns1.lamk.eu".into(),
             host: "ns1.lamk.eu".into(),
@@ -261,28 +266,59 @@ mod tests {
                 expected: vec![KnownKey {
                     file: file.clone(),
                     line: Some(4),
-                    key: key("AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f"),
+                    key: key(
+                        "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f",
+                    ),
                 }],
-                offered: vec![key("AAAAC3NzaC1lZDI1NTE5AAAAIB8eHRwbGhkYFxYVFBMSERAPDg0MCwoJCAcGBQQDAgEA")],
+                offered: vec![key(
+                    "AAAAC3NzaC1lZDI1NTE5AAAAIB8eHRwbGhkYFxYVFBMSERAPDg0MCwoJCAcGBQQDAgEA",
+                )],
             })),
         );
-        assert!(changed.starts_with("Cannot deploy ns1 (ns1.lamk.eu:22)"), "{changed}");
-        assert!(changed.contains("SHA256:ZkAslGjFiUHdGf/WUL8rQvkib4PTvQatUV0OUQSncCA"), "{changed}");
+        assert!(
+            changed.starts_with("Cannot deploy ns1 (ns1.lamk.eu:22)"),
+            "{changed}"
+        );
+        assert!(
+            changed.contains("SHA256:ZkAslGjFiUHdGf/WUL8rQvkib4PTvQatUV0OUQSncCA"),
+            "{changed}"
+        );
         assert!(changed.contains("line 4"), "{changed}");
-        assert!(changed.contains(&format!("ssh-keygen -R ns1.lamk.eu -f {}", file.display())), "{changed}");
-        assert!(changed.contains(&format!("The known_hosts files checked: {}", file.display())), "{changed}");
+        assert!(
+            changed.contains(&format!("ssh-keygen -R ns1.lamk.eu -f {}", file.display())),
+            "{changed}"
+        );
+        assert!(
+            changed.contains(&format!(
+                "The known_hosts files checked: {}",
+                file.display()
+            )),
+            "{changed}"
+        );
         let rejected = host_key_error(&connection, HostKeyError::UnknownRejected);
-        assert!(rejected.contains("ns1 (ns1.lamk.eu:22)") && rejected.contains(&file.display().to_string()), "{rejected}");
+        assert!(
+            rejected.contains("ns1 (ns1.lamk.eu:22)")
+                && rejected.contains(&file.display().to_string()),
+            "{rejected}"
+        );
         let approved = HostIdentity {
             host: "ns1.lamk.eu".into(),
             port: 22,
-            keys: vec![key("AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f")],
+            keys: vec![key(
+                "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f",
+            )],
             other_names_with_keys: vec![],
         };
         let mut now = approved.clone();
-        now.keys = vec![key("AAAAC3NzaC1lZDI1NTE5AAAAIB8eHRwbGhkYFxYVFBMSERAPDg0MCwoJCAcGBQQDAgEA")];
+        now.keys = vec![key(
+            "AAAAC3NzaC1lZDI1NTE5AAAAIB8eHRwbGhkYFxYVFBMSERAPDg0MCwoJCAcGBQQDAgEA",
+        )];
         let text = identity_changed(&connection, &approved, &now);
-        assert!(text.contains("ns1 (ns1.lamk.eu:22)") && text.contains("approved: ssh-ed25519 SHA256:ZkAsl"), "{text}");
+        assert!(
+            text.contains("ns1 (ns1.lamk.eu:22)")
+                && text.contains("approved: ssh-ed25519 SHA256:ZkAsl"),
+            "{text}"
+        );
         assert!(text.contains("Nothing was sent"), "{text}");
     }
 }

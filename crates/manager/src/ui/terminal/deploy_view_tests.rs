@@ -358,3 +358,21 @@ fn host_replacement_review_shows_source_paths_purpose_and_fingerprints_without_d
     assert!(text.contains("y Save changes") && text.contains("n Reject changes"));
     assert!(!text.contains("y Deploy") && !text.contains("[x]"));
 }
+
+#[test]
+fn predeployment_identity_review_and_route_warning_do_not_claim_deployment_completed() {
+    let mut request=ns1_request();
+    request.host_mutations_before_deploy=true;
+    request.host_mutation_token=Some("before".into());
+    request.host_mutations=vec![crate::model::HostMutationReview {identifier:"shared.receiver-known-hosts".into(),kind:"report receiver host identity".into(),previous:vec!["SHA256:old".into()],proposed:vec!["SHA256:new".into()]}];
+    request.connection_warnings=vec!["Direct client host-key probe unavailable; discovery and deployment use the existing backend tunnel.".into()];
+    let text=deploy_view::plain(&deploy_view::approval_lines(&request,None,false,60));
+    assert!(text.contains("Deployment has not started"));
+    assert!(text.contains("before deployment"));
+    assert!(text.contains("cancels deployment"));
+    assert!(text.contains("Connection warning: Direct client"));
+    assert!(!text.contains("deployment already completed"));
+    request.host_mutations.clear(); request.host_key=Some("ssh-ed25519 SHA256:verified".into());
+    let trust=deploy_view::plain(&deploy_view::approval_lines(&request,None,false,60));
+    assert!(trust.contains("Connection warning: Direct client"));
+}

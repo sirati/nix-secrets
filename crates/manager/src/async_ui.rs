@@ -129,7 +129,7 @@ impl AsyncWriter {
                             &completion,
                             Completion::Deployed { .. }
                                 | Completion::ApprovalDone(None)
-                                | Completion::HostMutationsDeclined
+                                | Completion::HostMutationsDeclined { .. }
                         ) {
                             if let Some(id) = approval_id {
                                 let _ = outgoing.send(Event::ApprovalTerminated(id));
