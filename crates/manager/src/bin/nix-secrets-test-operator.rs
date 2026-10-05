@@ -18,6 +18,9 @@
 //!     [--launcher PATH]
 //! ```
 //!
+//! `--host-value-answer y|n` independently accepts or rejects host-provided
+//! nonempty replacements; it defaults to `n`.
+//!
 //! `--answer` is the key pressed on each deployment dialog: `y` approves,
 //! `p` then `y` approves a partial deployment, and `n` rejects. It also
 //! trusts an unknown host key with `y`. It exits after `--requests`
@@ -42,6 +45,7 @@ struct Options {
     identity: PathBuf,
     known_hosts: PathBuf,
     answer: char,
+    host_value_answer: char,
     requests: usize,
     set: Vec<(String, String)>,
     /// Decrypts through this nix-secrets-1password launcher, as the TUI
@@ -53,11 +57,16 @@ fn parse() -> Result<Options, String> {
     let mut arguments = std::env::args().skip(1);
     let (mut socket, mut schema, mut identity, mut known_hosts) = (None, None, None, None);
     let mut answer = 'y';
+    let mut host_value_answer = 'n';
     let mut requests = 1;
     let mut set = Vec::new();
     let mut launcher = None;
     while let Some(argument) = arguments.next() {
-        let mut value = || arguments.next().ok_or(format!("{argument} requires a value"));
+        let mut value = || {
+            arguments
+                .next()
+                .ok_or(format!("{argument} requires a value"))
+        };
         match argument.as_str() {
             "--backend-socket" => socket = Some(PathBuf::from(value()?)),
             "--schema-file" => schema = Some(PathBuf::from(value()?)),
@@ -70,6 +79,13 @@ fn parse() -> Result<Options, String> {
                     "n" => 'n',
                     other => return Err(format!("--answer must be y, p or n, not {other}")),
                 }
+            }
+            "--host-value-answer" => {
+                host_value_answer = match value()?.as_str() {
+                    "y" => 'y',
+                    "n" => 'n',
+                    _ => return Err("--host-value-answer must be y or n".into()),
+                };
             }
             "--set" => {
                 let assignment = value()?;
@@ -98,6 +114,7 @@ fn parse() -> Result<Options, String> {
         identity: identity.ok_or("--secret-identity is required")?,
         known_hosts: known_hosts.ok_or("--known-hosts is required")?,
         answer,
+        host_value_answer,
         requests,
         set,
         launcher,
@@ -107,10 +124,11 @@ fn parse() -> Result<Options, String> {
 /// Presses the operator's keys from what the model shows.
 struct Scripted {
     answer: char,
+    host_value_answer: char,
     remaining: usize,
     queued: VecDeque<UiEvent>,
     /// The deployment request whose dialog was already answered.
-    answered: Option<(String, bool)>,
+    answered: Option<(String, u8, Option<String>)>,
     /// The answered dialog failed and is still open.
     failed: bool,
     busy: bool,
@@ -151,7 +169,18 @@ impl Frontend for Scripted {
         }
         // The host-key question and the deployment dialog are separate steps
         // of the same request.
-        let step = (request.id.clone(), request.host_key.is_some());
+        let stage = if !request.host_mutations.is_empty() {
+            2
+        } else if request.host_key.is_some() {
+            0
+        } else {
+            1
+        };
+        let step = (
+            request.id.clone(),
+            stage,
+            request.host_mutation_token.clone(),
+        );
         if self.answered.as_ref() == Some(&step) {
             if std::mem::take(&mut self.failed) {
                 self.queued.push_back(UiEvent::Character('n'));
@@ -170,6 +199,16 @@ impl Frontend for Scripted {
             request.skippable
         );
         self.answered = Some(step);
+        if !request.host_mutations.is_empty() {
+            println!(
+                "host-value-review: source={} replacements={}",
+                request.target,
+                request.host_mutations.len()
+            );
+            self.queued
+                .push_back(UiEvent::Character(self.host_value_answer));
+            return Ok(());
+        }
         if request.host_key.is_some() {
             self.queued.push_back(UiEvent::Character('y'));
             return Ok(());
@@ -235,6 +274,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = AsyncWriter::spawn(controller, options.socket.clone());
     let mut frontend = Scripted {
         answer: options.answer,
+        host_value_answer: options.host_value_answer,
         remaining: options.requests,
         queued: VecDeque::new(),
         answered: None,
@@ -245,4 +285,46 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("ready");
     drive(&mut frontend, &mut writer, &mut Model::new(rows))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix_secrets_manager::model::{ApprovalRequest, HostMutationReview};
+    #[test]
+    fn deployment_consent_does_not_implicitly_consent_to_host_replacements() {
+        let mut scripted = Scripted {
+            answer: 'y',
+            host_value_answer: 'n',
+            remaining: 1,
+            queued: VecDeque::new(),
+            answered: None,
+            failed: false,
+            busy: false,
+        };
+        let mut model = Model::new(vec![]);
+        let normal = ApprovalRequest {
+            id: "same".into(),
+            target: "producer".into(),
+            ..Default::default()
+        };
+        model.mode = Mode::Approval(normal.clone());
+        scripted.draw(&model).unwrap();
+        assert_eq!(scripted.queued.pop_front(), Some(UiEvent::Character('y')));
+        let mut review = normal;
+        review.host_mutation_token = Some("new-phase".into());
+        review.host_mutations.push(HostMutationReview {
+            identifier: "receiver.known-hosts".into(),
+            kind: "receiver host identity".into(),
+            previous: vec!["SHA256:old".into()],
+            proposed: vec!["SHA256:new".into()],
+        });
+        model.mode = Mode::Approval(review);
+        scripted.draw(&model).unwrap();
+        assert_eq!(scripted.queued.pop_front(), Some(UiEvent::Character('n')));
+        assert_eq!(
+            scripted.remaining, 1,
+            "request is unfinished until replacement phase resolves"
+        );
+    }
 }

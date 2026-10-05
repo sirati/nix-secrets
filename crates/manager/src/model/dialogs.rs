@@ -32,7 +32,8 @@ impl Model {
         }
         if self.message.is_none()
             && !matches!(self.mode, Mode::Approval(_))
-            && !(severity == NoticeSeverity::Info && matches!(self.mode, Mode::Edit { .. })) {
+            && !(severity == NoticeSeverity::Info && matches!(self.mode, Mode::Edit { .. }))
+        {
             self.message = Some(notice);
         } else {
             self.notifications.push_back(notice);
@@ -50,18 +51,33 @@ impl Model {
     }
 
     pub fn offer_approval(&mut self, request: ApprovalRequest) {
-        if self.completed_approvals.contains(&request.id) { return; }
+        if self.completed_approvals.contains(&request.id) {
+            return;
+        }
         self.apply_task_status(&request);
-        if let Some(queued) = self.pending_approvals.iter_mut().find(|queued| queued.id == request.id) {
+        if let Some(queued) = self
+            .pending_approvals
+            .iter_mut()
+            .find(|queued| queued.id == request.id)
+        {
             // A stale trust stage must not replace an already advanced final stage.
-            if queued.host_key.is_some() || request.host_key.is_none() { *queued = request; }
+            if request.approval_stage() > queued.approval_stage()
+                || (request.approval_stage() == queued.approval_stage()
+                    && request.host_mutation_token == queued.host_mutation_token)
+            {
+                *queued = request;
+            }
         } else if let Mode::Approval(current) = &mut self.mode {
             if current.id == request.id {
-                if current.host_key.is_some() && request.host_key.is_none() { *current = request; }
+                if request.approval_stage() > current.approval_stage() {
+                    *current = request;
+                }
                 return;
             }
             self.pending_approvals.push_back(request);
-        } else { self.pending_approvals.push_back(request); }
+        } else {
+            self.pending_approvals.push_back(request);
+        }
         self.show_pending_approval();
     }
 
@@ -82,8 +98,10 @@ impl Model {
             if let Some(notice) = self.message.take() {
                 self.notifications.push_front(notice);
             }
-            self.mode = self.pending_dialogs.pop_front().unwrap_or_else(||
-                Mode::Approval(self.pending_approvals.pop_front().unwrap()));
+            self.mode = self
+                .pending_dialogs
+                .pop_front()
+                .unwrap_or_else(|| Mode::Approval(self.pending_approvals.pop_front().unwrap()));
             return;
         }
         if self.message.is_none() && matches!(self.mode, Mode::Browse) {
@@ -135,7 +153,9 @@ impl Model {
             .iter()
             .filter(|candidate| {
                 candidate.is_secret()
-                    && candidate.display_segments.starts_with(&row.display_segments)
+                    && candidate
+                        .display_segments
+                        .starts_with(&row.display_segments)
             })
             .filter_map(|candidate| crate::model::Attribute::Host.value(candidate))
             .collect::<std::collections::BTreeSet<_>>();

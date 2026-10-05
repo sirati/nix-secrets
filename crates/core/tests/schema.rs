@@ -246,3 +246,21 @@ fn optional_deployed_leaf_is_preserved_and_cannot_be_required_for_install() {
     document["host"]["services"]["mail"]["password"]["requiredForInstall"] = json!(true);
     assert!(Schema::from_json(&document.to_string()).is_err());
 }
+
+#[test]
+fn default_port_known_hosts_uses_real_openssh_lookup() {
+    use nix_secrets_core::schema::{known_hosts_keys, validate_ssh_known_hosts};
+    use std::process::Command;
+    let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let value = format!("receiver.example {key}\n[legacy.example]:22 {key}\n");
+    let hosts = ["receiver.example", "legacy.example"];
+    validate_ssh_known_hosts(&value, &hosts, 22).unwrap();
+    assert_eq!(known_hosts_keys(&value, &hosts, 22, "receiver.example").unwrap(), vec![key]);
+    assert!(validate_ssh_known_hosts(&value, &hosts, 23).is_err());
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("known_hosts");
+    std::fs::write(&file, value).unwrap();
+    let result = Command::new("ssh-keygen").args(["-F", "receiver.example", "-f"]).arg(file).output().unwrap();
+    assert!(result.status.success());
+    assert!(String::from_utf8(result.stdout).unwrap().contains("receiver.example ssh-ed25519"));
+}

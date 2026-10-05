@@ -135,9 +135,8 @@ fn validate_public_destination(
         || hosts.iter().any(|host| {
             host.is_empty()
                 || host.len() > 253
-                || !host
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+                || !(host.parse::<std::net::IpAddr>().is_ok()
+                    || host.bytes().all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b)))
         })
         || leaf.expected_ssh_port.unwrap_or(0) == 0
     {
@@ -155,7 +154,8 @@ pub const MAX_KNOWN_HOSTS_BYTES: usize = 64 * 1024;
 const MAX_KNOWN_HOSTS_LINES: usize = 256;
 
 /// Checks a public-info known_hosts value: one or more canonical lines
-/// `[host]:port algorithm key`, each naming one of `hosts` on `port`, with an
+/// `host algorithm key` on port 22, or `[host]:port algorithm key`, naming one
+/// of `hosts` on `port`, with an
 /// Ed25519, ECDSA or RSA key, no markers, wildcards, host lists or duplicates.
 pub fn validate_ssh_known_hosts(value: &str, hosts: &[&str], port: u16) -> Result<(), &'static str> {
     known_hosts_lines(value, hosts, port).map(|_| ())
@@ -203,9 +203,9 @@ fn known_hosts_lines<'a>(
         let host = hosts
             .iter()
             .copied()
-            .find(|host| parts[0] == format!("[{host}]:{port}"))
+            .find(|host| parts[0] == format!("[{host}]:{port}") || (port == 22 && parts[0] == *host))
             .ok_or("known_hosts host or port does not match the schema")?;
-        let host = &parts[0][1..1 + host.len()];
+        let host = if parts[0] == host { parts[0] } else { &parts[0][1..1 + host.len()] };
         let key = ssh_key::PublicKey::from_openssh(&format!("{} {}", parts[1], parts[2]))
             .map_err(|_| "invalid known_hosts key")?;
         if !matches!(

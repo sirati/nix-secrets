@@ -29,6 +29,7 @@ enum Command {
     GenerateKeypair(String),
     Approval(bool),
     ApprovalWith(bool, std::collections::BTreeSet<String>),
+    HostMutations(bool, String),
     RequestDeployment(String),
     SaveProfile {
         name: String,
@@ -110,7 +111,9 @@ impl AsyncWriter {
                     Ok(command) => {
                         let approval_id = if matches!(
                             &command,
-                            Command::Approval(_) | Command::ApprovalWith(_, _)
+                            Command::Approval(_)
+                                | Command::ApprovalWith(_, _)
+                                | Command::HostMutations(_, _)
                         ) {
                             controller.active_approval_id()
                         } else {
@@ -124,7 +127,9 @@ impl AsyncWriter {
                         };
                         if matches!(
                             &completion,
-                            Completion::Deployed { .. } | Completion::ApprovalDone(None)
+                            Completion::Deployed { .. }
+                                | Completion::ApprovalDone(None)
+                                | Completion::HostMutationsDeclined
                         ) {
                             if let Some(id) = approval_id {
                                 let _ = outgoing.send(Event::ApprovalTerminated(id));
@@ -473,6 +478,15 @@ impl SecretWriter for AsyncWriter {
         Err(OPERATION_QUEUED.into())
     }
 
+    fn approve_host_mutations(
+        &mut self,
+        accepted: bool,
+        token: &str,
+    ) -> Result<Option<ApprovalRequest>, String> {
+        self.queue(Command::HostMutations(accepted, token.to_owned()))?;
+        Err(OPERATION_QUEUED.into())
+    }
+
     fn request_deployment(&mut self, host: &str) -> Result<(), String> {
         self.queue(Command::RequestDeployment(host.to_owned()))
     }
@@ -607,6 +621,15 @@ fn describe(command: &Command, one_password: bool) -> Option<crate::model::Activ
         Command::Approval(true) | Command::ApprovalWith(true, _) => {
             ("Decrypting values for deployment".into(), true)
         }
+        Command::HostMutations(accepted, _) => (
+            if *accepted {
+                "Saving approved host-provided changes"
+            } else {
+                "Rejecting host-provided changes"
+            }
+            .into(),
+            false,
+        ),
         Command::ApprovalWith(false, _) => ("Rejecting deployment request".into(), false),
         Command::Approval(false) => ("Rejecting deployment request".into(), false),
         Command::RequestDeployment(host) => (format!("Requesting a deployment of {host}"), false),

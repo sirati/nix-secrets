@@ -186,6 +186,11 @@ in
       description = "Backend Unix socket advertised in the evaluated inventory.";
     };
     deployment = {
+      publishHostIdentityTo = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Public-info leaf receiving this host's authenticated SSH identity after deployment. Replacing an existing value requires separate client consent.";
+      };
       host = lib.mkOption {
         type = lib.types.strMatching "[^[:space:]]+";
         default = cfg.hostName;

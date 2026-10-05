@@ -26,10 +26,22 @@ pub struct Notice {
     pub severity: NoticeSeverity,
 }
 
+/// Public fingerprints and purposes for an exact host-provided replacement batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostMutationReview {
+    pub identifier: String,
+    pub kind: String,
+    pub previous: Vec<String>,
+    pub proposed: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ApprovalRequest {
     pub id: String,
     pub target: String,
+    pub host_mutations: Vec<HostMutationReview>,
+    /// Identifies the immutable batch shown here; ordinary deploy consent cannot save it.
+    pub host_mutation_token: Option<String>,
     pub create: Vec<String>,
     pub replace: Vec<String>,
     pub recipient_keys: Vec<String>,
@@ -59,6 +71,16 @@ pub struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
+    pub(crate) fn approval_stage(&self) -> u8 {
+        if !self.host_mutations.is_empty() {
+            2
+        } else if self.host_key.is_some() {
+            0
+        } else {
+            1
+        }
+    }
+
     /// Whether a partial deployment can proceed: something is missing and
     /// every missing value waits for another host.
     pub fn partial_possible(&self) -> bool {
@@ -75,7 +97,6 @@ impl ApprovalRequest {
         !self.checked().is_empty()
     }
 }
-
 
 /// A section of the deployment dialog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,6 +121,9 @@ impl ApprovalRequest {
     /// The rows with a checkbox, in display order: "Will be sent", then
     /// "Will be generated". Missing values have none.
     pub fn rows(&self) -> Vec<DeployRow> {
+        if !self.host_mutations.is_empty() {
+            return Vec::new();
+        }
         let missing = |identifier: &String| self.missing.iter().any(|(id, _)| id == identifier);
         let generated = |identifier: &String| self.generate.iter().any(|(id, _)| id == identifier);
         let derived = |identifier: &String| self.derived.iter().any(|(id, _)| id == identifier);

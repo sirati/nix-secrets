@@ -110,9 +110,14 @@ Public information uses a leaf with `kind = "public-info"`,
 `[public_info."storage-box/known-hosts"]` in `nix-secrets.toml`. The same value
 can be deployed to multiple hosts; each target checks the host, port, key
 format, and destination again. Public-info leaves never create a
-secrets-readiness waiter. `expectedSshHosts` allows additional hostnames and
+secrets-readiness waiter. `expectedSshHosts` allows additional hostnames.
 Multiple host-key pins are allowed. All leaves sharing an ID must
 agree on their validation settings. These features need receiver protocol 4.
+
+Set `deployment.publishHostIdentityTo` to this host's shared public-info leaf
+to publish the SSH identity verified by the client during deployment. Empty
+entries are filled automatically. Replacing an existing identity requires
+separate client TUI approval, followed by normal deployment to its consumers.
 
 Set `installDefaultIfMissing = true` on a public-info leaf and
 `publicInfoInventoryFile = "/absolute/path/to/nix-secrets.toml"` to embed only

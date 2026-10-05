@@ -59,7 +59,11 @@ fn draw(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
 fn screen(terminal: &Terminal<TestBackend>) -> String {
     let buffer = terminal.backend().buffer();
     (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -187,9 +191,18 @@ fn space_a_and_clicks_toggle_rows_and_sections() {
     assert!(request.unchecked.is_empty(), "{:?}", request.unchecked);
     let terminal = draw(&model, 120, 40);
     let text = screen(&terminal);
-    assert!(text.contains("[x] ▸ services.authoritative-dns.tsig"), "{text}");
-    crate::ui::reduce(&mut model, UiEvent::Click(MouseTarget::DeployRow(2)), &mut writer);
-    let Mode::Approval(request) = &model.mode else { panic!() };
+    assert!(
+        text.contains("[x] ▸ services.authoritative-dns.tsig"),
+        "{text}"
+    );
+    crate::ui::reduce(
+        &mut model,
+        UiEvent::Click(MouseTarget::DeployRow(2)),
+        &mut writer,
+    );
+    let Mode::Approval(request) = &model.mode else {
+        panic!()
+    };
     assert!(request.unchecked.contains(&rows[2].identifier));
     let text = screen(&draw(&model, 120, 40));
     assert!(text.contains("Will be generated on the target (0/1)"), "{text}");
@@ -259,7 +272,13 @@ fn rows_keep_their_identifiers_at_80x24_120x40_and_200x60() {
                 let name = if details { row.clone() } else { row.trim_start_matches("ns1.").to_owned() };
                 assert!(seen.contains(&name), "{width}x{height} details={details}: {name} cut:\n{}", screen(&draw(&model, width, height)));
             }
-            for header in ["Will be sent", "Will be generated on the target", "Missing", "Cannot deploy", "Needs input"] {
+            for header in [
+                "Will be sent",
+                "Will be generated on the target",
+                "Missing",
+                "Cannot deploy",
+                "Needs input",
+            ] {
                 assert!(seen.contains(header), "{width}x{height}: {header}");
             }
         }
@@ -306,4 +325,36 @@ fn deployment_dialogs_show_the_exact_request_id_at_every_approval_step() {
     let rendered = screen(&draw(&model, 100, 40));
     assert!(rendered.contains(&format!("Request: {current}")), "{rendered}");
     assert!(rendered.contains("n Dismiss"), "{rendered}");
+}
+
+#[test]
+fn host_replacement_review_shows_source_paths_purpose_and_fingerprints_without_deploy_buttons() {
+    let mut request = ns1_request();
+    request.target = "server-hetzner2".into();
+    request.host_mutation_token = Some("batch".into());
+    request.host_mutations = vec![crate::model::HostMutationReview {
+        identifier: "ns1.services.report-public-info.receiver-known-hosts".into(),
+        kind: "report receiver host identity".into(),
+        previous: vec!["ssh-ed25519 SHA256:original".into()],
+        proposed: vec!["ssh-ed25519 SHA256:replacement".into()],
+    }];
+    let body = deploy_view::plain(&deploy_view::approval_lines(&request, None, false, 60));
+    for expected in [
+        "Source host: server-hetzner2",
+        "ns1.services.report-public-info.receiver-known-hosts",
+        "report receiver host identity",
+        "SHA256:original",
+        "SHA256:replacement",
+        "target deployment already completed",
+        "nonempty TOML values have not been replaced",
+    ] {
+        assert!(body.contains(expected), "{body}");
+    }
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::Approval(request);
+    let terminal = draw(&model, 110, 40);
+    let text = screen(&terminal);
+    assert!(text.contains("Save host-provided changes"));
+    assert!(text.contains("y Save changes") && text.contains("n Reject changes"));
+    assert!(!text.contains("y Deploy") && !text.contains("[x]"));
 }

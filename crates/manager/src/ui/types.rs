@@ -110,6 +110,7 @@ pub enum Completion {
         total: usize,
     },
     ApprovalDone(Option<Box<ApprovalRequest>>),
+    HostMutationsDeclined,
     /// A deployment finished; lists values its target generated and stored,
     /// and those a partial deployment skipped.
     Deployed {
@@ -196,6 +197,14 @@ pub trait SecretWriter {
         _unchecked: &std::collections::BTreeSet<String>,
     ) -> Result<Option<ApprovalRequest>, String> {
         self.approval(accepted)
+    }
+    /// Accepts or rejects only the host replacement batch actually displayed.
+    fn approve_host_mutations(
+        &mut self,
+        _accepted: bool,
+        _token: &str,
+    ) -> Result<Option<ApprovalRequest>, String> {
+        Err("host-provided replacement approval is unavailable".into())
     }
     /// Asks the backend to deploy every deployable value of `host`; the
     /// request then arrives as an ordinary approval.

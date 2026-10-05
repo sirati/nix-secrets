@@ -86,8 +86,11 @@ impl SecretWriter for Controller {
     }
     fn reveal(&mut self, path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
         let path = SecretPath::parse(path).map_err(|error| error.to_string())?;
-        if matches!(self.schema.leaf(&path).map_err(|error| error.to_string())?, LeafSpec::Operator(spec) if spec.signing_only) {
-            return Err(format!("{path} is signing-only; plaintext export is forbidden"));
+        if matches!(self.schema.leaf(&path).map_err(|error| error.to_string())?, LeafSpec::Operator(spec) if spec.signing_only)
+        {
+            return Err(format!(
+                "{path} is signing-only; plaintext export is forbidden"
+            ));
         }
         if self.public_spec(&path)?.is_some() {
             return self.reveal_public_info(&path);
@@ -144,7 +147,7 @@ impl SecretWriter for Controller {
                 spec.external_input_required,
             ),
             LeafSpec::Operator(_) => {
-                return Err("operator keys are generated with their declared generator".into())
+                return Err("operator keys are generated with their declared generator".into());
             }
         };
         if external_input_required {
@@ -245,7 +248,7 @@ impl SecretWriter for Controller {
                 ) {
                     Ok(Some(public)) => public,
                     Ok(None) => {
-                        return Err(("OpenSSH public derivation is unavailable".into(), value))
+                        return Err(("OpenSSH public derivation is unavailable".into(), value));
                     }
                     Err(error) => return Err((error, value)),
                 };
@@ -264,6 +267,13 @@ impl SecretWriter for Controller {
 
     fn poll_approval(&mut self) -> Result<Option<UiApproval>, String> {
         self.poll_approval_inner()
+    }
+    fn approve_host_mutations(
+        &mut self,
+        accepted: bool,
+        token: &str,
+    ) -> Result<Option<UiApproval>, String> {
+        self.approve_host_mutations_inner(accepted, token)
     }
     fn approval(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
         self.approval_inner(accepted)

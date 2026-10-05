@@ -65,12 +65,29 @@ impl Attention {
             ..
         }) = model
         {
-            let id = format!("deployment:{}", request.id);
+            let replacement = !request.host_mutations.is_empty();
+            let id = if replacement {
+                format!(
+                    "host-mutations:{}:{}",
+                    request.id,
+                    request.host_mutation_token.as_deref().unwrap_or("missing")
+                )
+            } else {
+                format!("deployment:{}", request.id)
+            };
             self.update_request(
                 Some((
                     &id,
-                    "Deployment approval requested",
-                    "⚠ nix-secrets: deployment approval",
+                    if replacement {
+                        "Save host-provided changes requested"
+                    } else {
+                        "Deployment approval requested"
+                    },
+                    if replacement {
+                        "⚠ nix-secrets: save host-provided changes"
+                    } else {
+                        "⚠ nix-secrets: deployment approval"
+                    },
                 )),
                 remaining,
                 tmux,
@@ -349,5 +366,45 @@ mod model_attention_tests {
             attention.update_model(Some(&model), false).unwrap(),
             restore().into_bytes()
         );
+    }
+}
+
+#[cfg(test)]
+mod host_mutation_attention_tests {
+    use super::*;
+    use crate::model::{ApprovalRequest, HostMutationReview, Mode, Model};
+    #[test]
+    fn same_request_replacement_phase_gets_its_own_bell_title_and_notification() {
+        let mut model = Model::new(vec![]);
+        let mut attention = Attention::default();
+        let normal = ApprovalRequest {
+            id: "same".into(),
+            target: "producer".into(),
+            ..Default::default()
+        };
+        model.mode = Mode::Approval(normal.clone());
+        assert!(attention.update_model(Some(&model), false).is_some());
+        let mut review = normal;
+        review.host_mutation_token = Some("exact-review".into());
+        review.host_mutations.push(HostMutationReview {
+            identifier: "receiver.known-hosts".into(),
+            kind: "receiver host identity".into(),
+            previous: vec!["SHA256:old".into()],
+            proposed: vec!["SHA256:new".into()],
+        });
+        model.mode = Mode::Approval(review);
+        let bytes = attention
+            .update_model(Some(&model), false)
+            .expect("post-deploy phase needs fresh attention");
+        let notification = String::from_utf8(bytes).unwrap();
+        // Changing phases restores the previous request title before the new bell.
+        assert!(notification.starts_with(&format!("{}{BEL}", restore())));
+        assert!(notification.contains("Save host-provided changes requested"));
+        assert!(notification.contains("2;⚠ nix-secrets: save host-provided changes"));
+        assert!(
+            !notification.contains("exact-review"),
+            "internal token must not enter desktop notification"
+        );
+        assert!(attention.update_model(Some(&model), false).is_none());
     }
 }

@@ -10,6 +10,7 @@ impl Controller {
             let lease_id = active.lease_id;
             if let Err(error) = self.client.renew(id, lease_id) {
                 self.active.take();
+                self.host_mutations = None;
                 return Err(format!("approval lease was lost: {error}"));
             }
             self.active
@@ -18,6 +19,7 @@ impl Controller {
                 .renewed_at = Instant::now();
             return Ok(None);
         }
+        self.host_mutations = None;
         if self.background.is_some() && !std::mem::take(&mut self.approvals_ready) {
             return Ok(None);
         }
@@ -198,6 +200,7 @@ impl Controller {
         // never offered again. Retrying would open another authenticated
         // connection, and with it another agent or 1Password prompt.
         if let Err(error) = &result {
+            self.host_mutations = None;
             if let Some(active) = self.active.take() {
                 let _ = self.client.resolve(
                     active.request.id,
@@ -211,6 +214,9 @@ impl Controller {
     }
 
     fn answer_approval(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
+        if self.host_mutations.is_some() {
+            return Err("host-provided changes require their displayed review token".into());
+        }
         if accepted {
             if !self
                 .active
@@ -219,9 +225,18 @@ impl Controller {
                 .target_approved
             {
                 let active = self.active.as_ref().expect("active approval exists");
-                let verifier = nix_secrets_transport::HostKeyVerifier::new(self.known_hosts.clone());
-                verifier.preflight_approved(&active.connection.host, active.connection.port, &active.identity).map_err(|e| e.to_string())?;
-                verifier.persist_accepted(&active.identity).map_err(|e| e.to_string())?;
+                let verifier =
+                    nix_secrets_transport::HostKeyVerifier::new(self.known_hosts.clone());
+                verifier
+                    .preflight_approved(
+                        &active.connection.host,
+                        active.connection.port,
+                        &active.identity,
+                    )
+                    .map_err(|e| e.to_string())?;
+                verifier
+                    .persist_accepted(&active.identity)
+                    .map_err(|e| e.to_string())?;
                 self.prepare_active()?;
                 let active = self.active.as_mut().expect("active approval exists");
                 active.target_approved = true;
@@ -240,14 +255,14 @@ impl Controller {
             let (id, lease_id) = (active.request.id.clone(), active.lease_id);
             if let Err(error) = self.client.renew_for(id, lease_id, 900_000) {
                 self.active.take();
+                self.host_mutations = None;
                 return Err(format!("approval lease was lost: {error}"));
             }
             self.active
                 .as_mut()
                 .expect("approval remains active")
                 .renewed_at = Instant::now();
-            self.deploy_active()?;
-            return Ok(None);
+            return self.deploy_active();
         }
         let active = self.active.take().ok_or("no claimed approval request")?;
         let reason = match active.last_error {

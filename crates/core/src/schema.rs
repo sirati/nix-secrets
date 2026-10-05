@@ -50,6 +50,9 @@ pub struct HostMetadata {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeploymentMetadata {
+    /// Publish only the identity verified for a successful deployment.
+    #[serde(rename = "publishHostIdentityTo", default, skip_serializing_if = "Option::is_none")]
+    pub publish_host_identity_to: Option<String>,
     pub host: String,
     pub destination: String,
     pub port: u16,
@@ -180,6 +183,7 @@ impl Schema {
     pub fn validate(&self) -> Result<(), SchemaError> {
         self.identity_index()?;
         self.validate_derived()?;
+        let mut identity_producers = BTreeMap::<String, String>::new();
         let mut public_specs = BTreeMap::<String, (Vec<String>, u16)>::new();
         for (host_name, host) in &self.0 {
             validate_component(host_name)?;
@@ -197,6 +201,23 @@ impl Schema {
                     synthetic_path(host_name),
                     "deployment metadata is incomplete".into(),
                 ));
+            }
+            if let Some(identifier) = &host.metadata.deployment.publish_host_identity_to {
+                let path = SecretPath::parse(identifier)?;
+                let spec = self.secret(&path)?;
+                if !matches!(spec.kind, SecretKind::PublicInfo)
+                    || spec.shared_public_id.is_none()
+                    || spec.expected_ssh_port.is_none()
+                    || path.components().first() != Some(host_name)
+                {
+                    return Err(SchemaError::InvalidDestination(path,
+                        "publishHostIdentityTo requires this producer's shared public-info leaf".into()));
+                }
+                let shared = spec.shared_public_id.expect("checked above");
+                if identity_producers.insert(shared, host_name.clone()).is_some() {
+                    return Err(SchemaError::InvalidDestination(path,
+                        "shared host identity has more than one producer".into()));
+                }
             }
             for (namespace, services) in &host.service_groups {
                 validate_namespace(namespace)?;

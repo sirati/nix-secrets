@@ -139,6 +139,11 @@ values and target generation tasks, and asks for approval. Changed host keys
 are rejected; unknown keys require explicit trust. Decryption occurs on the
 laptop, and values reach the target through an end-to-end SSH connection.
 
+Hosts may fill empty inventory entries. Replacing an existing value or public
+key requires a separate "Save host-provided changes" approval in the client
+TUI. It shows the proposed changes and key fingerprints. If an entry changes
+after review, the write fails and requires a new approval.
+
 Unset passwords can be generated on the target. External credentials must be
 entered by the operator. Missing values are listed and skipped; their consuming
 services keep waiting while SSH remains available for repair. Deploying secrets

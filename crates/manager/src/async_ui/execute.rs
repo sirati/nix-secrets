@@ -51,6 +51,13 @@ pub(super) fn execute(controller: &mut Controller, command: Command) -> Completi
             let result = controller.approval_with(accepted, &unchecked);
             approval_done(controller, accepted, result)
         }
+        Command::HostMutations(accepted, token) => {
+            let result = controller.approve_host_mutations(accepted, &token);
+            match result {
+                Ok(None) if !accepted => Completion::HostMutationsDeclined,
+                other => approval_done(controller, accepted, other),
+            }
+        }
         Command::SaveProfile {
             name,
             profile,

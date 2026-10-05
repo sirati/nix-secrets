@@ -540,6 +540,9 @@ fn modal_title(mode: &Mode) -> &'static str {
         Mode::BulkProgress { .. } => "Generating passwords",
         Mode::GeneratedPreview { .. } => "Generated value",
         Mode::ProviderFailure { .. } => "Provider error",
+        Mode::Approval(request) if !request.host_mutations.is_empty() => {
+            "Save host-provided changes"
+        }
         Mode::Approval(_) => "Deployment request",
         Mode::Commit { .. } => "Git Commit",
         _ => "Dialog",

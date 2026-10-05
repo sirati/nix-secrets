@@ -183,6 +183,17 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
         // Only actions that can happen: a refused request offers no Approve.
         Mode::Approval(request) => {
             let mut buttons = Vec::new();
+            if !request.host_mutations.is_empty() {
+                if request
+                    .host_mutation_token
+                    .as_ref()
+                    .is_some_and(|token| !token.is_empty())
+                {
+                    buttons.push(letter("y Save changes", 'y'));
+                }
+                buttons.push(letter("n Reject changes", 'n'));
+                return buttons;
+            }
             if request.host_key.is_some() {
                 buttons.push(letter("y Trust and connect", 'y'));
                 buttons.push(letter("n Cancel", 'n'));

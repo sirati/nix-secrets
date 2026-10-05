@@ -32,8 +32,13 @@ fn dim() -> Style {
 
 /// The three steps of a deployment: host key, review, deploy.
 pub(crate) fn approval_title(request: &ApprovalRequest) -> String {
-    if request.host_key.is_some() {
-        format!("Deploy {} · step 1/3: verify the SSH host key", request.target)
+    if !request.host_mutations.is_empty() {
+        "Save host-provided changes".into()
+    } else if request.host_key.is_some() {
+        format!(
+            "Deploy {} · step 1/3: verify the SSH host key",
+            request.target
+        )
     } else if request.rows().is_empty() {
         format!("Deploy {} · nothing can be deployed yet", request.target)
     } else {
@@ -158,6 +163,9 @@ pub(crate) fn approval_lines(
     details: bool,
     width: usize,
 ) -> Vec<Line<'static>> {
+    if !request.host_mutations.is_empty() {
+        return host_mutation_lines(request, failure);
+    }
     let mut lines = Vec::new();
     if !request.id.is_empty() {
         lines.push(Line::raw(format!("Request: {}", request.id)));
@@ -178,7 +186,10 @@ pub(crate) fn approval_lines(
             dim(),
         ));
         lines.push(Line::default());
-        lines.push(Line::styled(host_key.clone(), Style::default().fg(Color::Yellow)));
+        lines.push(Line::styled(
+            host_key.clone(),
+            Style::default().fg(Color::Yellow),
+        ));
         if let Some(key) = &request.login_key {
             lines.push(Line::default());
             lines.push(Line::from(vec![
@@ -239,14 +250,21 @@ pub(crate) fn approval_lines(
                 lines.push(Line::styled(format!("        {}", what), dim()));
                 return;
             }
-            spans.push(Span::styled(format!("  {}", fit(what, width - used - 2)), dim()));
+            spans.push(Span::styled(
+                format!("  {}", fit(what, width - used - 2)),
+                dim(),
+            ));
         }
         lines.push(Line::from(spans));
     };
     let mut index = 0;
     for (section, title, color) in [
         (Section::Sent, "Will be sent", Color::Green),
-        (Section::Generated, "Will be generated on the target", Color::Cyan),
+        (
+            Section::Generated,
+            "Will be generated on the target",
+            Color::Cyan,
+        ),
     ] {
         let section_rows = rows
             .iter()
@@ -279,14 +297,23 @@ pub(crate) fn approval_lines(
     }
     if missing > 0 {
         lines.push(Line::default());
-        lines.push(Line::styled(format!("Missing ({missing})"), bold(Color::Yellow)));
+        lines.push(Line::styled(
+            format!("Missing ({missing})"),
+            bold(Color::Yellow),
+        ));
         for (title, group) in missing_groups(request) {
             lines.push(Line::styled(
                 format!("  {title} ({})", group.len()),
                 bold(Color::Yellow),
             ));
             for (identifier, reason) in group {
-                row_line(&mut lines, "    ".into(), name(&identifier), &reason, Color::Yellow);
+                row_line(
+                    &mut lines,
+                    "    ".into(),
+                    name(&identifier),
+                    &reason,
+                    Color::Yellow,
+                );
             }
         }
     }
@@ -331,4 +358,34 @@ pub(crate) fn plain(lines: &[Line<'_>]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn host_mutation_lines(request: &ApprovalRequest, failure: Option<&str>) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::raw(format!("Request: {}", request.id)),
+        Line::raw(format!("Source host: {}", request.target)),
+        Line::default(),
+        Line::styled("The target deployment already completed. Existing nonempty TOML values have not been replaced.", dim()),
+        Line::styled("Save exactly the changes below? Rejecting keeps the existing values.", bold(Color::Yellow)),
+    ];
+    if let Some(failure) = failure {
+        lines.push(Line::styled(failure.to_owned(), bold(Color::Red)));
+    }
+    for change in &request.host_mutations {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            format!("Path: {}", change.identifier),
+            bold(Color::Cyan),
+        ));
+        lines.push(Line::raw(format!("Purpose: {}", change.kind)));
+        lines.push(Line::styled("Existing fingerprints:", dim()));
+        for value in &change.previous {
+            lines.push(Line::raw(format!("  {value}")));
+        }
+        lines.push(Line::styled("Proposed fingerprints:", bold(Color::Yellow)));
+        for value in &change.proposed {
+            lines.push(Line::raw(format!("  {value}")));
+        }
+    }
+    lines
 }

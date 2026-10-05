@@ -112,3 +112,42 @@ fn terminal_result_removes_queued_copy_while_another_dialog_stays_active() {
     model.offer_approval(queued);
     assert!(model.pending_approvals.is_empty());
 }
+
+#[test]
+fn host_mutation_review_advances_same_request_and_stale_deploy_cannot_replace_it() {
+    let normal = ApprovalRequest {
+        id: "host-return".into(),
+        target: "producer".into(),
+        ..Default::default()
+    };
+    let mut review = normal.clone();
+    review.host_mutation_token = Some("exact-batch".into());
+    review.host_mutations.push(HostMutationReview {
+        identifier: "receiver.services.report.known-hosts".into(),
+        kind: "report receiver host identity".into(),
+        previous: vec!["SHA256:old".into()],
+        proposed: vec!["SHA256:new".into()],
+    });
+    let mut model = Model::new(vec![]);
+    model.offer_approval(normal.clone());
+    model.offer_approval(review.clone());
+    model.offer_approval(normal.clone());
+    assert!(
+        matches!(&model.mode,Mode::Approval(current) if current.host_mutation_token.as_deref()==Some("exact-batch"))
+    );
+    let mut deferred = Model::new(vec![]);
+    deferred.mode = Mode::Edit {
+        path: "unrelated".into(),
+        value: Zeroizing::new(vec![]),
+    };
+    deferred.offer_approval(review.clone());
+    deferred.offer_approval(normal);
+    assert_eq!(deferred.pending_approvals.len(), 1);
+    assert_eq!(
+        deferred.pending_approvals[0].host_mutation_token.as_deref(),
+        Some("exact-batch")
+    );
+    model.finish_approval("host-return");
+    model.offer_approval(review);
+    assert!(matches!(model.mode, Mode::Browse));
+}

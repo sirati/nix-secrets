@@ -3,14 +3,14 @@ use crate::deployment::{self, Connection};
 use crate::model::ApprovalRequest as UiApproval;
 use crate::tree::Row;
 use crate::ui::{Action, GenerateKind, SecretWriter};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use nix_secrets_core::{ApprovalRequest, LeafSpec, Schema, SecretKind, SecretPath, ValueType};
 use nix_secrets_core::{ProfileSnapshot, ViewProfile};
-use nix_secrets_crypto::{decrypt_secret, AgeCommandProvider, EncryptedSecret, Recipient};
+use nix_secrets_crypto::{AgeCommandProvider, EncryptedSecret, Recipient, decrypt_secret};
 use nix_secrets_transport::{
     DeployEntry, Destination, ExpectedSecret, ExpectedTarget, ExpectedTask, HostIdentity,
-    HostKeyStatus, PreparedDeployment, StorageBoxBootstrap, TargetState, TaskEntry,
-    STORAGE_BOX_SSH_KEY,
+    HostKeyStatus, PreparedDeployment, STORAGE_BOX_SSH_KEY, StorageBoxBootstrap, TargetState,
+    TaskEntry,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -39,6 +39,7 @@ pub struct Controller {
     provider: AgeCommandProvider,
     known_hosts: Vec<PathBuf>,
     active: Option<ActiveApproval>,
+    host_mutations: Option<host_mutations::PendingHostMutations>,
     background: Option<Receiver<BackgroundUpdate>>,
     pending_rows: Option<Vec<Row>>,
     pending_profiles: Option<ProfileSnapshot>,
@@ -127,6 +128,7 @@ impl Controller {
             provider,
             known_hosts,
             active: None,
+            host_mutations: None,
             background: None,
             pending_rows: None,
             pending_profiles: None,
@@ -223,7 +225,7 @@ impl Controller {
                 LeafSpec::Operator(_) => {
                     return Err(format!(
                         "{identifier} is operator-only and is never deployed"
-                    ))
+                    ));
                 }
                 LeafSpec::Generated(spec) => {
                     if spec.generated_secret.secret_type
@@ -277,6 +279,8 @@ impl Controller {
                     .collect()
             },
             host_key: None,
+            host_mutations: vec![],
+            host_mutation_token: None,
             tasks,
             generate: plan
                 .generate
@@ -298,7 +302,7 @@ impl Controller {
         })
     }
 
-    fn deploy_active(&mut self) -> Result<(), String> {
+    fn deploy_active(&mut self) -> Result<Option<UiApproval>, String> {
         self.phase("Waiting for backend deployment records");
         let active = self.active.as_ref().ok_or("no claimed approval request")?;
         let mut identifiers = active.request.secrets.clone();
@@ -435,7 +439,11 @@ impl Controller {
             // older or unknown; a target that says otherwise ends it here.
             return Err(format!(
                 "{source_host} runs a receiver older than deployment protocol 3 and cannot generate {}; update it first. Nothing was sent.",
-                plan.shared.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
+                plan.shared
+                    .iter()
+                    .map(|(id, _)| id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         let generate_entries = unset::generate_entries(&self.schema, &plan)?;
@@ -559,7 +567,7 @@ impl Controller {
                 LeafSpec::Operator(_) => {
                     return Err(format!(
                         "{identifier} is operator-only and is never deployed"
-                    ))
+                    ));
                 }
                 LeafSpec::Generated(_) => {
                     let contribution = crate::task::fresh_contribution()
@@ -582,6 +590,11 @@ impl Controller {
             .expect("prepared above");
         let deploy_entries_count = deploy_entries.len() + derive_on_target.len();
         let task_entries_count = task_entries.len();
+        let allowed_public_keys = task_entries
+            .iter()
+            .map(|entry| entry.identifier.clone())
+            .collect::<BTreeSet<_>>();
+
         self.phase("Waiting for SSH deployment and target generators");
         let applied = deployment::deploy(
             prepared,
@@ -590,12 +603,25 @@ impl Controller {
             generate_entries,
             derive_on_target,
         )?;
+        validate_returned_public_key_scope(&allowed_public_keys, &applied.generated_public_keys)?;
         self.phase("Saving target results to the backend");
         // Store generated values first: they are the only copy outside the target.
         let stored = self.store_generated(&applied.generated_records);
-        let registered =
-            self.register_public_keys(&source_host, &applied.generated_public_keys, &prefetched);
-        let active = self.active.take().expect("approval remains active");
+        let stored = stored?;
+        let mut batch = host_mutations::HostMutationBatch::default();
+        self.stage_public_keys(
+            &source_host,
+            &applied.generated_public_keys,
+            &prefetched,
+            &mut batch,
+        )?;
+        let identity = self
+            .active
+            .as_ref()
+            .expect("approval remains active")
+            .identity
+            .clone();
+        self.stage_host_identity(&source_host, &identity, &mut batch)?;
         // Values the target left out because a prerequisite is absent there.
         skipped.extend(applied.not_deployed.keys().cloned());
         plan.missing.extend(
@@ -623,25 +649,39 @@ impl Controller {
             left_out: left_out.clone(),
             missing: skipped.clone(),
         });
-        let summary = deployment_summary(
-            &source_host,
-            stored.as_ref().map(Vec::as_slice).unwrap_or(&[]),
-            &skipped,
-            stored.as_ref().err().or(registered.as_ref().err()),
-        );
+        if !batch.reviews().is_empty() {
+            let pending = host_mutations::PendingHostMutations {
+                batch,
+                request_id: self
+                    .active
+                    .as_ref()
+                    .expect("active approval exists")
+                    .request
+                    .id
+                    .clone(),
+                lease_id: self
+                    .active
+                    .as_ref()
+                    .expect("active approval exists")
+                    .lease_id,
+                token: host_mutations::random_token()?,
+                generated: stored,
+                skipped,
+            };
+            let review = self.host_mutation_review(&pending)?;
+            self.host_mutations = Some(pending);
+            return Ok(Some(review));
+        }
+        let active = self
+            .active
+            .as_ref()
+            .ok_or("approval lease was lost after deployment")?;
         self.client
-            .resolve(
-                active.request.id,
-                active.lease_id,
-                stored.is_ok() && registered.is_ok(),
-                Some(summary),
-            )
-            .map_err(|error| error.to_string())?;
-        let stored = stored?;
-        registered?;
-        self.last_generated = stored;
-        self.last_skipped = skipped;
-        Ok(())
+            .renew_for(active.request.id.clone(), active.lease_id, 900_000)
+            .map_err(|e| format!("approval lease was lost after deployment: {e}"))?;
+        self.apply_host_mutations(batch)?;
+        self.complete_host_deployment(stored, skipped)?;
+        Ok(None)
     }
 
     fn prepare_active(&mut self) -> Result<(), String> {
@@ -684,6 +724,7 @@ fn deployment_summary(
 
 mod background;
 mod generate;
+mod host_mutations;
 mod metadata;
 mod operator;
 mod preflight;
@@ -717,4 +758,19 @@ impl Controller {
                 .join(", "),
         )
     }
+}
+
+fn validate_returned_public_key_scope(
+    allowed: &BTreeSet<String>,
+    returned: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    if returned
+        .keys()
+        .any(|identifier| !allowed.contains(identifier))
+    {
+        return Err(
+            "target returned public-key metadata outside the approved task selection".into(),
+        );
+    }
+    Ok(())
 }
