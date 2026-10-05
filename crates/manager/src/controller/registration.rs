@@ -1,5 +1,5 @@
 use super::*;
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use std::collections::BTreeMap;
 
 impl Controller {
@@ -20,140 +20,176 @@ impl Controller {
         {
             return Err("invalid source hostname for public key registration".into());
         }
-        for (identifier, dated_key) in keys {
-            let source = SecretPath::parse(identifier).map_err(|e| e.to_string())?;
-            if source.components().first().map(String::as_str) != Some(source_host) {
-                return Err("generated key belongs to another host".into());
-            }
-            let LeafSpec::Generated(generated) =
-                self.schema.leaf(&source).map_err(|e| e.to_string())?
-            else {
-                return Err("generated key response did not match the schema".into());
-            };
-            let (stamp, public_key) = match generated.generated_secret.secret_type {
-                nix_secrets_core::GeneratedSecretType::LocalSshKey => {
-                    let (stamp, key) = parse_dated_key(dated_key)?;
-                    (Some(stamp), key)
+        let mut changed_destinations = BTreeMap::<String, BTreeSet<String>>::new();
+        let registered = (|| -> Result<(), String> {
+            for (identifier, dated_key) in keys {
+                let source = SecretPath::parse(identifier).map_err(|e| e.to_string())?;
+                if source.components().first().map(String::as_str) != Some(source_host) {
+                    return Err("generated key belongs to another host".into());
                 }
-                nix_secrets_core::GeneratedSecretType::StorageBoxSshKey => {
-                    let key = ssh_key::PublicKey::from_openssh(dated_key)
-                        .map_err(|_| "invalid target Storage Box public key")?;
-                    if key.algorithm() != ssh_key::Algorithm::Ed25519 {
-                        return Err("target Storage Box key is not Ed25519".into());
+                let LeafSpec::Generated(generated) =
+                    self.schema.leaf(&source).map_err(|e| e.to_string())?
+                else {
+                    return Err("generated key response did not match the schema".into());
+                };
+                let (stamp, public_key) = match generated.generated_secret.secret_type {
+                    nix_secrets_core::GeneratedSecretType::LocalSshKey => {
+                        let (stamp, key) = parse_dated_key(dated_key)?;
+                        (Some(stamp), key)
                     }
-                    (None, dated_key.as_str())
-                }
-            };
-            self.save_generated_public_key(
-                &source,
-                generated.generated_secret.secret_type,
-                public_key,
-            )?;
-            let Some(destination_id) = generated.generated_secret.register_at else {
-                continue;
-            };
-            let stamp = stamp.ok_or("Storage Box task cannot register an authorized key")?;
-            let destination = SecretPath::parse(&destination_id).map_err(|e| e.to_string())?;
-            let LeafSpec::Stored(target) =
-                self.schema.leaf(&destination).map_err(|e| e.to_string())?
-            else {
-                return Err("public key registration destination must be a stored secret".into());
-            };
-            if target.destination.content_type.as_deref() != Some("named-ssh-ed25519-public-keys") {
-                return Err(
-                    "public key registration destination lacks named-key validation".into(),
-                );
-            }
-            let name = format!("{source_host}-{stamp}");
-            let recipients = target
-                .recipient_ids
-                .iter()
-                .zip(&target.recipient_public_keys)
-                .map(|(id, key)| Recipient {
-                    id,
-                    ssh_public_key: key,
-                })
-                .collect::<Vec<_>>();
-            let mut registered = false;
-            for _ in 0..3 {
-                let previous = self.client.list().map_err(|e| e.to_string())?;
-                let current = previous.get(&destination_id);
-                let cached = current.and_then(|stored| {
-                    prefetched
-                        .get(&destination_id)
-                        .filter(|(version, _)| *version == stored.version_id)
-                        .map(|(_, value)| value.to_vec())
-                });
-                let lines = if let Some(value) = cached {
-                    String::from_utf8(value).map_err(|_| "registered public keys are not UTF-8")?
-                } else if let Some(stored) = current {
-                    let envelope = EncryptedSecret {
-                        format_version: stored.format_version,
-                        version_id: stored.version_id.clone(),
-                        recipient_ids: stored.recipient_ids.clone(),
-                        age_ciphertext: stored.age_ciphertext.clone(),
-                    };
-                    String::from_utf8(
-                        decrypt_secret(&destination_id, &envelope, &self.provider)
-                            .map_err(|e| e.to_string())?
-                            .to_vec(),
-                    )
-                    .map_err(|_| "registered public keys are not UTF-8")?
-                } else {
-                    String::new()
-                };
-                let updated = merge_named_key(&lines, source_host, &name, public_key);
-                // Encrypted here, so the read-back compares the stored record
-                // with this exact ciphertext instead of decrypting it again.
-                let encrypted = nix_secrets_crypto::encrypt_secret(
-                    &destination_id,
-                    updated.as_bytes(),
-                    &recipients,
-                    &self.provider,
-                )
-                .map_err(|e| e.to_string())?;
-                let envelope = nix_secrets_core::EncryptedSecret {
-                    format_version: encrypted.format_version,
-                    version_id: encrypted.version_id.clone(),
-                    recipient_ids: encrypted.recipient_ids.clone(),
-                    recipient_refs: vec![],
-                    age_ciphertext: encrypted.age_ciphertext.clone(),
-                    public_key: None,
-                };
-                match self.client.set_envelope_if_version(
-                    &destination,
-                    envelope,
-                    current.map(|record| record.version_id.clone()),
-                ) {
-                    Ok(()) => {
-                        let saved = self
-                            .client
-                            .get(&destination)
-                            .map_err(|e| e.to_string())?
-                            .ok_or("registered public key disappeared after save")?;
-                        if saved.version_id != encrypted.version_id
-                            || saved.age_ciphertext != encrypted.age_ciphertext
-                        {
-                            return Err(
-                                "registered public key failed read-back verification".into()
-                            );
+                    nix_secrets_core::GeneratedSecretType::StorageBoxSshKey => {
+                        let key = ssh_key::PublicKey::from_openssh(dated_key)
+                            .map_err(|_| "invalid target Storage Box public key")?;
+                        if key.algorithm() != ssh_key::Algorithm::Ed25519 {
+                            return Err("target Storage Box key is not Ed25519".into());
                         }
+                        (None, dated_key.as_str())
+                    }
+                };
+                self.save_generated_public_key(
+                    &source,
+                    generated.generated_secret.secret_type,
+                    public_key,
+                )?;
+                let Some(destination_id) = generated.generated_secret.register_at else {
+                    continue;
+                };
+                let stamp = stamp.ok_or("Storage Box task cannot register an authorized key")?;
+                let destination = SecretPath::parse(&destination_id).map_err(|e| e.to_string())?;
+                let LeafSpec::Stored(target) =
+                    self.schema.leaf(&destination).map_err(|e| e.to_string())?
+                else {
+                    return Err(
+                        "public key registration destination must be a stored secret".into(),
+                    );
+                };
+                if target.destination.content_type.as_deref()
+                    != Some("named-ssh-ed25519-public-keys")
+                {
+                    return Err(
+                        "public key registration destination lacks named-key validation".into(),
+                    );
+                }
+                let name = format!("{source_host}-{stamp}");
+                let recipients = target
+                    .recipient_ids
+                    .iter()
+                    .zip(&target.recipient_public_keys)
+                    .map(|(id, key)| Recipient {
+                        id,
+                        ssh_public_key: key,
+                    })
+                    .collect::<Vec<_>>();
+                let mut registered = false;
+                let mut changed = false;
+                for _ in 0..3 {
+                    let previous = self.client.list().map_err(|e| e.to_string())?;
+                    let current = previous.get(&destination_id);
+                    let cached = current.and_then(|stored| {
+                        prefetched
+                            .get(&destination_id)
+                            .filter(|(version, _)| *version == stored.version_id)
+                            .map(|(_, value)| value.to_vec())
+                    });
+                    let lines = if let Some(value) = cached {
+                        String::from_utf8(value)
+                            .map_err(|_| "registered public keys are not UTF-8")?
+                    } else if let Some(stored) = current {
+                        let envelope = EncryptedSecret {
+                            format_version: stored.format_version,
+                            version_id: stored.version_id.clone(),
+                            recipient_ids: stored.recipient_ids.clone(),
+                            age_ciphertext: stored.age_ciphertext.clone(),
+                        };
+                        String::from_utf8(
+                            decrypt_secret(&destination_id, &envelope, &self.provider)
+                                .map_err(|e| e.to_string())?
+                                .to_vec(),
+                        )
+                        .map_err(|_| "registered public keys are not UTF-8")?
+                    } else {
+                        String::new()
+                    };
+                    let updated = merge_named_key(&lines, source_host, &name, public_key);
+                    if updated == lines {
+                        // The target returns a fresh timestamp even for an existing
+                        // key. Preserve its label, ciphertext and version unchanged.
                         registered = true;
                         break;
                     }
-                    Err(error)
-                        if error
-                            .to_string()
-                            .contains("secret version changed during update") =>
-                    {
-                        continue
+                    // Encrypted here, so the read-back compares the stored record
+                    // with this exact ciphertext instead of decrypting it again.
+                    let encrypted = nix_secrets_crypto::encrypt_secret(
+                        &destination_id,
+                        updated.as_bytes(),
+                        &recipients,
+                        &self.provider,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let envelope = nix_secrets_core::EncryptedSecret {
+                        format_version: encrypted.format_version,
+                        version_id: encrypted.version_id.clone(),
+                        recipient_ids: encrypted.recipient_ids.clone(),
+                        recipient_refs: vec![],
+                        age_ciphertext: encrypted.age_ciphertext.clone(),
+                        public_key: None,
+                    };
+                    match self.client.set_envelope_if_version(
+                        &destination,
+                        envelope,
+                        current.map(|record| record.version_id.clone()),
+                    ) {
+                        Ok(()) => {
+                            let saved = self
+                                .client
+                                .get(&destination)
+                                .map_err(|e| e.to_string())?
+                                .ok_or("registered public key disappeared after save")?;
+                            if saved.version_id != encrypted.version_id
+                                || saved.age_ciphertext != encrypted.age_ciphertext
+                            {
+                                return Err(
+                                    "registered public key failed read-back verification".into()
+                                );
+                            }
+                            registered = true;
+                            changed = true;
+                            break;
+                        }
+                        Err(error)
+                            if error
+                                .to_string()
+                                .contains("secret version changed during update") =>
+                        {
+                            continue;
+                        }
+                        Err(error) => return Err(error.to_string()),
                     }
-                    Err(error) => return Err(error.to_string()),
+                }
+                if !registered {
+                    return Err(
+                        "public key inventory changed repeatedly; retry registration".into(),
+                    );
+                }
+                if changed {
+                    let target_host = destination
+                        .components()
+                        .first()
+                        .cloned()
+                        .ok_or("registration has no target")?;
+                    changed_destinations
+                        .entry(target_host)
+                        .or_default()
+                        .insert(destination_id);
                 }
             }
-            if !registered {
-                return Err("public key inventory changed repeatedly; retry registration".into());
-            }
+            Ok(())
+        })();
+        // Preserve follow-up consent for successful inventory writes even if
+        // a later result fails validation or storage. Nothing is auto-applied.
+        // Each changed target still requires explicit consent. Group inventory
+        // destinations from this one operation; never authorize a second send.
+        for (target, secrets) in changed_destinations {
             let mut random = [0_u8; 16];
             getrandom::fill(&mut random)
                 .map_err(|_| "cannot create key registration request ID")?;
@@ -164,21 +200,16 @@ impl Controller {
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>()
             );
-            let target_host = destination
-                .components()
-                .first()
-                .cloned()
-                .ok_or("registration has no target")?;
             self.client
                 .submit_approval(ApprovalRequest {
                     id,
-                    target: target_host,
-                    secrets: vec![destination_id],
+                    target,
+                    secrets: secrets.into_iter().collect(),
                     allow_partial: false,
                 })
                 .map_err(|e| e.to_string())?;
         }
-        Ok(())
+        registered
     }
 }
 
@@ -214,9 +245,26 @@ fn parse_dated_key(value: &str) -> Result<(&str, &str), String> {
 }
 
 fn merge_named_key(lines: &str, host: &str, name: &str, public_key: &str) -> String {
+    let host_lines = lines
+        .lines()
+        .filter(|line| owns_named_line(line, host))
+        .collect::<Vec<_>>();
+    if let [existing] = host_lines.as_slice() {
+        let existing_key = existing
+            .split_once(char::is_whitespace)
+            .map(|(_, key)| key.trim());
+        if let (Some(Ok(existing)), Ok(incoming)) = (
+            existing_key.map(ssh_key::PublicKey::from_openssh),
+            ssh_key::PublicKey::from_openssh(public_key),
+        ) {
+            if existing.key_data() == incoming.key_data() {
+                return lines.to_owned();
+            }
+        }
+    }
     let mut updated = lines
         .lines()
-        .filter(|line| !line.starts_with(&format!("{host}-")))
+        .filter(|line| !owns_named_line(line, host))
         .collect::<Vec<_>>()
         .join("\n");
     if !updated.is_empty() {
@@ -225,6 +273,17 @@ fn merge_named_key(lines: &str, host: &str, name: &str, public_key: &str) -> Str
     updated.push_str(&format!("{name} {public_key}\n"));
     updated
 }
+
+fn owns_named_line(line: &str, host: &str) -> bool {
+    line.split_ascii_whitespace()
+        .next()
+        .and_then(|name| name.rsplit_once('-'))
+        .is_some_and(|(owner, _)| owner == host)
+}
+
+#[cfg(test)]
+#[path = "registration_tests.rs"]
+mod integration_tests;
 
 #[cfg(test)]
 mod tests {
