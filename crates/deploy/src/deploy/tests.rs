@@ -312,3 +312,86 @@ fn rejects_store_and_namespace_symlinks() {
         .deploy(&batch(b"a", b"b"))
         .is_err());
 }
+
+#[test]
+fn identical_redeploy_keeps_runtime_reader_acl_until_the_value_changes() {
+    // owner r, named reader r, owning group r (spec 0440), mask r, other none.
+    fn acl(reader: u32) -> Vec<u8> {
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        for (tag, perms, id) in [
+            (1u16, 4u16, u32::MAX),
+            (2, 4, reader),
+            (4, 4, u32::MAX),
+            (16, 4, u32::MAX),
+            (32, 0, u32::MAX),
+        ] {
+            bytes.extend(tag.to_le_bytes());
+            bytes.extend(perms.to_le_bytes());
+            bytes.extend(id.to_le_bytes());
+        }
+        bytes
+    }
+    fn access(path: &Path) -> Option<Vec<u8>> {
+        let file = File::open(path).unwrap();
+        let mut value = vec![0; 65536];
+        match rustix::fs::fgetxattr(&file, "system.posix_acl_access", value.as_mut_slice()) {
+            Ok(length) => {
+                value.truncate(length);
+                Some(value)
+            }
+            Err(rustix::io::Errno::NODATA) => None,
+            Err(error) => panic!("cannot read POSIX ACL: {error}"),
+        }
+    }
+    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let deployer = Deployer::at(temp.path()).unwrap();
+    deployer.deploy(&batch(b"old-one", b"old-two")).unwrap();
+    let current = temp.path().join("mail/service/first");
+    let reader = acl(nix::unistd::geteuid().as_raw());
+    let file = File::open(&current).unwrap();
+    match rustix::fs::fsetxattr(
+        &file,
+        "system.posix_acl_access",
+        &reader,
+        rustix::fs::XattrFlags::empty(),
+    ) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::NOTSUP) => {
+            eprintln!(
+                "SKIP identical redeploy ACL proof: test filesystem does not support POSIX ACLs"
+            );
+            return;
+        }
+        Err(error) => panic!("cannot establish POSIX ACL fixture: {error}"),
+    }
+    drop(file);
+    let before = fs::metadata(&current).unwrap().ino();
+    // An update redeploys every value; identical ones keep their readers.
+    deployer.deploy(&batch(b"old-one", b"new-two")).unwrap();
+    assert_eq!(access(&current), Some(reader.clone()));
+    assert_eq!(fs::read(&current).unwrap(), b"old-one");
+    assert_ne!(fs::metadata(&current).unwrap().ino(), before);
+    // Same bytes under a different mode are a changed value: no inherited readers.
+    let mut stricter = entry("mail", "first", b"old-one");
+    stricter.mode = 0o400;
+    deployer
+        .deploy(&ResolvedBatch {
+            entries: vec![stricter],
+        })
+        .unwrap();
+    assert_eq!(access(&current), None);
+    assert_eq!(fs::metadata(&current).unwrap().mode() & 0o777, 0o400);
+    // Changed bytes likewise restage from the manifest.
+    let file = File::open(&current).unwrap();
+    rustix::fs::fsetxattr(
+        &file,
+        "system.posix_acl_access",
+        &acl(nix::unistd::geteuid().as_raw()),
+        rustix::fs::XattrFlags::empty(),
+    )
+    .ok();
+    drop(file);
+    deployer.deploy(&batch(b"new-one", b"new-two")).unwrap();
+    assert_eq!(access(&current), None);
+    assert_eq!(fs::read(&current).unwrap(), b"new-one");
+}

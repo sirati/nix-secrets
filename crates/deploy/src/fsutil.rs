@@ -1,7 +1,7 @@
 use crate::DeployError;
 use nix::unistd::{fchown, Gid, Uid};
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -133,6 +133,72 @@ fn remove_acl(file: &File, name: &str) -> Result<(), DeployError> {
 /// Changed values start from the manifest, not inherited directory readers.
 pub(crate) fn clear_access_acl(file: &File) -> Result<(), DeployError> {
     remove_acl(file, ACCESS_ACL)
+}
+
+/// A redeployed value whose bytes, owner, group and permissions already match
+/// the carried file keeps that file and its exact runtime reader ACL. Every
+/// update redeploys all values; restaging identical values without their
+/// readers broke services started during activation.
+pub(crate) fn unchanged_carried(
+    path: &Path,
+    contents: &[u8],
+    owner: u32,
+    group: u32,
+    mode: u32,
+) -> Result<bool, DeployError> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        // Absent or not a plain file: staging decides how to handle it.
+        Err(_) => return Ok(false),
+    };
+    let metadata = file.metadata()?;
+    let actual = metadata.mode() & 0o7777;
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.gid() != group
+        || metadata.len() != contents.len() as u64
+        || actual & !0o070 != mode & !0o070
+    {
+        return Ok(false);
+    }
+    // With an access ACL the group bits show its mask; the owning group's
+    // permission is then the ACL group-object entry.
+    let group_permission = match group_object(&file)? {
+        Some(permission) => u32::from(permission),
+        None => (actual >> 3) & 0o7,
+    };
+    if group_permission != (mode >> 3) & 0o7 {
+        return Ok(false);
+    }
+    let mut existing = Vec::with_capacity(contents.len());
+    (&file)
+        .take(contents.len() as u64 + 1)
+        .read_to_end(&mut existing)?;
+    Ok(existing == contents)
+}
+
+fn group_object(file: &File) -> Result<Option<u16>, DeployError> {
+    let mut value = vec![0u8; MAX_ACL_BYTES];
+    let length = match rustix::fs::fgetxattr(file, ACCESS_ACL, value.as_mut_slice()) {
+        Ok(length) => length,
+        Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP) => return Ok(None),
+        Err(error) => return Err(io::Error::from(error).into()),
+    };
+    let value = &value[..length];
+    if value.len() < 4 || (value.len() - 4) % 8 != 0 || value[..4] != 2u32.to_le_bytes() {
+        return Err(DeployError::Invalid(
+            "carried secret has an invalid POSIX ACL".into(),
+        ));
+    }
+    let entry = value[4..]
+        .chunks_exact(8)
+        .find(|entry| u16::from_le_bytes([entry[0], entry[1]]) == 4)
+        .ok_or_else(|| DeployError::Invalid("carried secret ACL has no group entry".into()))?;
+    Ok(Some(u16::from_le_bytes([entry[2], entry[3]])))
 }
 
 pub(crate) fn sync_tree(root: &Path) -> Result<(), DeployError> {

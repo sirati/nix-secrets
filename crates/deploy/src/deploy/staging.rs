@@ -67,6 +67,15 @@ impl Deployer {
     ) -> Result<(), DeployError> {
         let path = staging.join(&entry.relative);
         create_parents(staging, path.parent().expect("validated path has parent"))?;
+        if crate::fsutil::unchanged_carried(
+            &path,
+            &entry.spec.contents,
+            entry.spec.owner,
+            entry.spec.group,
+            entry.spec.mode,
+        )? {
+            return Ok(());
+        }
         if let Ok(metadata) = fs::symlink_metadata(&path) {
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(DeployError::Invalid(
