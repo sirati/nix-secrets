@@ -7,14 +7,27 @@
   util-linux,
   perl,
   acl,
+  runCommand,
 }:
 
+let
+  # Public test trust only: no private key is generated or stored here.
+  managedKnownHosts = runCommand "nix-secrets-managed-known-hosts-fixture" { } ''
+    mkdir -p "$out/etc/ssh" "$out/store-generation/ssh"
+    printf '%s\n' '[ns1.example]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f' > "$out/store-generation/ssh/ssh_known_hosts"
+    ln "$out/store-generation/ssh/ssh_known_hosts" "$out/store-generation/optimized-copy"
+    ln -s ../store-generation "$out/etc/static"
+    ln -s ../static/ssh/ssh_known_hosts "$out/etc/ssh/ssh_known_hosts"
+    ln -s loop "$out/loop"
+  '';
+in
 rustPlatform.buildRustPackage {
   pname = "nix-secrets";
   version = "0.1.0";
   src = ../..;
   cargoLock.lockFile = ../../Cargo.lock;
   strictDeps = true;
+  NIX_SECRETS_MANAGED_KNOWN_HOSTS_FIXTURE = managedKnownHosts;
   NIX_SECRETS_SIGNING_TEST_ARTIFACT = "${../..}/README.md";
   # The store tests compare records with a real git HEAD; deploy-time
   # generation tests encrypt with real age to a freshly generated SSH key.

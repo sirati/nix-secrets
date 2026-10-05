@@ -5,6 +5,7 @@ use std::os::{
     fd::AsRawFd,
     unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
 };
+use std::path::Path;
 
 const LIMIT: u64 = 4 * 1024 * 1024;
 fn refusal(message: &str) -> HostKeyError {
@@ -23,6 +24,131 @@ fn safe_file(file: &fs::File, owner: u32) -> Result<(), HostKeyError> {
         ));
     }
     Ok(())
+}
+/// Resolve a managed read-only file without trusting user-owned symlinks.
+/// O_PATH pins each directory/link; readlinkat on the link descriptor itself
+/// avoids a pathname race while NixOS switches /etc/static generations.
+fn managed_secondary(path: &Path) -> Result<fs::File, HostKeyError> {
+    use rustix::fs::{Mode, OFlags, openat};
+    let root = fs::File::from(
+        openat(
+            rustix::fs::CWD,
+            "/",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?,
+    );
+    managed_secondary_at(&root, path, 0)
+}
+/// The supplied descriptor is the filesystem namespace root. Production
+/// always supplies '/' and uid0. Tests use the immutable fixture namespace's
+/// mapped owner because Nix sandboxes expose root-owned dependencies as nobody.
+fn managed_secondary_at(
+    root: &fs::File,
+    path: &Path,
+    expected_owner: u32,
+) -> Result<fs::File, HostKeyError> {
+    use rustix::fs::{Mode, OFlags, openat, readlinkat};
+    use std::collections::VecDeque;
+    use std::os::unix::ffi::OsStringExt;
+    use std::path::Component;
+    if !path.is_absolute() {
+        return Err(refusal("managed known_hosts must be absolute"));
+    }
+    let mut directories = vec![root.try_clone()?];
+    let components = |value: &Path| -> VecDeque<std::ffi::OsString> {
+        value
+            .components()
+            .filter_map(|component| match component {
+                Component::RootDir => None,
+                Component::CurDir => Some(".".into()),
+                Component::ParentDir => Some("..".into()),
+                Component::Normal(name) => Some(name.to_owned()),
+                Component::Prefix(_) => Some("..".into()),
+            })
+            .collect()
+    };
+    let mut pending = components(path);
+    let mut links = 0;
+    let mut steps = 0;
+    while let Some(name) = pending.pop_front() {
+        steps += 1;
+        if steps > 256 {
+            return Err(refusal("managed known_hosts traversal exceeded limit"));
+        }
+        if name == "." {
+            continue;
+        }
+        if name == ".." {
+            if directories.len() == 1 {
+                return Err(refusal("managed known_hosts traverses above root"));
+            }
+            directories.pop();
+            continue;
+        }
+        let parent = directories.last().unwrap();
+        let meta = parent.metadata()?;
+        if !meta.is_dir()
+            || meta.uid() != expected_owner
+            || (meta.mode() & 0o022 != 0
+                && !(meta.uid() == expected_owner && meta.mode() & 0o1000 != 0))
+        {
+            return Err(refusal(&format!(
+                "unsafe managed known_hosts ancestor (uid={}, mode={:o}, managed uid={})",
+                meta.uid(),
+                meta.mode() & 0o7777,
+                expected_owner
+            )));
+        }
+        let pinned = fs::File::from(
+            openat(
+                parent,
+                &name,
+                OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(io::Error::from)?,
+        );
+        let meta = pinned.metadata()?;
+        if meta.uid() != expected_owner {
+            return Err(refusal("managed known_hosts entry is not root-owned"));
+        }
+        if meta.file_type().is_symlink() {
+            links += 1;
+            if links > 40 {
+                return Err(refusal("managed known_hosts has too many symlinks"));
+            }
+            let target = readlinkat(&pinned, "", Vec::new()).map_err(io::Error::from)?;
+            let target = PathBuf::from(std::ffi::OsString::from_vec(target.into_bytes()));
+            if target.is_absolute() {
+                directories.truncate(1);
+            }
+            let mut next = components(&target);
+            next.append(&mut pending);
+            pending = next;
+        } else if pending.is_empty() {
+            if !meta.is_file() || meta.mode() & 0o022 != 0 || meta.len() > LIMIT {
+                return Err(refusal("unsafe managed known_hosts file"));
+            }
+            let file = fs::File::open(format!(
+                "/proc/{}/fd/{}",
+                std::process::id(),
+                pinned.as_raw_fd()
+            ))?;
+            let opened = file.metadata()?;
+            if (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) {
+                return Err(refusal("managed known_hosts file changed"));
+            }
+            return Ok(file);
+        } else {
+            if !meta.is_dir() {
+                return Err(refusal("managed known_hosts ancestor is not a directory"));
+            }
+            directories.push(pinned);
+        }
+    }
+    Err(refusal("managed known_hosts does not name a file"))
 }
 impl HostKeyVerifier {
     /// Save an explicitly accepted identity. Existing different keys are never
@@ -143,6 +269,9 @@ impl HostKeyVerifier {
                 {
                     Ok(file) => file,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) => {
+                        managed_secondary(configured)?
+                    }
                     Err(e) => return Err(e.into()),
                 }
             };
@@ -236,7 +365,10 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
+            Self::under(&std::env::temp_dir())
+        }
+        fn under(parent: &Path) -> Self {
+            let path = parent.join(format!(
                 "nix-secrets-host-trust-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
@@ -347,5 +479,80 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    fn managed_fixture() -> PathBuf {
+        PathBuf::from(
+            std::env::var_os("NIX_SECRETS_MANAGED_KNOWN_HOSTS_FIXTURE").expect(
+                "run the normal Nix package check to provide the public root-owned fixture",
+            ),
+        )
+    }
+
+    #[test]
+    fn nixos_managed_secondary_namespace_pins_root_owned_immutable_file() {
+        let root = fs::File::open(managed_fixture()).unwrap();
+        let mapped_owner = root.metadata().unwrap().uid();
+        let mut content =
+            managed_secondary_at(&root, Path::new("/etc/ssh/ssh_known_hosts"), mapped_owner)
+                .unwrap();
+        assert_eq!(content.metadata().unwrap().uid(), mapped_owner);
+        assert!(content.metadata().unwrap().nlink() >= 2);
+        let mut bytes = Vec::new();
+        content.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes,b"[ns1.example]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f\n");
+        // ssh-keygen inspects the exact pinned file as in persistence, not a
+        // pathname that could resolve through a different namespace ancestry.
+        let output = ProcessRunner
+            .run(
+                OsStr::new("ssh-keygen"),
+                &[
+                    "-F".into(),
+                    "[ns1.example]:2222".into(),
+                    "-f".into(),
+                    format!("/proc/{}/fd/{}", std::process::id(), content.as_raw_fd()).into(),
+                ],
+            )
+            .unwrap();
+        assert!(output.success);
+        assert_eq!(parse_key_lines(&output.stdout).len(), 1);
+    }
+    #[test]
+    fn managed_secondary_namespace_refuses_user_root_escape_and_root_owned_loop() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let root = fs::File::open(managed_fixture()).unwrap();
+        let mapped_owner = root.metadata().unwrap().uid();
+        let link = fixture.0.join("user-link");
+        symlink(managed_fixture().join("etc/ssh/ssh_known_hosts"), &link).unwrap();
+        let untrusted_root = fs::File::open(&fixture.0).unwrap();
+        if rustix::process::geteuid().as_raw() != mapped_owner {
+            let error =
+                managed_secondary_at(&untrusted_root, Path::new("/user-link"), mapped_owner)
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("unsafe managed known_hosts ancestor"));
+        }
+        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            managed_secondary_at(&untrusted_root, Path::new("/user-link"), mapped_owner).is_err()
+        );
+        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            managed_secondary_at(
+                &root,
+                Path::new("/../etc/ssh/ssh_known_hosts"),
+                mapped_owner
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("above root")
+        );
+        assert!(
+            managed_secondary_at(&root, Path::new("/loop"), mapped_owner)
+                .unwrap_err()
+                .to_string()
+                .contains("too many symlinks")
+        );
     }
 }
