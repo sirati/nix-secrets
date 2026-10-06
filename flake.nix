@@ -125,6 +125,12 @@
               module = self.nixosModules.default;
             };
             pkgs.runCommand "required-for-install-module-test" { } "touch $out";
+          public-info-consumers =
+            assert import ./nix/tests/public-info-consumers.nix {
+              inherit nixpkgs system;
+              module = self.nixosModules.default;
+            };
+            pkgs.runCommand "public-info-consumers-test" { } "touch $out";
           real-age = pkgs.callPackage ./nix/checks/real-age.nix { };
           inherit (self.packages.${system}) secrets-ready-waiter;
           secrets-ready-waiter-vm = import ./nix/tests/secrets-ready-waiter.nix {

@@ -323,6 +323,19 @@ in
       )
     );
     environment.etc."nix-secrets/manifest.json".source = config.system.build.nixSecretsManifest;
-    systemd.services = lib.listToAttrs (map defaultUnit publicDefaults);
+    systemd.services = lib.mkMerge (
+      [ (lib.listToAttrs (map defaultUnit publicDefaults)) ]
+      # A consumer of a defaulted public-info leaf starts after its installer,
+      # as secret consumers start after their readiness waiter.
+      ++ lib.concatMap (
+        entry:
+        map (consumer: {
+          ${lib.removeSuffix ".service" consumer} = {
+            requires = [ "${(defaultUnit entry).name}.service" ];
+            after = [ "${(defaultUnit entry).name}.service" ];
+          };
+        }) (entry.leaf.consumerUnits or [ ])
+      ) publicDefaults
+    );
   };
 }
