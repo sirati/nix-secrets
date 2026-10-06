@@ -45,6 +45,8 @@ enum Command {
 }
 
 enum Event {
+    /// The worker's backend connection broke (`Some`) or works again.
+    Connection(Option<String>),
     WorkerStopped,
     Progress(usize, usize, bool, bool),
     Phase(&'static str),
@@ -56,6 +58,9 @@ enum Event {
     Error(String),
     ApprovalLost(String),
 }
+
+/// Why an open deployment dialog closed when the backend connection broke.
+pub const RECONNECTED_APPROVAL: &str = "The connection to the backend broke, so the open deployment request was discarded: nothing was deployed or saved from it, and its review must be read again. It opens again from its first step.";
 
 struct WorkerCompletionGuard(Sender<Event>);
 impl Drop for WorkerCompletionGuard {
@@ -84,6 +89,12 @@ pub struct AsyncWriter {
     channel: Option<Receiver<crate::operator_channel::ChannelEvent>>,
     decisions: Option<Sender<crate::operator_channel::OperatorInput>>,
     secret_prompts: Vec<crate::operator_channel::SecretPrompt>,
+    /// Why the worker's or the operator channel's backend connection is
+    /// down, while it is.
+    worker_lost: Option<String>,
+    channel_lost: Option<String>,
+    /// The procedures listed while attaching again after a loss.
+    attach_snapshot: Vec<String>,
     /// Shown while approved secret requests decrypt or sign, by request id.
     secret_activity: std::collections::BTreeMap<String, crate::model::Activity>,
     /// Procedure news from the operator channel, for the UI.
@@ -107,8 +118,32 @@ impl AsyncWriter {
         let (channel, decisions) = spawn_operator_channel(&controller, &socket, outgoing.clone());
         std::thread::spawn(move || {
             let _worker_completion = WorkerCompletionGuard(outgoing.clone());
+            controller.set_reconnect(socket.clone());
             controller.start_background_refresh(socket);
             loop {
+                match controller.reconnect_if_broken() {
+                    Some(crate::controller::Reconnected::Again { lost_approval }) => {
+                        if lost_approval.is_some()
+                            && outgoing.send(Event::ApprovalLost(RECONNECTED_APPROVAL.into())).is_err()
+                        {
+                            return;
+                        }
+                        if outgoing.send(Event::Connection(None)).is_err() {
+                            return;
+                        }
+                    }
+                    Some(crate::controller::Reconnected::Failed(error)) => {
+                        if outgoing.send(Event::Connection(Some(error))).is_err() {
+                            return;
+                        }
+                    }
+                    None => {}
+                }
+                if controller.disconnected() {
+                    // Nothing reaches the backend until it is back.
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
                 match incoming.recv_timeout(Duration::from_millis(25)) {
                     Ok(command) => {
                         let approval_id = if matches!(
@@ -203,6 +238,9 @@ impl AsyncWriter {
             secret_prompts: vec![],
             secret_activity: Default::default(),
             procedure_events: vec![],
+            worker_lost: None,
+            channel_lost: None,
+            attach_snapshot: vec![],
         }
     }
 
@@ -211,13 +249,22 @@ impl AsyncWriter {
             use crate::operator_channel::ChannelEvent;
             while let Ok(event) = channel.try_recv() {
                 match event {
-                    ChannelEvent::Attached => {}
+                    ChannelEvent::Attached => {
+                        let live = std::mem::take(&mut self.attach_snapshot);
+                        if self.channel_lost.take().is_some() {
+                            self.procedure_events.push(ProcedureEvent::Synced(live));
+                            self.procedure_events.push(ProcedureEvent::Reconnected);
+                        }
+                    }
                     ChannelEvent::Prompt(prompt) => self.secret_prompts.push(prompt),
                     ChannelEvent::Withdrawn(id) => {
                         self.secret_prompts.retain(|prompt| prompt.id != id);
                         self.procedure_events.push(ProcedureEvent::Withdrawn(id));
                     }
                     ChannelEvent::Procedure(step) => {
+                        if self.channel_lost.is_some() {
+                            self.attach_snapshot.push(step.id.clone());
+                        }
                         self.procedure_events.push(ProcedureEvent::Step(step))
                     }
                     ChannelEvent::ProcedureEnded(id) => {
@@ -236,9 +283,16 @@ impl AsyncWriter {
                         self.secret_activity.remove(&id);
                         self.completions.push(Completion::ArtifactSignatureFinished { id, requester, result });
                     }
-                    ChannelEvent::Lost(error) => self.completions.push(Completion::Failed(
-                        format!("Secret requests from the backend host can no longer reach this TUI: {error}"),
-                    )),
+                    ChannelEvent::Lost(error) => {
+                        // Requests on screen cannot be answered on the lost
+                        // channel; the backend sends them again.
+                        if self.channel_lost.is_none() {
+                            self.procedure_events.push(ProcedureEvent::Disconnected);
+                        }
+                        self.secret_prompts.clear();
+                        self.secret_activity.clear();
+                        self.channel_lost = Some(error);
+                    }
                 }
             }
         }
@@ -253,6 +307,7 @@ impl AsyncWriter {
             };
             match event {
                 Event::WorkerStopped => self.worker_stopped(),
+                Event::Connection(state) => self.worker_lost = state,
                 Event::ApprovalTerminated(id) => {
                     self.completions.push(Completion::ApprovalTerminated(id))
                 }
@@ -542,6 +597,13 @@ impl SecretWriter for AsyncWriter {
         result.unwrap_or_else(|reason| CommitState::Unknown { reason })
     }
 
+    fn connection_problem(&mut self) -> Option<String> {
+        self.pump();
+        self.worker_lost
+            .clone()
+            .or_else(|| self.channel_lost.clone())
+    }
+
     fn poll_procedure_event(&mut self) -> Option<ProcedureEvent> {
         self.pump();
         (!self.procedure_events.is_empty()).then(|| self.procedure_events.remove(0))
@@ -625,12 +687,15 @@ fn spawn_operator_channel(
     let (events, channel) = mpsc::channel();
     let (decisions, incoming) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = run(&socket, &schema, &provider, &identity, &events, &incoming);
-        let message = match result {
-            Ok(()) => "the backend closed the operator channel".to_owned(),
-            Err(error) => error.to_string(),
-        };
-        let _ = events.send(ChannelEvent::Lost(message));
+        crate::operator_channel::run_reconnecting(
+            &socket,
+            &schema,
+            &provider,
+            &identity,
+            &events,
+            &incoming,
+            Duration::from_secs(1),
+        )
     });
     (channel, decisions)
 }

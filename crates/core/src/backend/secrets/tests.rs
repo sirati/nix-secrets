@@ -80,7 +80,7 @@ fn next_job(jobs: &mpsc::Receiver<Inbox>) -> Job {
 fn next_frame(tui: &mut UnixStream) -> Response {
     loop {
         match read_json::<Response>(tui).unwrap().expect("the backend hung up") {
-            Response::Heartbeat => continue,
+            Response::Heartbeat | Response::ProceduresListed { .. } => continue,
             frame => return frame,
         }
     }
@@ -308,6 +308,11 @@ fn later_steps_of_a_procedure_have_no_deadline() {
         assert!(matches!(
             next_frame(&mut tui),
             Response::ProcedureUpdate { procedure } if procedure.step == 0
+        ));
+        // The attach snapshot ends with the ids of the live procedures.
+        assert!(matches!(
+            read_json::<Response>(&mut tui).unwrap(),
+            Some(Response::ProceduresListed { ids }) if ids.len() == 1
         ));
         let (requester, token) = (&requester, token.as_str());
         let operators = &operators;

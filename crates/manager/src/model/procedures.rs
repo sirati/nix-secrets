@@ -391,6 +391,29 @@ impl Model {
         }
     }
 
+    /// The operator channel broke: no prompt on it can be answered any more.
+    /// They are dropped, never answered; the backend keeps the requests
+    /// waiting and sends them again once the channel is attached again.
+    pub fn connection_lost(&mut self) {
+        for procedure in &mut self.procedures {
+            procedure.prompts.clear();
+        }
+        self.secret_scroll = 0;
+        self.secret_details = false;
+        self.tidy_procedures();
+    }
+
+    /// After (re)attaching: procedures of the backend that are not live
+    /// any more ended meanwhile.
+    pub fn procedures_synced(&mut self, live: &[String]) {
+        for procedure in &mut self.procedures {
+            if !procedure.implicit && !live.contains(&procedure.id) {
+                procedure.ended = true;
+            }
+        }
+        self.tidy_procedures();
+    }
+
     /// Alternates the flash phase every [`FLASH_PERIOD`]. Returns whether
     /// a flashing entry needs a redraw.
     pub fn flash_tick(&mut self, now: Instant) -> bool {

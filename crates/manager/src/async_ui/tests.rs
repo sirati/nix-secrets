@@ -94,6 +94,9 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
         secret_prompts: vec![],
         secret_activity: Default::default(),
         procedure_events: vec![],
+        worker_lost: None,
+        channel_lost: None,
+        attach_snapshot: vec![],
     };
     let worker = std::thread::spawn(move || {
         assert!(matches!(incoming.recv().unwrap(), Command::Reveal(_)));
@@ -157,6 +160,9 @@ fn slow_commands_describe_their_activity_until_completion() {
         secret_prompts: vec![],
         secret_activity: Default::default(),
         procedure_events: vec![],
+        worker_lost: None,
+        channel_lost: None,
+        attach_snapshot: vec![],
     };
     assert!(writer.activity().is_none());
     let _ = writer.reveal("host.services.test.first");
@@ -200,6 +206,9 @@ fn deployment_and_failed_save_keep_the_draft_until_retry_succeeds() {
         secret_prompts: vec![],
         secret_activity: Default::default(),
         procedure_events: vec![],
+        worker_lost: None,
+        channel_lost: None,
+        attach_snapshot: vec![],
     };
     assert!(writer.approval(true).is_err());
     assert!(matches!(incoming.recv().unwrap(), Command::Approval(true)));
@@ -317,6 +326,9 @@ fn submitted_values_queue_in_order_and_remain_owned_when_full() {
         secret_prompts: vec![],
         secret_activity: Default::default(),
         procedure_events: vec![],
+        worker_lost: None,
+        channel_lost: None,
+        attach_snapshot: vec![],
     };
     for index in 0..8 {
         assert_eq!(
@@ -370,6 +382,9 @@ fn stopped_worker_returns_every_accepted_draft_even_with_another_event_sender() 
         secret_prompts: vec![],
         secret_activity: Default::default(),
         procedure_events: vec![],
+        worker_lost: None,
+        channel_lost: None,
+        attach_snapshot: vec![],
     };
     for index in 0..3 {
         assert_eq!(
@@ -420,6 +435,9 @@ fn real_counts_and_wait_phases_keep_queued_save_activity() {
         secret_prompts: vec![],
         secret_activity: Default::default(),
         procedure_events: vec![],
+        worker_lost: None,
+        channel_lost: None,
+        attach_snapshot: vec![],
     };
     assert!(writer.approval(true).is_err());
     assert_eq!(
@@ -443,4 +461,62 @@ fn real_counts_and_wait_phases_keep_queued_save_activity() {
     writer.pump();
     assert!(writer.activity().unwrap().label.contains("Waiting for SSH"));
     assert_eq!(writer.drafts.len(), 2);
+}
+
+#[test]
+fn a_lost_channel_reports_the_outage_and_reattaching_lists_the_live_procedures() {
+    use crate::operator_channel::ChannelEvent;
+    let (commands, _incoming) = mpsc::channel();
+    let (_outgoing, events) = mpsc::channel();
+    let (channel_events, channel) = mpsc::channel();
+    let mut writer = AsyncWriter {
+        commands,
+        events,
+        rows: None,
+        profiles: None,
+        approvals: vec![],
+        completions: vec![],
+        busy: false,
+        pending: Default::default(),
+        drafts: Default::default(),
+        activity: None,
+        one_password: false,
+        socket: None,
+        channel: Some(channel),
+        decisions: None,
+        secret_prompts: vec![],
+        secret_activity: Default::default(),
+        procedure_events: vec![],
+        worker_lost: None,
+        channel_lost: None,
+        attach_snapshot: vec![],
+    };
+    let step = nix_secrets_core::procedure::ProcedureStep {
+        id: "proc-1".into(),
+        title: "Update ns1".into(),
+        step: 2,
+        steps: None,
+        label: "sign closure for ns1".into(),
+        deployment: false,
+    };
+    channel_events.send(ChannelEvent::Attached).unwrap();
+    channel_events.send(ChannelEvent::Lost("connection reset".into())).unwrap();
+    channel_events.send(ChannelEvent::Lost("connection refused".into())).unwrap();
+    assert_eq!(writer.connection_problem().as_deref(), Some("connection refused"));
+    channel_events.send(ChannelEvent::Procedure(step.clone())).unwrap();
+    channel_events.send(ChannelEvent::Attached).unwrap();
+    let mut seen = vec![];
+    while let Some(event) = writer.poll_procedure_event() {
+        seen.push(event);
+    }
+    assert_eq!(
+        seen,
+        [
+            ProcedureEvent::Disconnected,
+            ProcedureEvent::Step(step),
+            ProcedureEvent::Synced(vec!["proc-1".into()]),
+            ProcedureEvent::Reconnected,
+        ]
+    );
+    assert_eq!(writer.connection_problem(), None);
 }

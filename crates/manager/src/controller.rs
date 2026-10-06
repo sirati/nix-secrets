@@ -67,6 +67,24 @@ pub struct Controller {
     /// deployment that caused them. Kept here, never sent to the backend,
     /// which accepts procedure membership only from requesters it checked.
     followup_procedures: std::collections::BTreeMap<String, nix_secrets_core::procedure::ProcedureStep>,
+    /// Where to reconnect when the backend connection breaks.
+    socket: Option<PathBuf>,
+    /// Starts the backend, or its tunnel, again when the socket is gone.
+    restart: Option<Box<dyn Fn() -> Result<(), String> + Send>>,
+    /// When the next reconnection attempt may run, and the delay after it.
+    retry: Option<(Instant, Duration)>,
+}
+
+/// What a reconnection attempt did.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Reconnected {
+    /// The connection works again. `lost_approval` names the deployment
+    /// request whose dialog was open: its claim, prepared connection and
+    /// displayed review are discarded, and the backend offers it again from
+    /// its first step.
+    Again { lost_approval: Option<String> },
+    /// Still unreachable; the next attempt waits longer.
+    Failed(String),
 }
 
 /// The two network steps of a deployment before anything is sent: the
@@ -94,7 +112,6 @@ enum BackgroundUpdate {
     Rows(Vec<Row>),
     Profiles(ProfileSnapshot),
     ApprovalPending,
-    Error(String),
 }
 
 impl Controller {
@@ -122,6 +139,67 @@ impl Controller {
     pub fn with_keypair_runner(mut self, runner: KeypairRunner) -> Self {
         self.keypair_runner = runner;
         self
+    }
+
+    /// Reconnects to this socket when the backend connection breaks.
+    pub fn set_reconnect(&mut self, socket: PathBuf) {
+        self.socket = Some(socket);
+    }
+
+    /// Runs `restart` when reconnecting finds no backend: it starts the
+    /// backend, or the SSH tunnel to it, again.
+    pub fn set_restart(&mut self, restart: impl Fn() -> Result<(), String> + Send + 'static) {
+        self.restart = Some(Box::new(restart));
+    }
+
+    /// Whether the backend connection broke and is not yet restored.
+    pub fn disconnected(&self) -> bool {
+        self.client.broken()
+    }
+
+    /// Reconnects a broken backend connection, at most once per backoff
+    /// interval (1 s doubling up to 30 s). Returns `None` while the
+    /// connection works or the next attempt is not due.
+    pub fn reconnect_if_broken(&mut self) -> Option<Reconnected> {
+        if !self.client.broken() {
+            self.retry = None;
+            return None;
+        }
+        let socket = self.socket.clone()?;
+        let now = Instant::now();
+        let (due, delay) = self.retry.unwrap_or((now, Duration::from_secs(1)));
+        if now < due {
+            return None;
+        }
+        let connect = || {
+            crate::socket::connect_verified(&socket)
+                .map(BackendClient::new)
+                .and_then(|mut client| client.register_frontend().map(|()| client))
+                .map_err(|error| error.to_string())
+        };
+        let attempt = connect().or_else(|error| match &self.restart {
+            Some(restart) => restart().and_then(|()| connect()),
+            None => Err(error),
+        });
+        match attempt {
+            Ok(client) => {
+                self.client = client;
+                self.retry = None;
+                // The old session's claim went back to the queue when its
+                // connection closed. Nothing prepared or reviewed for it may be
+                // used again: the request opens again from its first step.
+                let lost_approval = self.active.take().map(|active| active.request.id);
+                self.host_mutations = None;
+                self.identity_publication = None;
+                self.connection_warnings.clear();
+                self.approvals_ready = true;
+                Some(Reconnected::Again { lost_approval })
+            }
+            Err(error) => {
+                self.retry = Some((now + delay, (delay * 2).min(Duration::from_secs(30))));
+                Some(Reconnected::Failed(error))
+            }
+        }
     }
 
     /// Replaces the deployment's host-key scan and login, for tests.
@@ -211,6 +289,9 @@ impl Controller {
             transport: Transport::default(),
             phase: None,
             followup_procedures: Default::default(),
+            socket: None,
+            restart: None,
+            retry: None,
         })
     }
 
@@ -221,8 +302,21 @@ impl Controller {
         let (sender, receiver) = mpsc::channel();
         self.background = Some(receiver);
         std::thread::spawn(move || {
-            if let Err(error) = background::listen(socket, schema, &sender) {
-                let _ = sender.send(BackgroundUpdate::Error(error.to_string()));
+            // A broken connection is listened to again, with backoff; the
+            // worker's own connection reports the outage meanwhile.
+            let mut delay = Duration::from_secs(1);
+            loop {
+                let started = Instant::now();
+                let result = background::listen(socket.clone(), schema.clone(), &sender);
+                if result.is_ok() {
+                    // Only a closed UI ends listening without an error.
+                    return;
+                }
+                if started.elapsed() > Duration::from_secs(60) {
+                    delay = Duration::from_secs(1);
+                }
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_secs(30));
             }
         });
     }
@@ -236,7 +330,6 @@ impl Controller {
                 BackgroundUpdate::Rows(rows) => self.pending_rows = Some(rows),
                 BackgroundUpdate::Profiles(snapshot) => self.pending_profiles = Some(snapshot),
                 BackgroundUpdate::ApprovalPending => self.approvals_ready = true,
-                BackgroundUpdate::Error(error) => self.background_error = Some(error),
             }
         }
     }

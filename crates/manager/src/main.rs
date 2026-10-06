@@ -368,6 +368,44 @@ fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(route) = backend_route {
         controller.set_backend_route(route);
     }
+    // When the backend or its tunnel is gone, reconnecting starts it again.
+    if remote_uid.is_none() {
+        let (socket, backend) = (local_socket.clone(), command::backend(&repository, &local_socket));
+        controller.set_restart(move || {
+            startup::connect_or_start(
+                &socket,
+                &backend,
+                &mut startup::ProcessLauncher::persistent(),
+                Duration::from_secs(120),
+            )
+            .map(drop)
+            .map_err(|error| format!("cannot start the backend again: {error}"))
+        });
+    } else {
+        let tunnel = std::sync::Mutex::new(None);
+        let uid = remote_uid.expect("remote UID was resolved above");
+        let remote_socket = PathBuf::from(format!("/run/user/{uid}/nix-secrets/{socket_name}"));
+        let (repository, ssh_args, local, control) = (
+            repository.clone(),
+            invocation.ssh_args.clone(),
+            local_socket.clone(),
+            control_socket.clone(),
+        );
+        controller.set_restart(move || {
+            let (connection, _) = startup::connect_remote(
+                &repository,
+                &ssh_args,
+                &local,
+                &remote_socket,
+                &control,
+                Duration::from_secs(120),
+            )
+            .map_err(|error| format!("cannot reach the remote backend again: {error}"))?;
+            // The new tunnel lives as long as this TUI.
+            *tunnel.lock().map_err(|_| "tunnel lock poisoned")? = Some(connection);
+            Ok(())
+        });
+    }
     let rows = controller.rows()?;
     let mut writer = AsyncWriter::spawn(controller, local_socket);
     ui::run(rows, &mut writer)?;

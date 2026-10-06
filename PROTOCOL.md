@@ -522,6 +522,37 @@ approval at a time. A second procedure's deployment therefore reaches the task
 bar only once the operator answers the open one. Meanwhile its entry shows
 "deployment queued behind the open one".
 
+## Reconnecting
+
+The TUI keeps working when its connection to the backend drops. This happens,
+for example, when the backend restarts or the SSH tunnel to a remote backend
+breaks. The status line then reads "Disconnected from the backend,
+reconnecting: REASON".
+
+- The worker connection reconnects with backoff. The delay starts at one
+  second and doubles up to 30 seconds. The worker then registers as a frontend
+  again. When the socket is gone, the TUI first starts the local backend again,
+  or opens a new SSH tunnel to the remote one.
+- The operator channel attaches again with the same backoff. The TUI closes a
+  lost channel before anything can answer on it. A break therefore never
+  approves or denies a request on screen. The request's prompt disappears. The
+  backend keeps the request waiting and sends it again, with the same id, to
+  the next TUI that attaches. That TUI shows it from the start, with a fresh
+  countdown if the request counts down. A decision made while disconnected
+  reaches nobody. When a TUI attaches, the backend first lists the live
+  procedures with `ProceduresListed`. The TUI drops the procedures that ended
+  meanwhile.
+- The TUI discards a deployment dialog that was open during the break. Its
+  broker claim went back to the queue with the old connection. Its prepared
+  connection, displayed host-change batch, and row selection are never used
+  again. The TUI tells the operator. The backend offers the request again
+  under a new claim from its first step, so the operator must see and read
+  every review again.
+- Change notifications resume on a new subscription and refresh the tree.
+
+A restarted backend loses its waiting requests and procedures with its
+process. Their requesters fail and must run again.
+
 ## Generated-secret tasks
 
 A generated leaf has `kind = "generated"` and a `generatedSecret` declaration

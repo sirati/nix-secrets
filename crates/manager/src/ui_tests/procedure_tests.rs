@@ -411,3 +411,67 @@ fn a_minimised_host_review_must_be_read_again_after_restoring() {
     reduce(&mut model, UiEvent::Character('y'), &mut channel);
     assert_eq!(channel.host_decisions, [(true, "shown-batch".to_owned())]);
 }
+
+#[test]
+fn a_lost_connection_clears_requests_without_answering_and_shows_the_outage() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(prompt(
+        "ssh",
+        Some(step(UPDATE, "Update ns1", 1, "SSH authentication to root@ns1")),
+    ));
+    channel
+        .events
+        .push(ProcedureEvent::Step(step(INSTALL, "Install ns2", 0, "starting")));
+    tick(&mut model, &mut channel);
+    assert!(model.shown_prompt().is_some());
+    // A minimised deployment of the same procedure is parked.
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    channel.events.push(ProcedureEvent::Disconnected);
+    tick(&mut model, &mut channel);
+    assert!(model.procedures.iter().all(|procedure| procedure.prompts.is_empty()));
+    assert!(channel.answers.is_empty(), "nothing was answered");
+    model.backend_problem = Some("connection refused".into());
+    assert!(render(&model).contains("Disconnected from the backend, reconnecting: connection refused"));
+    // Attached again: only live procedures stay.
+    channel.events.push(ProcedureEvent::Reconnected);
+    channel.events.push(ProcedureEvent::Synced(vec![UPDATE.into()]));
+    tick(&mut model, &mut channel);
+    assert!(model.procedure(UPDATE).is_some());
+    assert!(model.procedure(INSTALL).is_none(), "ended while disconnected");
+    assert!(model
+        .notifications
+        .iter()
+        .chain(model.message.iter())
+        .any(|notice| notice.text.contains("Reconnected")));
+    // The request comes back and is shown from the start.
+    channel.prompts.push(prompt(
+        "ssh",
+        Some(step(UPDATE, "Update ns1", 1, "SSH authentication to root@ns1")),
+    ));
+    tick(&mut model, &mut channel);
+    assert_eq!(model.procedure(UPDATE).unwrap().prompts.len(), 1);
+}
+
+#[test]
+fn a_deployment_lost_to_a_reconnection_leaves_no_parked_dialog() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    let deployment = ApprovalRequest {
+        id: "deploy-1".into(),
+        target: "ns1".into(),
+        create: vec!["ns1.services.a.b".into()],
+        procedure: Some(step(UPDATE, "Update ns1", 2, "deploy secrets to ns1")),
+        ..Default::default()
+    };
+    reduce(&mut model, UiEvent::Approval(deployment), &mut channel);
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    assert_eq!(model.pending_approvals.len(), 1);
+    crate::ui::apply_completion_for_tests(
+        &mut model,
+        crate::ui::Completion::ApprovalLost(crate::async_ui::RECONNECTED_APPROVAL.into()),
+    );
+    assert!(model.pending_approvals.is_empty());
+    reduce(&mut model, UiEvent::Character('M'), &mut channel);
+    assert!(!matches!(model.mode, Mode::Approval(_)), "no stale dialog can be restored");
+}

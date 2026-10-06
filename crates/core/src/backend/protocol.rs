@@ -317,6 +317,11 @@ pub enum Response {
     ProcedureUpdate {
         procedure: crate::procedure::ProcedureStep,
     },
+    /// On the operator channel, after the `ProcedureUpdate` of every live
+    /// procedure at attach: their ids. A reattaching TUI drops the rest.
+    ProceduresListed {
+        ids: Vec<String>,
+    },
     /// The procedure is over: on the operator channel, and as the answer to
     /// [`Request::EndProcedure`].
     ProcedureEnded {

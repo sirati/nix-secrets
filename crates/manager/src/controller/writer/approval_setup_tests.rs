@@ -210,3 +210,54 @@ fn a_known_host_is_not_logged_into_before_the_operator_approves_connecting() {
     assert_eq!(LOGINS.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_rejected(&mut cli, "deploy-known-host", "recorded login");
 }
+
+#[test]
+fn a_reconnection_discards_the_open_dialog_and_the_request_opens_again_from_step_one() {
+    let fixture = Fixture::new();
+    let stream = UnixStream::connect(&fixture.socket).unwrap();
+    let cut = stream.try_clone().unwrap();
+    let mut controller = Controller::new(
+        BackendClient::new(stream),
+        fixture.schema.clone(),
+        AgeCommandProvider::identity_file(fixture.root.path().join("unused-identity")),
+        vec![],
+    )
+    .unwrap()
+    .with_transport(crate::controller::Transport {
+        preflight: known_host,
+        prepare: recorded_login,
+    });
+    controller.set_reconnect(fixture.socket.clone());
+    let mut cli = fixture.client();
+    let mut request = request("deploy-across-reconnect");
+    request.secrets = vec!["ns1.services.report.password".into()];
+    cli.submit_approval(request).unwrap();
+    let first = controller.poll_approval_inner().unwrap().unwrap();
+    let first_lease = controller.active.as_ref().unwrap().lease_id;
+    assert!(first.host_key_known);
+    // The connection breaks while the dialog is open.
+    cut.shutdown(std::net::Shutdown::Both).unwrap();
+    assert!(controller.client.list().is_err());
+    assert!(controller.disconnected());
+    assert_eq!(
+        controller.reconnect_if_broken(),
+        Some(crate::controller::Reconnected::Again {
+            lost_approval: Some("deploy-across-reconnect".into())
+        })
+    );
+    // Nothing of the old dialog can be committed any more.
+    assert!(controller.active.is_none());
+    assert!(controller.approval_inner(true).is_err());
+    // The backend offers the request again under a new claim, from step 1.
+    let mut again = None;
+    let until = Instant::now() + Duration::from_secs(10);
+    while again.is_none() && Instant::now() < until {
+        again = controller.poll_approval_inner().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let again = again.expect("the request is offered again");
+    assert_eq!(again.id, "deploy-across-reconnect");
+    assert!(again.host_key.is_some(), "it starts again at step 1");
+    assert_ne!(controller.active.as_ref().unwrap().lease_id, first_lease);
+    controller.approval_inner(false).unwrap();
+}

@@ -142,12 +142,15 @@ A command on the repository machine can also queue a deployment:
 nix-secrets deploy --wait HOST
 ```
 
-Keep the laptop TUI open. It verifies the target host key and asks before it
-logs in. Your SSH agent or 1Password prompt therefore only follows that
-approval. The TUI then shows the selected values and the generation tasks for
-the target, and asks for approval. It rejects changed host keys, and you must
-trust unknown keys explicitly. The laptop decrypts the values and sends them to
-the target over an end-to-end SSH connection.
+Keep the laptop TUI open. If its connection to the backend breaks, it
+reconnects on its own and shows waiting requests again from the start. It
+discards an open deployment dialog and offers the request again. The TUI
+verifies the target host key and asks before it logs in. Your SSH agent or
+1Password prompt therefore only follows that approval. The TUI then shows the
+selected values and the generation tasks for the target, and asks for approval.
+It rejects changed host keys, and you must trust unknown keys explicitly. The
+laptop decrypts the values and sends them to the target over an end-to-end SSH
+connection.
 
 Hosts may fill empty inventory entries. To replace an existing value or public
 key, the client TUI asks for a separate "Save host-provided changes" approval.

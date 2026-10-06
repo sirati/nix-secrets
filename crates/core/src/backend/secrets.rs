@@ -272,9 +272,12 @@ pub(super) fn attach(
     let mut waiting: BTreeMap<String, Sender<Outcome>> = BTreeMap::new();
     let result = (|| -> io::Result<()> {
         write_json(stream, &Response::OperatorAttached)?;
-        for procedure in operators.procedures.snapshot() {
+        let live = operators.procedures.snapshot();
+        let ids = live.iter().map(|procedure| procedure.id.clone()).collect();
+        for procedure in live {
             write_json(stream, &Response::ProcedureUpdate { procedure })?;
         }
+        write_json(stream, &Response::ProceduresListed { ids })?;
         let mut last_heartbeat = Instant::now();
         loop {
             let wait = operators.heartbeat.saturating_sub(last_heartbeat.elapsed());

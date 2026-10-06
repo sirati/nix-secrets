@@ -49,6 +49,12 @@ pub enum ProcedureEvent {
     Ended(String),
     /// The backend withdrew this secret request.
     Withdrawn(String),
+    /// The operator channel broke; its requests cannot be answered.
+    Disconnected,
+    /// The operator channel is attached again.
+    Reconnected,
+    /// These procedures are live after (re)attaching; others ended meanwhile.
+    Synced(Vec<String>),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -282,6 +288,10 @@ pub trait SecretWriter {
     }
     /// A secret request waiting for the operator.
     fn poll_secret_prompt(&mut self) -> Option<crate::operator_channel::SecretPrompt> {
+        None
+    }
+    /// Why the TUI cannot reach the backend right now, while it reconnects.
+    fn connection_problem(&mut self) -> Option<String> {
         None
     }
     /// What the operator channel reported about procedures since the last

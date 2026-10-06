@@ -16,6 +16,8 @@ use std::os::unix::net::UnixStream;
 
 pub struct BackendClient {
     stream: UnixStream,
+    /// The connection failed; every later request on it would fail too.
+    broken: bool,
 }
 
 impl BackendClient {
@@ -55,7 +57,16 @@ impl BackendClient {
         }
     }
     pub fn new(stream: UnixStream) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            broken: false,
+        }
+    }
+
+    /// Whether the connection to the backend failed, so the caller should
+    /// reconnect.
+    pub fn broken(&self) -> bool {
+        self.broken
     }
 
     pub fn list(&mut self) -> io::Result<BTreeMap<String, StoredSecret>> {
@@ -418,13 +429,20 @@ impl BackendClient {
     }
 
     pub(crate) fn exchange(&mut self, request: &Request) -> io::Result<Response> {
-        write_json(&mut self.stream, request)?;
-        read_json(&mut self.stream)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "backend closed the connection",
-            )
-        })
+        let result = write_json(&mut self.stream, request).and_then(|()| {
+            read_json(&mut self.stream)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "backend closed the connection",
+                )
+            })
+        });
+        // Any transport failure leaves the framing unknown: the connection
+        // is not used again.
+        if result.is_err() {
+            self.broken = true;
+        }
+        result
     }
 }
 

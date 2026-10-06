@@ -427,6 +427,8 @@ pub struct Model {
     /// The phase of flashing task bar entries.
     pub flash_on: bool,
     pub flash_since: std::time::Instant,
+    /// Why the backend cannot be reached while the TUI reconnects.
+    pub backend_problem: Option<String>,
     pub secret_scroll: u16,
     /// Whether the secret-request modal shows full commands, fingerprints
     /// and descriptions instead of its summary.
@@ -520,6 +522,7 @@ impl Model {
             foreground: None,
             flash_on: false,
             flash_since: std::time::Instant::now(),
+            backend_problem: None,
             secret_scroll: 0,
             secret_details: false,
             approval_details: false,

@@ -117,6 +117,11 @@ pub(super) fn tick(model: &mut Model, writer: &mut impl SecretWriter) -> bool {
             ProcedureEvent::Withdrawn(id) => {
                 model.remove_prompt(&id);
             }
+            ProcedureEvent::Disconnected => model.connection_lost(),
+            ProcedureEvent::Reconnected => {
+                model.inform("Reconnected to the backend. Requests that still wait are shown again from the start.")
+            }
+            ProcedureEvent::Synced(ids) => model.procedures_synced(&ids),
         }
         changed = true;
     }

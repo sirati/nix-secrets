@@ -111,6 +111,13 @@ directly. Several procedures can wait at once; the TUI handles one
 deployment dialog at a time, and another procedure's deployment opens
 once that one is answered.
 
+CONNECTION
+If the connection to the backend breaks (backend restart, SSH hiccup), the
+status line says so and the TUI reconnects on its own, starting the backend
+or its tunnel again when needed. Requests on screen disappear without an
+answer and come back from the start once reconnected; an open deployment
+dialog is discarded and offered again from its first step.
+
 WORKING
 A strip at the top names a running decryption or save and counts seconds.
 It may be waiting for a 1Password approval prompt. The rest of the screen

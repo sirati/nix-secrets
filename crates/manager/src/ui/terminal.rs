@@ -59,7 +59,9 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
         );
     }
     if zones.status.height > 0 {
-        let status = if model
+        let status = if let Some(problem) = &model.backend_problem {
+            format!("Disconnected from the backend, reconnecting: {problem}")
+        } else if model
             .message
             .as_ref()
             .is_some_and(|notice| notice.severity == NoticeSeverity::Failure)

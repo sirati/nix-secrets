@@ -77,7 +77,8 @@ pub(crate) fn deadline_for(request: &SecretRequest) -> Option<Instant> {
 
 /// Events from the channel to the UI.
 pub enum ChannelEvent {
-    /// The channel is attached; requests now reach this TUI.
+    /// The channel is attached; requests now reach this TUI. The
+    /// `Procedure` events just before it list every live procedure.
     Attached,
     Prompt(SecretPrompt),
     /// The backend dropped this request: its requester left or the backend
@@ -207,6 +208,24 @@ pub fn run_with_agent(
     write_json(&mut stream, &Request::AttachOperator)?;
     match read_json::<Response>(&mut stream)? {
         Some(Response::OperatorAttached) => {
+            // The live procedures come first, then `Attached`: whatever the
+            // UI knew that is not among them ended meanwhile.
+            loop {
+                match read_json::<Response>(&mut stream)? {
+                    Some(Response::ProcedureUpdate { procedure }) => {
+                        if events.send(ChannelEvent::Procedure(procedure)).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Some(Response::ProceduresListed { .. }) => break,
+                    Some(Response::Heartbeat) => {}
+                    other => {
+                        return Err(io::Error::other(format!(
+                            "unexpected backend message while attaching: {other:?}"
+                        )))
+                    }
+                }
+            }
             if events.send(ChannelEvent::Attached).is_err() {
                 return Ok(());
             }
@@ -243,6 +262,7 @@ pub fn run_with_agent(
                 }
             }
         });
+        let mut ui_closed = false;
         let result = loop {
             // Backend frames and finished handlers first, then the UI.
             let mut finished = None;
@@ -340,12 +360,22 @@ pub fn run_with_agent(
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break Ok(()),
+                Err(RecvTimeoutError::Disconnected) => {
+                    ui_closed = true;
+                    break Ok(());
+                }
             }
         };
-        // Waiting handlers deny once their decisions channel closes. Their
-        // answers reach the backend before the connection closes, so each
-        // requester learns why; a handler busy decrypting gets a moment.
+        // A lost or broken connection is closed before any handler can
+        // answer on it: a request on screen is never denied by losing the
+        // channel. The backend keeps it waiting for the next attach.
+        if !ui_closed {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        // When the UI closed, waiting handlers deny once their decisions
+        // channel closes. Their answers reach the backend before the
+        // connection closes, so each requester learns why; a handler busy
+        // decrypting gets a moment.
         let outstanding = handlers.len();
         handlers.clear();
         let until = Instant::now() + Duration::from_secs(5);
@@ -590,4 +620,110 @@ fn signature_agent(
         "the SSH key {} is absent from this client's agents",
         crate::key_names::short_fingerprint(public_key)
     ))
+}
+
+/// Like [`run`], attaching again with backoff (from `first_delay`, doubling
+/// to 30 s) whenever the channel is lost, until the UI goes away. Each loss
+/// is reported as [`ChannelEvent::Lost`]. Requests on screen are dropped
+/// then, never answered: the backend keeps them waiting and sends them again
+/// once this TUI is attached, where they are shown from the start.
+pub fn run_reconnecting(
+    socket: &Path,
+    schema: &Schema,
+    provider: &(impl CryptoProvider + Sync),
+    identity: &str,
+    events: &Sender<ChannelEvent>,
+    decisions: &Receiver<OperatorInput>,
+    first_delay: Duration,
+) {
+    let mut delay = first_delay;
+    loop {
+        let started = Instant::now();
+        let result = run(socket, schema, provider, identity, events, decisions);
+        let message = match result {
+            Ok(()) => "the backend closed the operator channel".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        if events.send(ChannelEvent::Lost(message)).is_err() {
+            return;
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            delay = first_delay;
+        }
+        // Decisions made for dropped requests reach no handler.
+        let until = Instant::now() + delay;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            match decisions.recv_timeout(left) {
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        delay = (delay * 2).min(Duration::from_secs(30));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// A channel that breaks while a request is on screen closes without
+    /// answering it, even when the connection could still carry an answer.
+    #[test]
+    fn a_broken_channel_never_answers_the_request_on_screen() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("backend.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let backend = std::thread::spawn(move || {
+            let (mut operator, _) = listener.accept().unwrap();
+            assert!(matches!(
+                read_json::<Request>(&mut operator).unwrap(),
+                Some(Request::AttachOperator)
+            ));
+            write_json(&mut operator, &Response::OperatorAttached).unwrap();
+            write_json(&mut operator, &Response::ProceduresListed { ids: vec![] }).unwrap();
+            let request = SecretRequest {
+                id: "secret-1".into(),
+                identifiers: vec![],
+                reason: None,
+                ssh_signature: None,
+                artifact_signature: None,
+                closure_signature: None,
+                requester: ProcessInfo::read(std::process::id()),
+                parent: None,
+                procedure: None,
+            };
+            write_json(&mut operator, &Response::SecretRequested { request }).unwrap();
+            // The handler's own connection.
+            let (_handler, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            // Something the channel does not understand breaks it.
+            write_json(&mut operator, &Response::Success).unwrap();
+            operator
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let frame = read_json::<Request>(&mut operator);
+            assert!(
+                !matches!(frame, Ok(Some(Request::AnswerSecretRequest { .. }))),
+                "the break answered the request: {frame:?}"
+            );
+        });
+        let (events, channel) = mpsc::channel();
+        let (_inputs, incoming) = mpsc::channel::<OperatorInput>();
+        let provider = nix_secrets_crypto::AgeCommandProvider::default();
+        let result = run(
+            &socket,
+            &Schema(Default::default()),
+            &provider,
+            "test",
+            &events,
+            &incoming,
+        );
+        assert!(result.is_err());
+        assert!(channel
+            .try_iter()
+            .any(|event| matches!(event, ChannelEvent::Prompt(_))));
+        backend.join().unwrap();
+    }
 }

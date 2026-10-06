@@ -29,6 +29,11 @@ pub fn drive(
                 schedule(&mut redraw_at);
             }
             model.activity = activity;
+            let problem = writer.connection_problem();
+            if problem != model.backend_problem {
+                model.backend_problem = problem;
+                schedule(&mut redraw_at);
+            }
             if super::secret_request::tick(model, writer) {
                 schedule(&mut redraw_at);
             }
