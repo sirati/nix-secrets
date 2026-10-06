@@ -1,44 +1,31 @@
 # nix-secrets
 
 Edit encrypted secrets and deploy them to NixOS hosts. Nix declares the
-recipients, the file destinations and the services that consume each secret.
-`nix-secrets.toml` stores the values with age encryption. Plaintext never enters
-Nix evaluation or the Nix store.
+recipients, destinations and consuming services of each secret.
+`nix-secrets.toml` stores the values encrypted with age to SSH public keys.
+Plaintext never enters Nix evaluation or the Nix store.
 
-The TUI runs on the machine that holds your keys, typically a laptop. The
-repository and backend can be on another machine. Deploying secrets and
-updating a system are separate operations.
+The TUI runs on the machine that holds your keys. The repository and its
+backend can be on another machine.
 
 ## Install
-
-Add the flake to your configuration:
 
 ```nix
 inputs.nix-secrets.url = "github:sirati/nix-secrets";
 ```
 
-For 1Password support, install `nix-secrets-1password` on the operator machine:
+On the operator machine install `nix-secrets-1password` to decrypt with SSH
+keys stored in 1Password, or `nix-secrets-age` to decrypt with
+`--secret-identity PATH`. `nix-secrets-clipboard` adds clipboard support.
 
-```nix
-environment.systemPackages = [
-  inputs.nix-secrets.packages.${pkgs.system}.nix-secrets-1password
-];
-programs._1password.enable = true;
-programs._1password-gui.enable = true;
-```
-
-Enable SSH-agent and CLI integration in the 1Password desktop app. On NixOS,
-the CLI must use `/run/wrappers/bin/op`. Decryption reads the matching private
-key through the CLI, and SSH authentication uses the agent. These are separate
-permissions. See [1Password integration](AGE-PLUGIN-1P-REVIEW.md).
-
-Other packages are `nix-secrets-age` for `--secret-identity /runtime/path/to/key`,
-`nix-secrets-clipboard` for copying to the clipboard, and the default package
-for systems that already have the runtime tools in `PATH`.
+For 1Password, enable `programs._1password` and `programs._1password-gui`, and
+turn on CLI integration and the SSH agent in the app. The app accepts only the
+setgid `op` wrapper in `/run/wrappers/bin`. Decryption reads the one private
+key that matches the ciphertext with `op read`, and SSH logins use the agent.
+The app grants CLI access to the whole account for a session. Each decryption
+opens its own session unless you pass `--1password-shared-session`.
 
 ## Configure a target
-
-Import the module, declare recipients and secrets, and enable the receiver:
 
 ```nix
 { inputs, ... }: {
@@ -71,8 +58,8 @@ Import the module, declare recipients and secrets, and enable the receiver:
 }
 ```
 
-The destination owner and group must exist. Expose each host's evaluated
-inventory from the repository flake:
+The repository flake must expose the merged inventory of every host that
+enables nix-secrets, and the backend application for each backend system:
 
 ```nix
 nixSecretsSchemas = nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } (
@@ -84,127 +71,39 @@ apps.x86_64-linux.secrets-backend =
   inputs.nix-secrets.apps.x86_64-linux.secrets-backend;
 ```
 
-Export `secrets-backend` for each backend architecture you use. The inventory
-above should include only host configurations that enable nix-secrets.
+Deployment connects to `nix-secrets-forward@HOSTNAME` on port 22. Set
+`services.nixSecrets.deployment.host`, `destination` and `port` if that is
+wrong. All options are in the [Nix reference](nix/README.md).
 
-If the hostname differs from the SSH address, set
-`services.nixSecrets.deployment.host` and `deployment.destination`. By default
-deployment connects as `nix-secrets-forward@HOST` on port 22.
-
-The [Nix reference](nix/README.md) covers public information, keys generated on
-the target, derived values, operator-only keys and install prerequisites.
-
-## Open the TUI
-
-Local repository:
+## Run
 
 ```sh
 nix-secrets -- ~/infrastructure
-```
-
-Laptop TUI with the repository on a remote workstation:
-
-```sh
 nix-secrets user@workstation -- '~/infrastructure'
 ```
 
-Arguments before `--` are SSH arguments. The remote backend expands the quoted
-repository path. The launcher evaluates the inventory and starts a backend if
-none is running. The workstation needs Nix and SSH access to the repository.
-Startup runs the workstation's `secrets-backend` flake application.
+Arguments before `--` go to OpenSSH. With none, the repository is local. The
+launcher starts the repository's backend if none is running.
 
-Target connections go through the workstation's existing SSH tunnel. The client
-also checks the host key directly. If the direct route is unreachable, the
-client shows a warning. If the keys differ, deployment stops before it sends
-any secrets.
+## What deploying does
 
-## Edit and deploy
+The TUI sends each target only the leaves its own manifest declares, after the
+operator approves. The target installs them as one atomic generation at the
+declared paths, owners and modes. It generates unset passwords and leaves with
+a `valueGenerator` itself and returns only their ciphertext. Values that must
+be entered and are unset are skipped and listed. Their consumers keep waiting,
+while SSH stays available for repair.
 
-| Key | Action |
-| --- | --- |
-| Enter | Edit the selected value |
-| `g` / `G` | Generate one / all missing passwords |
-| `r` / `c` / `p` | Reveal / copy / copy the public key |
-| `d` | Delete after confirmation |
-| `/` | Search |
-| `F` / `T` / `S` | Filters / tree layout / saved views |
-| `C` | Commit the managed TOML files |
-| `D` | Deploy to a selected host |
+Deploying secrets does not build, install or switch the host's NixOS system.
 
-The TUI encrypts changes and saves them to the repository. Commit the
-ciphertext file so you can recover it. Profiles live separately in
-`nix-secrets-profiles.toml`. The commit dialog refuses to commit if unrelated
-changes are staged.
+## Documentation
 
-A command on the repository machine can also queue a deployment:
-
-```sh
-nix-secrets deploy --wait HOST
-```
-
-Keep the laptop TUI open. If its connection to the backend breaks, it
-reconnects on its own and shows waiting requests again from the start. It
-discards an open deployment dialog and offers the request again. The TUI
-verifies the target host key and asks before it logs in. Your SSH agent or
-1Password prompt therefore only follows that approval. The TUI then shows the
-selected values and the generation tasks for the target, and asks for approval.
-It rejects changed host keys, and you must trust unknown keys explicitly. The
-laptop decrypts the values and sends them to the target over an end-to-end SSH
-connection.
-
-Hosts may fill empty inventory entries. To replace an existing value or public
-key, the client TUI asks for a separate "Save host-provided changes" approval.
-That dialog shows the proposed changes and key fingerprints. If an entry
-changes after you review it, the write fails and you must approve again.
-
-The target can generate unset passwords. The operator must enter external
-credentials. The TUI lists missing values and skips them. Their consuming
-services keep waiting, and SSH stays available for repair. Deploying secrets
-does not install or update the host's NixOS system.
-
-## Use secrets from commands
-
-An approved backend command can request a batch of values through the open TUI:
-
-```sh
-nix-secrets with-secrets HOST.services.app.token \
-  --reason 'Authenticate the maintenance command.' -- maintenance-command
-```
-
-If no backend runs yet, the command starts it. It then waits until you open the
-TUI, and nothing counts down meanwhile. The TUI shows the request at once and
-does not evaluate the repository again.
-This sends the approved plaintext to that command on the backend, by design.
-For stdin delivery and client-side SSH authentication, see [Command reference](COMMANDS.md).
-
-## Group the prompts of one operation
-
-Some operations ask the TUI several times. An update run, for example,
-authenticates over SSH, signs its closure, and then deploys secrets. Such an
-operation can run as one procedure:
-
-```sh
-nix-secrets procedure --title 'Update ns1' --steps 4 -- nix-update-remote ns1
-```
-
-Every `nix-secrets` request the command makes then appears in one dialog,
-titled for example `Update ns1 · step 2/4: sign closure for ns1`. Only
-processes that the command started can join the procedure. Press `m` to
-minimise the dialog to the task bar above the actions. Press `M`, or click an
-entry, to restore a procedure. Several procedures can wait at once. A
-procedure that starts while another dialog is open stays minimised and
-flashes. It never takes the screen. Only the first step counts down to an
-automatic denial after 120 seconds. Press `c` to cancel the countdown. The
-requesting command is then told and keeps waiting.
-
-## Reference
-
-- [Nix declarations](nix/README.md)
-- [Command reference](COMMANDS.md)
+- [Nix reference](nix/README.md)
+- [Commands](COMMANDS.md)
 - [Storage Box bootstrap](STORAGE-BOX-BOOTSTRAP.md)
-- [Trust boundaries and recovery](THREAT-MODEL.md)
-- [Protocol and interoperability](PROTOCOL.md)
-- [Consumer tests](TESTING.md)
+- [Threat model](THREAT-MODEL.md)
+- [Protocol](PROTOCOL.md)
+- [Testing](TESTING.md)
 
 ## License
 

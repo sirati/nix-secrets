@@ -1,49 +1,15 @@
-# Consumer tests
+# Testing
 
-A NixOS VM test of a configuration that uses nix-secrets should not write
-secret files by hand. Enable the mock in the test configuration:
+## This repository
 
-```nix
-services.nixSecrets.mock = {
-  enable = true;                                   # test configurations only
-  iUnderstandThisIsATestOnlyConfiguration = true;  # required whenever enable is set
-  values = {                                       # non-secret test data
-    "<service>.<leaf path>" = "…";                 # a machine service leaf
-    "HOST.NAMESPACE.SERVICE.PATH" = "…";           # any leaf, e.g. a userServices one
-  };
-  generateRest = true;                             # default
-};
+```sh
+nix develop --command cargo test --workspace
+nix flake check
 ```
 
-At boot, `nix-secrets-mock-install.service` installs a value for every
-deployable leaf of the host that has no installed value yet. It runs
-`secret-deploy --mock-install`, which validates and publishes the values with
-the same code as a real deployment. Owner, group, mode, generations, service
-links and versions match production exactly, so the readiness waiters release
-their consumers as usual. The unit is ordered before the consumer units and
-works with or without `receiver.enable`.
+## Configurations that use nix-secrets
 
-Keys in `values` must name deployable leaves of this host. The mock rejects
-operator-only values. For a derived leaf, an explicit value is the source
-before framing. With `generateRest = true`, the mock generates missing values
-from the schema's generators and content requirements. Derived values on the
-same host reuse their mock source. Target-local SSH keys are generated locally.
-Storage Box bootstrap never contacts a real Storage Box. With
-`generateRest = false`, the installer fails if any value is missing.
-
-The mock never replaces an installed leaf. Generated values therefore stay the
-same across reboots, and the mock leaves a fully installed host untouched.
-
-The mock never reads or writes `nix-secrets.toml` and never talks to a
-backend. Explicit `values` go into the world-readable Nix store, so use only
-test data that is not secret.
-
-The mock must not run in production. Evaluation requires the explicit
-acknowledgement shown above. Mocked systems carry a `nix-secrets-mock` system
-tag, an evaluation warning and `/etc/nix-secrets/MOCK-SECRETS-TEST-ONLY`.
-The mock works in NixOS test VMs and in custom VM configurations.
-
-Example:
+A NixOS VM test can install test values with the mock:
 
 ```nix
 pkgs.testers.runNixOSTest {
@@ -61,3 +27,18 @@ pkgs.testers.runNixOSTest {
   '';
 }
 ```
+
+Keys in `values` are `SERVICE.PATH` for a machine service leaf or a full
+`HOST.NAMESPACE.SERVICE.PATH` identifier. They must name deployable leaves of
+the host. The values go into the Nix store, so use only test data.
+
+At boot, `nix-secrets-mock-install.service` runs before the consumer units. It
+installs every leaf that has no installed value yet through
+`secret-deploy --mock-install`, the same code path as a real deployment, so
+the readiness waiters behave as in production. With `generateRest = true` it
+generates missing values from their generators. With `generateRest = false`
+it fails if any value is missing. It never replaces an installed value, never
+reads `nix-secrets.toml` and never contacts a backend or Storage Box.
+
+A mocked system gets the `nix-secrets-mock` system tag, an evaluation warning
+and `/etc/nix-secrets/MOCK-SECRETS-TEST-ONLY`.

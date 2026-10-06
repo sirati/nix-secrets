@@ -1,81 +1,56 @@
-# Command reference
+# Commands
 
-## Repository and backend
+These commands run on the machine with the repository. They accept
+`--repository PATH`, which defaults to the working directory, and
+`--backend-socket PATH`. Without `--backend-socket` they start the repository's
+backend if none is running.
 
-```text
-nix-secrets [SSH_ARG ...] -- REPOSITORY
-```
+Each request waits until a TUI is attached and the operator answers it. A
+request for values or signatures is denied 120 seconds after the TUI shows it,
+unless the operator cancels that countdown. Inside a procedure only the first
+step has a countdown. Deployment requests have none.
 
-With no SSH arguments, the repository is local. Otherwise OpenSSH receives the
-arguments one by one, and the backend expands a leading `~/` on the remote
-machine. The repository configuration chooses the backend socket. Discovery
-checks that the socket peer runs as the same user. Several frontends can share
-one backend.
-
-The commands below run on the machine that holds the repository and backend.
-They accept `--repository PATH`, which defaults to the working directory, and
-`--backend-socket PATH`. Without `--backend-socket`, they start the repository's
-backend when none runs. This is the same backend the TUI would start. A TUI
-opened later shows their waiting requests at once and does not evaluate the
-repository again.
-
-## Deploy secrets
+## deploy
 
 ```text
-nix-secrets deploy [--repository PATH] [--backend-socket PATH] [--wait] HOST
+nix-secrets deploy [--wait] HOST
 ```
 
-The attached TUI must approve. Without `--wait`, success means the deployment
-is queued. With `--wait`, the command waits and exits with an error if the
-operator rejects the deployment or it fails. Missing values are skipped and
-reported. `--allow-partial` is accepted for compatibility and has no effect.
+Queues a deployment of every deployable leaf of HOST. Without `--wait`, it
+exits once the request is queued. With `--wait`, it exits non-zero if the
+operator rejects the deployment or it fails. `--allow-partial` is accepted and
+has no effect, because missing values are always skipped and listed.
 
-## Group requests into a procedure
+## procedure
 
 ```text
-nix-secrets procedure [--repository PATH] [--backend-socket PATH] --title TEXT [--steps N] -- COMMAND [ARGUMENT ...]
+nix-secrets procedure --title TEXT [--steps N] -- COMMAND [ARGUMENT ...]
 ```
 
-Runs COMMAND as one procedure. Every `nix-secrets` request that COMMAND or its
-descendants make becomes a numbered step of one TUI dialog titled TEXT. This
-covers `with-ssh-agent`, `with-secrets`, `pipe-secret`, `sign-artifacts`,
-`sign-closure` and `deploy`. `--steps` declares how many steps the title shows,
-as in `step 2/4`. The token in `NIX_SECRETS_PROCEDURE` admits only descendants
-of this command. The procedure ends when COMMAND exits, and the command returns
-COMMAND's exit status. If no backend is reachable, COMMAND still runs, and its
-prompts appear one by one.
+Runs COMMAND. Every request that COMMAND or its descendants make becomes a
+numbered step of one approval dialog titled TEXT. `--steps` sets the total
+shown in `step 2/4`. COMMAND receives the token in `NIX_SECRETS_PROCEDURE`.
+The command exits with COMMAND's status. If no backend is reachable, COMMAND
+still runs and its requests appear one by one.
 
-## Request plaintext for a command
-
-These commands, including `--local`, cannot export operator keys declared
-`signingOnly = true`, and the TUI cannot copy them.
+## with-secrets and pipe-secret
 
 ```text
-nix-secrets with-secrets [OPTIONS] IDENTIFIER... -- COMMAND [ARGUMENT ...]
-nix-secrets pipe-secret [OPTIONS] IDENTIFIER -- COMMAND [ARGUMENT ...]
-nix-secrets pipe-secret [OPTIONS] IDENTIFIER
+nix-secrets with-secrets [--reason TEXT] IDENTIFIER... -- COMMAND [ARGUMENT ...]
+nix-secrets pipe-secret [--reason TEXT] IDENTIFIER [-- COMMAND [ARGUMENT ...]]
 ```
 
-The TUI shows the requested values and the requesting process. It displays
-`--reason TEXT` as the caller's explanation without validating it.
-Ctrl+Shift+Y or Yes approves. Enter, Esc or `n` denies. A request expires after
-120 seconds unless the operator cancels the countdown with `c`. The command
-then prints "operator cancelled the auto-reject countdown; waiting" and keeps
-waiting. Inside a procedure, only the first step counts down. Without an
-attached TUI, these commands print "no nix-secrets TUI is attached yet; waiting
-until the operator opens it" and wait. Nothing is decrypted locally, and
-nothing counts down until the TUI shows the request.
+`with-secrets` asks once for up to 256 values. After approval it runs COMMAND
+with `NIX_SECRETS_SESSION` set. Descendants of COMMAND can then read those
+values with `pipe-secret` without another prompt. Other identifiers are
+refused. It exits with COMMAND's status. On denial COMMAND does not run.
 
-`with-secrets` asks once for the whole batch. It then runs the command with
-`NIX_SECRETS_SESSION` pointing to a temporary private socket. Descendant
-processes can use `pipe-secret` for those identifiers without another prompt.
-The session refuses values outside the batch. The session ends when the command
-exits, and `with-secrets` returns the command's exit status.
+`pipe-secret` writes one value to COMMAND's stdin. Without a command it writes
+the value to stdout, which must not be a terminal. Outside a session it asks
+for that one value.
 
-`pipe-secret -- COMMAND` sends the value to that command's stdin. Without a
-command, it writes the value and no other output to stdout, and stdout must not
-be a terminal. Outside an approved session, it requests approval for that one
-value.
+`--reason` is shown to the operator as unvalidated text of at most 4096 bytes.
+Operator keys declared `signingOnly = true` are never released.
 
 ```sh
 nix-secrets with-secrets HOST.services.signing.private-key \
@@ -84,67 +59,54 @@ nix-secrets with-secrets HOST.services.signing.private-key \
 nix-secrets pipe-secret HOST.services.signing.private-key -- signer --key-stdin
 ```
 
-Approving a request gives the backend command the plaintext. Processes running
-as the same user on that machine can read its memory, and the session socket
-does not protect against them. See [Threat model](THREAT-MODEL.md#secret-requests-from-the-backend-host).
+Approved plaintext is then in backend memory and in COMMAND. See the
+[threat model](THREAT-MODEL.md#secret-requests).
 
-### Local decryption
+`--local` decrypts in the calling process without the TUI. Use
+`--secret-identity PATH` or 1Password. `--1password-shared-session` reuses the
+terminal's 1Password authorization. `--schema-file PATH` reads the schema from
+a file and requires `--backend-socket`.
 
-`--local` decrypts in the calling process and does not ask the TUI. Use
-`--secret-identity PATH` for a private identity file available at runtime, or
-use the 1Password provider. By default the provider opens a separate 1Password
-session. `--1password-shared-session` reuses the terminal's existing 1Password
-authorization. `--schema-file PATH`, together with `--backend-socket`, applies
-to local mode.
-
-## Authenticate SSH from a backend command
+## with-ssh-agent
 
 ```sh
 nix-secrets with-ssh-agent --public-key ./login.pub \
-  --destination operator@host.example \
-  --reason 'Run the maintenance command.' -- \
+  --destination operator@host.example --reason 'Run maintenance.' -- \
   ssh -o IdentityAgent=SSH_AUTH_SOCK -o IdentitiesOnly=yes -i ./login.pub \
   -o StrictHostKeyChecking=yes operator@host.example maintenance-command
 ```
 
-The temporary agent offers only the selected Ed25519 key. The client TUI asks
-the operator to approve the SSH authentication challenge, then asks its local
-agent to sign it. The backend receives only the signature. The private key
-stays on the client.
+Runs COMMAND with a temporary agent that offers only the given Ed25519 key.
+Each signature request goes to the TUI, and the operator's own agent signs it.
+The agent signs only SSH user authentication for that key and user. Nothing
+checks the host name, so the SSH client must verify the host key.
 
-The agent accepts only login challenges for that key and username. It refuses
-requests that modify the agent, extension requests and Git signatures. Nothing
-validates the hostname and reason the caller supplies, so SSH must verify the
-host key. This relay is separate from the Git-only relay that the TUI commit
-dialog uses.
-
-## Sign boot artifacts on the client
+## sign-artifacts
 
 ```text
 nix-secrets sign-artifacts --host HOST --reason TEXT IDENTIFIER < manifest.json
 ```
 
-The attached TUI streams and hashes the immutable Nix store artifacts before it
-shows the approval dialog. After approval, it decrypts the signing-only key once
-on the client and returns detached signatures. The backend receives no private
-key. The frontend requires a locally selected immutable `nmbl-sign` executable
-in `NIX_SECRETS_ARTIFACT_SIGNER`. The sirati fleet's `nix-secrets-operator`
-package sets this variable to its locked signer. Requests cannot select another
-executable.
+Reads a JSON object of at most 64 KiB with an `artifacts` array. Each entry has
+`role`, `path`, lowercase `sha512` and `size`. The roles `generation-image`,
+`boot-config`, `gen-kernel`, `gen-initrd` and `rescue-sfs` are required.
+`network-stage` and `rescue-tools` are optional. The TUI streams and hashes
+the store files, and after approval its signer produces detached signatures.
+The output has a `signatures` array with the same role, digest and size plus
+`signature_base64`. The caller must reject missing or changed entries.
 
-The input is a JSON object of bounded size with an `artifacts` field. Each entry
-names its `role`, `path`, lowercase `sha512`, and `size`. The required roles are
-`generation-image`, `boot-config`, `gen-kernel`, `gen-initrd`, and `rescue-sfs`.
-`network-stage` and `rescue-tools` are optional. The output contains `signatures`, each with the
-same role, digest and size, plus `signature_base64`. The caller must reject
-missing or changed bindings.
+The TUI runs the signer named by `NIX_SECRETS_ARTIFACT_SIGNER` in its own
+environment. A request cannot choose another signer.
 
-### `sign-closure`
+## sign-closure
 
-`nix-secrets sign-closure --host HOST --reason TEXT IDENTIFIER` reads version 1
-Nix closure metadata from stdin and requests approval in the attached client TUI.
-The client decrypts the signing-only operator key locally and writes standard
-Nix Ed25519 signatures to stdout. The private key never reaches the backend.
-The approval dialog labels the metadata as supplied by the requester. It does
-not verify NAR contents. This command has no local decryption mode and no
-private-key export mode.
+```text
+nix-secrets sign-closure --host HOST --reason TEXT IDENTIFIER
+```
+
+Reads version 1 closure metadata from stdin and writes standard Nix Ed25519
+signatures to stdout. The TUI signs what the requester claims and does not
+check NAR contents.
+
+Both signing commands need an operator leaf with `signingOnly = true`. Neither
+has a local mode, and the private key stays in the TUI.
