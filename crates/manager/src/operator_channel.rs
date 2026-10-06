@@ -86,8 +86,8 @@ pub enum ChannelEvent {
     Withdrawn(String),
     /// A procedure started or reached a new step.
     Procedure(ProcedureStep),
-    /// A procedure ended.
-    ProcedureEnded(String),
+    /// A procedure ended, with its command's exit code if known.
+    ProcedureEnded(String, Option<i32>),
     /// A request finished: `Ok` names the requester, `Err` explains.
     Finished {
         id: String,
@@ -320,8 +320,8 @@ pub fn run_with_agent(
                             finished = Some(Ok(()));
                         }
                     }
-                    Internal::Frame(Response::ProcedureEnded { id }) => {
-                        if events.send(ChannelEvent::ProcedureEnded(id)).is_err() {
+                    Internal::Frame(Response::ProcedureEnded { id, exit_code }) => {
+                        if events.send(ChannelEvent::ProcedureEnded(id, exit_code)).is_err() {
                             finished = Some(Ok(()));
                         }
                     }

@@ -70,7 +70,7 @@ fn next_job(jobs: &mpsc::Receiver<Inbox>) -> Job {
     loop {
         match jobs.recv_timeout(Duration::from_secs(2)).unwrap() {
             Inbox::Job(job) => return job,
-            Inbox::Step(_) | Inbox::Ended(_) => continue,
+            Inbox::Step(_) | Inbox::Ended(..) => continue,
             _ => panic!("expected a job"),
         }
     }

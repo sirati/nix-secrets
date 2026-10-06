@@ -46,7 +46,8 @@ pub enum MouseTarget {
 pub enum ProcedureEvent {
     /// A procedure started or reached a new step.
     Step(nix_secrets_core::procedure::ProcedureStep),
-    Ended(String),
+    /// A procedure ended, with its command's exit code if known.
+    Ended(String, Option<i32>),
     /// The backend withdrew this secret request.
     Withdrawn(String),
     /// The operator channel broke; its requests cannot be answered.

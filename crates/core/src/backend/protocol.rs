@@ -191,7 +191,12 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steps: Option<u32>,
     },
-    EndProcedure,
+    /// Ends the procedure of this connection. `exit_code` is how its command
+    /// exited, as a shell reports it (128 + signal), if it is known.
+    EndProcedure {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
     /// The schema document the backend evaluated; see
     /// [`Response::SchemaDocument`]. A TUI that finds requests waiting uses it
     /// instead of evaluating the repository again.
@@ -331,6 +336,9 @@ pub enum Response {
     /// [`Request::EndProcedure`].
     ProcedureEnded {
         id: String,
+        /// How its command exited, if `EndProcedure` said so.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
     },
     /// On the operator channel: the request no longer waits, because its
     /// requester left or the backend gave up. A late answer is ignored.

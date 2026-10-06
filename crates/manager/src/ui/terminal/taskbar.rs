@@ -13,8 +13,15 @@ pub(super) fn state(model: &Model, procedure: &Procedure) -> String {
             None => "waiting for you".into(),
         };
     }
-    if model.procedure_waiting(procedure) {
+    if procedure.failed() {
+        "failed · waiting for you".into()
+    } else if model.procedure_waiting(procedure) {
         "waiting for you".into()
+    } else if matches!(
+        procedure.between,
+        Some(crate::model::Between::Result { succeeded: true, .. })
+    ) {
+        "done".into()
     } else if procedure.awaiting_deployment {
         "deployment queued behind the open one".into()
     } else {

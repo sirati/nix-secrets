@@ -267,8 +267,8 @@ impl AsyncWriter {
                         }
                         self.procedure_events.push(ProcedureEvent::Step(step))
                     }
-                    ChannelEvent::ProcedureEnded(id) => {
-                        self.procedure_events.push(ProcedureEvent::Ended(id))
+                    ChannelEvent::ProcedureEnded(id, exit_code) => {
+                        self.procedure_events.push(ProcedureEvent::Ended(id, exit_code))
                     }
                     ChannelEvent::Finished { id, requester, result } => {
                         self.secret_activity.remove(&id);

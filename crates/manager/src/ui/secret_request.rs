@@ -33,7 +33,7 @@ pub(super) fn intercept(
     writer: &mut impl SecretWriter,
 ) -> bool {
     let Some(prompt) = model.shown_prompt() else {
-        return false;
+        return between(model, event);
     };
     let decision = match event {
         UiEvent::Hover(target) => {
@@ -99,9 +99,60 @@ pub(super) fn intercept(
         prompt.values.len()
     };
     let prompt = model.take_shown_prompt().expect("a prompt is shown");
-    // An approval shows the progress strip; the outcome arrives as a notice.
+    // An approval shows the progress strip; the outcome arrives in the
+    // procedure's dialog, or as a notice for a request of its own.
     if let Err(error) = writer.answer_secret(&prompt.id, decision, count) {
         model.fail(error);
+    }
+    true
+}
+
+/// Handles input while a procedure dialog shows what happens between its
+/// prompts. While the procedure works, m or Esc minimises it and other keys
+/// do nothing. Any key closes a successful result; a failure closes only with
+/// Enter or OK. Returns whether it consumed the event.
+fn between(model: &mut Model, event: &UiEvent) -> bool {
+    // A notice drawn above the dialog takes the keys first.
+    if model.message.is_some() {
+        return false;
+    }
+    let Some(procedure) = model.between_shown() else {
+        return false;
+    };
+    let result = match &procedure.between {
+        Some(crate::model::Between::Result { succeeded, .. }) => Some(*succeeded),
+        _ => None,
+    };
+    match event {
+        UiEvent::Refresh | UiEvent::Tick => return false,
+        UiEvent::Hover(target) => model.hover = *target,
+        UiEvent::Approval(request) => model.offer_approval(request.clone()),
+        UiEvent::Click(MouseTarget::Procedure(index)) => restore(model, *index),
+        UiEvent::Character('M') => {
+            let seen = result == Some(true);
+            if seen {
+                model.dismiss_result();
+            }
+            if let Err(reason) = model.restore_next() {
+                if !seen {
+                    model.inform(reason);
+                }
+            }
+        }
+        UiEvent::Character('m')
+        | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Character('m'))) => {
+            model.minimise();
+        }
+        UiEvent::Escape if result.is_none() => {
+            model.minimise();
+        }
+        UiEvent::Enter | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Enter))
+            if result == Some(false) =>
+        {
+            model.dismiss_result()
+        }
+        _ if result == Some(true) => model.dismiss_result(),
+        _ => {}
     }
     true
 }
@@ -113,7 +164,7 @@ pub(super) fn tick(model: &mut Model, writer: &mut impl SecretWriter) -> bool {
     while let Some(event) = writer.poll_procedure_event() {
         match event {
             ProcedureEvent::Step(step) => model.procedure_step(step),
-            ProcedureEvent::Ended(id) => model.procedure_ended(&id),
+            ProcedureEvent::Ended(id, exit_code) => model.procedure_ended(&id, exit_code),
             ProcedureEvent::Withdrawn(id) => {
                 model.remove_prompt(&id);
             }
@@ -133,6 +184,8 @@ pub(super) fn tick(model: &mut Model, writer: &mut impl SecretWriter) -> bool {
     // The channel denies at the same deadline and reports it.
     changed |= model.expire_prompts(now);
     changed |= model.flash_tick(now);
+    // A waiting procedure dialog's spinner moves on a timer, never faster.
+    changed |= model.spinner_tick(now);
     if changed {
         model.show_pending_approval();
     }

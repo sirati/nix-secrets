@@ -105,6 +105,8 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
         );
         draw_rows(frame, zones.keys, rows, model.hover, &mut hits);
     }
+    // Below notices, which take the keys first.
+    render_between(frame, model, area, &mut hits);
     render_modal(frame, model, area, &mut hits);
     render_activity(frame, model, area, &mut hits);
     render_secret_request(frame, model, area, &mut hits);
@@ -622,6 +624,62 @@ fn checkbox_lines(model: &Model, body: &str) -> Vec<(usize, MouseTarget)> {
             Some((start, *target))
         })
         .collect()
+}
+
+/// The dialog of a procedure between its prompts: its finished steps and a
+/// spinner until the next prompt opens in it, or its result.
+fn render_between(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits: &mut HitMap) {
+    use crate::model::{Between, SPINNER_PERIOD};
+    let Some(procedure) = model.between_shown() else {
+        return;
+    };
+    let (Some(title), Some(between)) = (procedure.between_title(), procedure.between.as_ref())
+    else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let since = match between {
+        Between::Working { since } | Between::Waiting { since } => *since,
+        Between::Result { .. } => now,
+    };
+    let frame_index = now.saturating_duration_since(since).as_millis() / SPINNER_PERIOD.as_millis();
+    let spinner = SPINNER[frame_index as usize % SPINNER.len()];
+    let mut body = procedure.between_body(spinner, now).unwrap_or_default();
+    let minimise = Button::new("m Minimise", MouseTarget::Shortcut(Shortcut::Character('m')));
+    let footer = match between {
+        Between::Result { succeeded: true, .. } => {
+            body.push_str("\n\n(press any key to close this)");
+            None
+        }
+        Between::Result { .. } => Some(vec![
+            Button::new("Enter OK", MouseTarget::Shortcut(Shortcut::Enter)),
+            minimise,
+        ]),
+        _ => Some(vec![minimise]),
+    };
+    let success = footer.is_none();
+    draw_dialog(
+        frame,
+        model,
+        area,
+        hits,
+        Dialog {
+            title,
+            body: fixed(body),
+            padded: false,
+            note: None,
+            scroll: 0,
+            selector: None,
+            footer,
+            exclusive: true,
+            styled: None,
+            min_width: 0,
+            line_targets: None,
+        },
+    );
+    if success {
+        hits.add(area, MouseTarget::Notice);
+    }
 }
 
 /// The secret-request modal, drawn over everything including notices and

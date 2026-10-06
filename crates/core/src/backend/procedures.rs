@@ -167,6 +167,8 @@ pub(super) fn serve(
     };
     let id = step.id.clone();
     operators.broadcast_step(step);
+    // How its command exited, if the owner said so before closing.
+    let mut exit = None;
     let result = (|| {
         write_json(
             stream,
@@ -177,8 +179,15 @@ pub(super) fn serve(
         )?;
         loop {
             match read_json::<Request>(stream) {
-                Ok(Some(Request::EndProcedure)) => {
-                    return write_json(stream, &Response::ProcedureEnded { id: id.clone() });
+                Ok(Some(Request::EndProcedure { exit_code })) => {
+                    exit = exit_code;
+                    return write_json(
+                        stream,
+                        &Response::ProcedureEnded {
+                            id: id.clone(),
+                            exit_code,
+                        },
+                    );
                 }
                 Ok(Some(_)) => {
                     write_json(
@@ -194,7 +203,7 @@ pub(super) fn serve(
         }
     })();
     operators.procedures.end(&id);
-    operators.broadcast_end(&id);
+    operators.broadcast_end(&id, exit);
     result
 }
 

@@ -164,11 +164,17 @@ fn prompts_of_one_procedure_share_one_dialog_with_its_title_and_step() {
         "{screen}"
     );
     assert_eq!(model.procedures.len(), 1, "still one procedure");
-    // When the procedure ends and nothing waits in it, it leaves.
+    // A failed end shows in its dialog until acknowledged; then it leaves.
     reduce(&mut model, UiEvent::Character('n'), &mut channel);
     model.finish_approval("deploy-1");
-    channel.events.push(ProcedureEvent::Ended(UPDATE.into()));
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(1)));
     tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("Update ns1 · failed"), "{screen}");
+    assert!(screen.contains("The command failed with exit status 1."), "{screen}");
+    reduce(&mut model, UiEvent::Character('x'), &mut channel);
+    assert_eq!(model.procedures.len(), 1, "only Enter or OK closes a failure");
+    reduce(&mut model, UiEvent::Enter, &mut channel);
     assert!(model.procedures.is_empty());
 }
 
@@ -331,6 +337,8 @@ fn only_the_first_step_counts_down_and_c_cancels_it() {
     assert_eq!(channel.cancelled.len(), 1, "nothing left to cancel");
     // The button does the same.
     reduce(&mut model, UiEvent::Character('n'), &mut channel);
+    // The procedure's dialog stays open for its outcome; minimise it.
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
     channel.prompts.push(prompt("own", None));
     tick(&mut model, &mut channel);
     reduce(
@@ -474,4 +482,314 @@ fn a_deployment_lost_to_a_reconnection_leaves_no_parked_dialog() {
     assert!(model.pending_approvals.is_empty());
     reduce(&mut model, UiEvent::Character('M'), &mut channel);
     assert!(!matches!(model.mode, Mode::Approval(_)), "no stale dialog can be restored");
+}
+
+/// A closure-signing prompt of `UPDATE` at `number` of `steps`.
+fn closure_step(id: &str, number: u32, steps: u32) -> SecretPrompt {
+    let mut step = step(UPDATE, "Update ns1", number, "sign closure for ns1");
+    step.steps = Some(steps);
+    let mut prompt = prompt(id, Some(step));
+    prompt.ssh_signature = false;
+    prompt.closure_signature = true;
+    prompt
+}
+
+fn signed(model: &mut Model, id: &str, result: Result<(), String>) {
+    crate::ui::apply_completion_for_tests(
+        model,
+        crate::ui::Completion::ArtifactSignatureFinished {
+            id: id.into(),
+            requester: "nix-secrets (pid 42)".into(),
+            result,
+        },
+    );
+}
+
+#[test]
+fn a_finished_step_waits_in_the_procedure_dialog_for_the_next_prompt() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    assert_eq!(channel.answers, [("closure".to_owned(), true)]);
+    // The dialog stays open while the TUI signs.
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · step 1/3 in progress"), "{screen}");
+    signed(&mut model, "closure", Ok(()));
+    // Done: no notice, the same dialog reports it and waits.
+    assert!(model.message.is_none(), "no notice between steps");
+    assert!(model.notifications.is_empty());
+    let screen = render(&model);
+    assert!(!screen.contains("┌Notice"), "{screen}");
+    assert!(screen.contains("┌Update ns1 · waiting for step 2/3"), "{screen}");
+    assert!(screen.contains("✓ step 1/3: closure signed"), "{screen}");
+    assert!(screen.contains("waiting for step 2/3 …"), "{screen}");
+    assert!(screen.contains("m Minimise"), "{screen}");
+    // The keys stay with the dialog.
+    reduce(&mut model, UiEvent::Character('f'), &mut channel);
+    assert_eq!(model.filter, crate::model::ViewFilter::Required);
+    // Another procedure does not take the screen from it.
+    channel.prompts.push(prompt(
+        "other",
+        Some(step(INSTALL, "Install ns2", 1, "sign artifacts for ns2")),
+    ));
+    tick(&mut model, &mut channel);
+    assert!(model.procedure(INSTALL).unwrap().flashing);
+    assert!(render(&model).contains("┌Update ns1 · waiting for step 2/3"));
+    // m minimises it; a click on its entry brings it back, still waiting.
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    assert!(model.between_shown().is_none());
+    reduce(&mut model, UiEvent::Click(MouseTarget::Procedure(0)), &mut channel);
+    assert!(render(&model).contains("┌Update ns1 · waiting for step 2/3"));
+    // The next step opens in the same dialog.
+    let mut login = prompt(
+        "login",
+        Some(step(UPDATE, "Update ns1", 2, "SSH authentication to update@ns1")),
+    );
+    login.deadline = None;
+    channel.prompts.push(login);
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(
+        screen.contains("┌Update ns1 · step 2/3: SSH authentication to update@ns1"),
+        "{screen}"
+    );
+    assert!(!screen.contains("waiting for step"), "{screen}");
+    // After an SSH login another login to it may follow as the same step.
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    crate::ui::apply_completion_for_tests(
+        &mut model,
+        crate::ui::Completion::SshSignatureFinished {
+            id: "login".into(),
+            requester: "nix-secrets (pid 42)".into(),
+            result: Ok(()),
+        },
+    );
+    let screen = render(&model);
+    assert!(screen.contains("✓ step 2/3: SSH login signed"), "{screen}");
+    assert!(screen.contains("waiting for step 3/3 or another SSH login …"), "{screen}");
+}
+
+#[test]
+fn the_spinner_moves_on_a_timer_only_while_its_dialog_is_on_screen() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    signed(&mut model, "closure", Ok(()));
+    let now = Instant::now();
+    model.spinner_due = now;
+    assert!(model.spinner_tick(now), "due: redraw");
+    assert!(!model.spinner_tick(now), "not again before the period");
+    assert!(!model.spinner_tick(now + crate::model::SPINNER_PERIOD / 2));
+    assert!(model.spinner_tick(now + crate::model::SPINNER_PERIOD));
+    // Minimised, nothing spins and nothing redraws for it.
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    assert!(!model.spinner_tick(now + crate::model::SPINNER_PERIOD * 10));
+}
+
+#[test]
+fn the_last_step_shows_the_result_in_the_procedure_dialog() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 2));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    signed(&mut model, "closure", Ok(()));
+    // The deployment is the last step; it opens in the same dialog.
+    let mut last = step(UPDATE, "Update ns1", 2, "deploy secrets to ns1");
+    last.steps = Some(2);
+    last.deployment = true;
+    let deployment = ApprovalRequest {
+        id: "deploy-1".into(),
+        target: "ns1".into(),
+        create: vec!["ns1.services.a.b".into()],
+        procedure: Some(last),
+        ..Default::default()
+    };
+    reduce(&mut model, UiEvent::Approval(deployment), &mut channel);
+    assert!(matches!(model.mode, Mode::Approval(_)));
+    assert!(!render(&model).contains("waiting for step"));
+    reduce(&mut model, UiEvent::Character('y'), &mut channel);
+    model.finish_approval("deploy-1");
+    crate::ui::apply_completion_for_tests(
+        &mut model,
+        crate::ui::Completion::Deployed {
+            generated: vec![],
+            skipped: vec![],
+            summary: Some(crate::model::DeploySummary {
+                target: "ns1".into(),
+                sent: 4,
+                generated: 0,
+                left_out: vec![],
+                missing: vec![],
+            }),
+        },
+    );
+    assert!(model.message.is_none(), "no notice for the deployment either");
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · done"), "{screen}");
+    assert!(screen.contains("✓ step 1/2: closure signed"), "{screen}");
+    assert!(
+        screen.contains("✓ step 2/2: secrets deployed to ns1: 4 sent · 0 generated"),
+        "{screen}"
+    );
+    assert!(screen.contains("All steps are done."), "{screen}");
+    // The command exits successfully: the result says so.
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(0)));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("The command finished successfully."), "{screen}");
+    // Any key closes a success, and the procedure leaves.
+    reduce(&mut model, UiEvent::Character('x'), &mut channel);
+    assert!(model.procedures.is_empty());
+    assert!(model.between_shown().is_none());
+}
+
+#[test]
+fn a_success_gives_way_to_the_next_procedure() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 1));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    signed(&mut model, "closure", Ok(()));
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(0)));
+    tick(&mut model, &mut channel);
+    assert!(render(&model).contains("┌Update ns1 · done"));
+    channel.prompts.push(prompt(
+        "next",
+        Some(step(INSTALL, "Install ns2", 1, "sign artifacts for ns2")),
+    ));
+    tick(&mut model, &mut channel);
+    assert_eq!(model.shown_prompt().unwrap().id, "next");
+    assert!(model.procedure(UPDATE).is_none(), "its success was shown");
+}
+
+#[test]
+fn a_requester_that_exits_mid_procedure_leaves_its_outcome_in_the_dialog() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    signed(&mut model, "closure", Ok(()));
+    assert!(render(&model).contains("waiting for step 2/3"));
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(2)));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · failed"), "{screen}");
+    assert!(screen.contains("✓ step 1/3: closure signed"), "{screen}");
+    assert!(
+        screen.contains("Ended after step 1 of 3. The command failed with exit status 2."),
+        "{screen}"
+    );
+    assert!(screen.contains("Enter OK"), "{screen}");
+    assert!(!screen.contains("waiting for step"), "{screen}");
+    // It is not lost when minimised: the entry waits for the operator.
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    assert!(render(&model).contains("Update ns1 · step 1/3: sign closure for ns1 · failed · waiting for you"));
+    reduce(&mut model, UiEvent::Character('M'), &mut channel);
+    assert!(render(&model).contains("┌Update ns1 · failed"));
+    reduce(&mut model, UiEvent::Enter, &mut channel);
+    assert!(model.procedures.is_empty());
+
+    // Exiting successfully before the declared total still shows.
+    channel.prompts.push(closure_step("again", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    signed(&mut model, "again", Ok(()));
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(0)));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · ended early"), "{screen}");
+    assert!(screen.contains("Ended after step 1 of 3."), "{screen}");
+}
+
+#[test]
+fn a_failed_or_denied_step_shows_in_the_dialog_and_a_minimised_one_flashes() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::Character('n'), &mut channel);
+    assert_eq!(channel.answers, [("closure".to_owned(), false)]);
+    signed(
+        &mut model,
+        "closure",
+        Err("the operator denied closure signing".into()),
+    );
+    assert!(model.message.is_none(), "{:?}", model.message);
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · failed"), "{screen}");
+    assert!(
+        screen.contains("✗ step 1/3: sign closure for ns1: the operator denied closure signing"),
+        "{screen}"
+    );
+    reduce(&mut model, UiEvent::Enter, &mut channel);
+    assert!(model.between_shown().is_none());
+
+    // A step of a minimised procedure that fails flashes in the task bar.
+    channel.prompts.push(closure_step("second", 2, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    signed(&mut model, "second", Err("signing failed".into()));
+    let procedure = model.procedure(UPDATE).unwrap();
+    assert!(procedure.minimised && procedure.flashing && procedure.failed());
+}
+
+#[test]
+fn a_request_of_its_own_still_reports_with_a_notice() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(prompt("own", None));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    assert!(model.procedures.is_empty());
+    crate::ui::apply_completion_for_tests(
+        &mut model,
+        crate::ui::Completion::SshSignatureFinished {
+            id: "own".into(),
+            requester: "nix-secrets (pid 42)".into(),
+            result: Ok(()),
+        },
+    );
+    assert!(model.message_text().unwrap().contains("Returned one SSH authentication signature"));
+}
+
+#[test]
+fn an_end_that_overtakes_the_deployment_outcome_still_shows_both() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    let mut last = step(UPDATE, "Update ns1", 1, "deploy secrets to ns1");
+    last.steps = Some(1);
+    let deployment = ApprovalRequest {
+        id: "deploy-1".into(),
+        target: "ns1".into(),
+        create: vec!["ns1.services.a.b".into()],
+        procedure: Some(last),
+        ..Default::default()
+    };
+    reduce(&mut model, UiEvent::Approval(deployment), &mut channel);
+    reduce(&mut model, UiEvent::Character('y'), &mut channel);
+    model.finish_approval("deploy-1");
+    // `deploy --wait` exited 0: the deployment succeeded.
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(0)));
+    tick(&mut model, &mut channel);
+    assert!(render(&model).contains("┌Update ns1 · done"));
+    crate::ui::apply_completion_for_tests(
+        &mut model,
+        crate::ui::Completion::Deployed {
+            generated: vec![],
+            skipped: vec![],
+            summary: None,
+        },
+    );
+    assert!(model.message.is_none());
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · done"), "{screen}");
+    assert!(screen.contains("✓ step 1/1: secrets deployed"), "{screen}");
 }

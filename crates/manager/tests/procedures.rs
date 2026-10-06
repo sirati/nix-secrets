@@ -151,7 +151,7 @@ impl Operator {
             match self.next() {
                 ChannelEvent::Prompt(prompt) => return prompt,
                 ChannelEvent::Procedure(step) => steps.push(step),
-                ChannelEvent::ProcedureEnded(_) | ChannelEvent::Finished { .. } => {}
+                ChannelEvent::ProcedureEnded(..) | ChannelEvent::Finished { .. } => {}
                 _ => panic!("unexpected channel event"),
             }
         }
@@ -169,14 +169,15 @@ impl Operator {
             .unwrap();
     }
 
-    fn until_ended(&self, id: &str) {
+    /// Waits for the end of procedure `id`; returns its exit code.
+    fn until_ended(&self, id: &str) -> Option<i32> {
         let until = Instant::now() + Duration::from_secs(30);
         while Instant::now() < until {
-            if let Ok(ChannelEvent::ProcedureEnded(ended)) =
+            if let Ok(ChannelEvent::ProcedureEnded(ended, exit_code)) =
                 self.events.recv_timeout(Duration::from_secs(1))
             {
                 if ended == id {
-                    return;
+                    return exit_code;
                 }
             }
         }
@@ -230,7 +231,21 @@ fn a_procedure_numbers_its_requests_as_steps_of_one_titled_group() {
     assert_eq!(deployment.label, "deploy secrets to host");
     let output = finish(child);
     assert!(output.status.success(), "{output:?}");
-    operator.until_ended(&procedure.id);
+    assert_eq!(operator.until_ended(&procedure.id), Some(0));
+}
+
+#[test]
+fn the_operator_channel_learns_how_the_command_exited() {
+    let fixture = fixture(Duration::from_secs(600));
+    let operator = fixture.attach();
+    let child = fixture.procedure("Update host", "exit 3");
+    let id = loop {
+        if let ChannelEvent::Procedure(step) = operator.next() {
+            break step.id;
+        }
+    };
+    assert_eq!(operator.until_ended(&id), Some(3));
+    assert_eq!(finish(child).status.code(), Some(3));
 }
 
 #[test]

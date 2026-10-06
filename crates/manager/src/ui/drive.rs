@@ -127,7 +127,91 @@ mod tests {
     }
 }
 
+/// Reports the outcome of a procedure step in the procedure's dialog rather
+/// than as a notice. Returns the completion if it is no such outcome.
+fn procedure_outcome(model: &mut Model, completion: Completion) -> Option<Completion> {
+    // What the regular handling does besides its notice, first: the step's
+    // dialog shows the outcome only once nothing of it is open.
+    let (request, outcome) = match &completion {
+        Completion::SecretRequestFinished { id, result, .. } => (
+            id.clone(),
+            result.clone().map(|count| {
+                Some(format!(
+                    "{count} secret value{} sent",
+                    if count == 1 { "" } else { "s" }
+                ))
+            }),
+        ),
+        Completion::SshSignatureFinished { id, result, .. }
+        | Completion::ArtifactSignatureFinished { id, result, .. } => {
+            (id.clone(), result.clone().map(|()| None))
+        }
+        Completion::Deployed { .. }
+        | Completion::ApprovalDone(None)
+        | Completion::HostMutationsDeclined { .. }
+        | Completion::ApprovalLost(_) => {
+            let Some(request) = model.deployment_in_flight() else {
+                return Some(completion);
+            };
+            if matches!(model.mode, Mode::Approval(_)) {
+                model.mode = Mode::Browse;
+            }
+            let outcome = match &completion {
+                Completion::Deployed {
+                    generated,
+                    skipped,
+                    summary,
+                } => {
+                    let mut text = match summary {
+                        Some(summary) => format!(
+                            "secrets deployed to {}: {} sent · {} generated · {} left out · {} missing",
+                            summary.target,
+                            summary.sent,
+                            summary.generated,
+                            summary.left_out.len(),
+                            summary.missing.len()
+                        ),
+                        None => "secrets deployed".into(),
+                    };
+                    if !generated.is_empty() || !skipped.is_empty() {
+                        text.push('\n');
+                        text.push_str(&deployed_notice(generated, skipped));
+                    }
+                    Ok(Some(text))
+                }
+                Completion::HostMutationsDeclined {
+                    before_deploy: false,
+                } => Ok(Some(
+                    "secrets deployed; you rejected the host-provided changes".into(),
+                )),
+                Completion::HostMutationsDeclined {
+                    before_deploy: true,
+                } => Err("you rejected the host-provided changes; nothing was deployed".into()),
+                Completion::ApprovalLost(message) => {
+                    model.pending_approvals.clear();
+                    Err(message.clone())
+                }
+                _ => Err("you rejected the deployment".into()),
+            };
+            (request, outcome)
+        }
+        _ => return Some(completion),
+    };
+    if outcome.is_err() {
+        model.remove_prompt(&request);
+    }
+    if model.step_finished(&request, outcome) {
+        None
+    } else {
+        Some(completion)
+    }
+}
+
 fn apply_completion(model: &mut Model, completion: Completion) {
+    let Some(completion) = procedure_outcome(model, completion) else {
+        model.show_pending_approval();
+        return;
+    };
     match completion {
         Completion::Saved(path) => {
             set_row(model, &path, true);

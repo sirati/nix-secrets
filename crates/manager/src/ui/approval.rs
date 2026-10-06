@@ -46,6 +46,7 @@ pub(super) fn reduce(
         }
         // Deploys the checked rows; missing values never block.
         UiEvent::Character('y') if request.host_key.is_some() || request.deployable() => {
+            model.deployment_answered(&request);
             let unchecked = request.unchecked.clone();
             match writer.approval_with(true, &unchecked) {
                 Ok(Some(mut next)) => {
@@ -58,13 +59,16 @@ pub(super) fn reduce(
                 Err(message) => fail_unless_queued(model, message),
             }
         }
-        UiEvent::Character('n') | UiEvent::Escape => match writer.approval(false) {
-            Ok(_) => return Action::Rejected,
-            Err(message) => {
-                fail_unless_queued(model, message);
-                model.mode = Mode::Approval(request);
+        UiEvent::Character('n') | UiEvent::Escape => {
+            model.deployment_answered(&request);
+            match writer.approval(false) {
+                Ok(_) => return Action::Rejected,
+                Err(message) => {
+                    fail_unless_queued(model, message);
+                    model.mode = Mode::Approval(request);
+                }
             }
-        },
+        }
         _ => model.mode = Mode::Approval(request),
     }
     Action::Continue
@@ -117,6 +121,7 @@ fn host_mutations(
         model.mode = Mode::Approval(request);
         return Action::Continue;
     };
+    model.deployment_answered(&request);
     match writer.approve_host_mutations(accepted, token) {
         Ok(Some(next)) => model.mode = Mode::Approval(next),
         Ok(None) => {

@@ -75,7 +75,7 @@ pub(super) enum Inbox {
     /// The request no longer waits; tell the TUI to drop it.
     Withdraw(String),
     Step(ProcedureStep),
-    Ended(String),
+    Ended(String, Option<i32>),
     /// From the TUI.
     Answer {
         request_id: String,
@@ -210,8 +210,8 @@ impl Operators {
         self.broadcast(|| Inbox::Step(step.clone()));
     }
 
-    pub(super) fn broadcast_end(&self, id: &str) {
-        self.broadcast(|| Inbox::Ended(id.to_owned()));
+    pub(super) fn broadcast_end(&self, id: &str, exit_code: Option<i32>) {
+        self.broadcast(|| Inbox::Ended(id.to_owned(), exit_code));
     }
 
     /// Verifies a procedure token for `peer`, numbers the next step and
@@ -302,7 +302,9 @@ pub(super) fn attach(
                 Ok(Inbox::Step(procedure)) => {
                     write_json(stream, &Response::ProcedureUpdate { procedure })?
                 }
-                Ok(Inbox::Ended(id)) => write_json(stream, &Response::ProcedureEnded { id })?,
+                Ok(Inbox::Ended(id, exit_code)) => {
+                    write_json(stream, &Response::ProcedureEnded { id, exit_code })?
+                }
                 // An answer counts once, for a request still waiting. A late
                 // answer to a withdrawn request, a replay or a made-up id
                 // reaches nobody.

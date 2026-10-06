@@ -91,7 +91,8 @@ d or Details         Show full descriptions, fingerprints and commands
 n / Enter / Esc      Deny; the program gets nothing
 c or Keep waiting    Cancel the countdown; the program is told and waits
 After 120 s the request is denied unless c cancelled that. A notice names
-the requester and whether the values were sent.
+the requester and whether the values were sent; inside a procedure its
+dialog says so instead.
 
 PROCEDURES
 Prompts of one operation started with `nix-secrets procedure` (for
@@ -99,7 +100,10 @@ example SSH authentication, signing and deployment of an update) share
 one dialog titled with the procedure and its step, such as
 Update ns1 · step 2/4: sign closure for ns1. Any other request or
 deployment is a procedure of its own. Only the first step of a procedure
-counts down; later steps wait until answered.
+counts down; later steps wait until answered. Between steps the dialog
+stays open: it lists the finished steps and waits for the next one. After
+the last step, or when the command exits, it shows the result. Any key
+closes a success; Enter closes a failure.
 m      Minimise the open secret request or deployment dialog
 M      Restore the next procedure that waits for you, flashing ones first
 Click  A task bar entry restores it

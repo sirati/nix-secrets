@@ -435,7 +435,7 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                     .map(|token| operators.advance(token, peer_pid, label, true, false))
                     .transpose()
             }),
-            Request::EndProcedure => Err("no procedure is registered on this connection".into()),
+            Request::EndProcedure { .. } => Err("no procedure is registered on this connection".into()),
             Request::GetSchema => {
                 let waiting = operators.pending_count() > 0
                     || broker.lock().is_ok_and(|state| state.has_pending());

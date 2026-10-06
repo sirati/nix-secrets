@@ -148,11 +148,21 @@ pub fn run(
     if let Ok((mut stream, _)) = registration {
         // Closing the connection ends it as well; asking first lets the
         // TUI drop the entry before this command returns.
-        if write_json(&mut stream, &Request::EndProcedure).is_ok() {
+        // The TUI shows how the command ended in the procedure dialog.
+        let exit_code = status.as_ref().ok().map(shell_exit_code).unwrap_or(Some(127));
+        if write_json(&mut stream, &Request::EndProcedure { exit_code }).is_ok() {
             let _ = read_json::<Response>(&mut stream);
         }
     }
     status
+}
+
+/// The exit code as a shell reports it: 128 + the signal that ended it.
+fn shell_exit_code(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
 }
 
 #[cfg(test)]

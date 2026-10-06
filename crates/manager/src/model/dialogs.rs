@@ -58,8 +58,10 @@ impl Model {
         let procedure = super::approval_procedure(&request);
         let title = format!("Deploy {}", request.target);
         let step = request.procedure.clone();
-        self.ensure_procedure(&procedure, || title, step.as_ref())
-            .awaiting_deployment = false;
+        let owner = self.ensure_procedure(&procedure, || title, step.as_ref());
+        owner.awaiting_deployment = false;
+        // Its dialog shows the deployment now, not what came before.
+        owner.between = None;
         if let Some(queued) = self
             .pending_approvals
             .iter_mut()

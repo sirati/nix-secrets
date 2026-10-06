@@ -9,7 +9,10 @@ mod dialogs;
 mod procedures;
 mod profiles;
 mod visibility;
-pub use procedures::{approval_procedure, prompt_procedure, Procedure, FLASH_PERIOD};
+pub use procedures::{
+    approval_procedure, prompt_procedure, Between, FinishedStep, Procedure, StepKind,
+    FLASH_PERIOD, SPINNER_PERIOD,
+};
 pub use attributes::{Attribute, Facet, FacetMode};
 use std::collections::BTreeMap;
 pub use visibility::SearchSummary;
@@ -427,6 +430,8 @@ pub struct Model {
     /// The phase of flashing task bar entries.
     pub flash_on: bool,
     pub flash_since: std::time::Instant,
+    /// When the spinner of a waiting procedure dialog next moves.
+    pub spinner_due: std::time::Instant,
     /// Why the backend cannot be reached while the TUI reconnects.
     pub backend_problem: Option<String>,
     pub secret_scroll: u16,
@@ -522,6 +527,7 @@ impl Model {
             foreground: None,
             flash_on: false,
             flash_since: std::time::Instant::now(),
+            spinner_due: std::time::Instant::now(),
             backend_problem: None,
             secret_scroll: 0,
             secret_details: false,

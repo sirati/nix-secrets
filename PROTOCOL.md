@@ -195,7 +195,10 @@ compares the secret in constant time and requires the requester to be the
 owner or its descendant. Each accepted request becomes the next step,
 `ProcedureStep { id, title, step, steps, label, deployment }`. An SSH signature
 request with the same label as the SSH signature step before it keeps that
-step number. `SubmitApproval` requests never carry a step.
+step number. `SubmitApproval` requests never carry a step. `EndProcedure {
+exit_code }` may report how the command exited (128 + signal when a signal
+ended it). The operator channel receives it in `ProcedureEnded { id, exit_code
+}`.
 
 ## Storage Box tasks
 
