@@ -352,6 +352,9 @@ fn host_replacement_review_shows_source_paths_purpose_and_fingerprints_without_d
     }
     let mut model = Model::new(vec![]);
     model.mode = Mode::Approval(request);
+    // Save is offered only once a completed draw measured this batch.
+    let first = screen(&draw(&model, 110, 40));
+    assert!(first.contains("Read all changes to save") && !first.contains("y Save changes"), "{first}");
     let terminal = draw(&model, 110, 40);
     let text = screen(&terminal);
     assert!(text.contains("Save host-provided changes"));

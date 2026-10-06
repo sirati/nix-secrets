@@ -469,3 +469,55 @@ fn commit_dialog_shows_the_summary_and_clickable_checkboxes() {
         }
     }
 }
+
+#[test]
+fn long_host_change_review_announces_hidden_rows_and_saves_only_after_reading() {
+    use crate::model::HostMutationReview;
+    struct Recorder(Vec<bool>);
+    impl SecretWriter for Recorder {
+        fn write(&mut self, _: &str, value: Zeroizing<Vec<u8>>) -> Result<Action, (String, Zeroizing<Vec<u8>>)> {
+            Err(("unused".into(), value))
+        }
+        fn approval(&mut self, _: bool) -> Result<Option<ApprovalRequest>, String> {
+            panic!("a host replacement is never an ordinary approval")
+        }
+        fn approve_host_mutations(&mut self, accepted: bool, _: &str) -> Result<Option<ApprovalRequest>, String> {
+            self.0.push(accepted);
+            Ok(None)
+        }
+    }
+    let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::Approval(ApprovalRequest {
+        id: "deploy-review".into(),
+        target: "ns1".into(),
+        host_mutation_token: Some("batch".into()),
+        host_mutations: (0..8).map(|index| HostMutationReview {
+            identifier: format!("ns1.services.key-{index}.ssh-private-key"),
+            kind: "generated public key".into(),
+            previous: vec![format!("ssh-ed25519 SHA256:old{index}")],
+            proposed: vec![format!("ssh-ed25519 SHA256:new{index}")],
+        }).collect(),
+        ..Default::default()
+    });
+    let mut writer = Recorder(vec![]);
+    let screen = draw(&mut terminal, &model);
+    assert!(screen.contains("more lines below"), "{screen}");
+    assert!(screen.contains("Read all changes to save"), "{screen}");
+    assert!(!screen.contains("y Save changes"), "{screen}");
+    assert!(!screen.contains("key-7"), "last row is hidden: {screen}");
+    reduce(&mut model, UiEvent::Character('y'), &mut writer);
+    assert!(writer.0.is_empty(), "rows below were never shown");
+    let mut screen = draw(&mut terminal, &model);
+    for _ in 0..200 {
+        if !screen.contains("more lines below") {
+            break;
+        }
+        reduce(&mut model, UiEvent::Down, &mut writer);
+        screen = draw(&mut terminal, &model);
+    }
+    assert!(screen.contains("key-7"), "{screen}");
+    assert!(screen.contains("y Save changes"), "{screen}");
+    assert_eq!(reduce(&mut model, UiEvent::Character('y'), &mut writer), Action::Approved);
+    assert_eq!(writer.0, vec![true]);
+}

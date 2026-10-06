@@ -123,6 +123,26 @@ impl Model {
             scroll.saturating_sub(1)
         }
     }
+
+    /// Whether the last line of this host-change batch is on screen now. Only
+    /// a limit measured for this exact batch counts; a replacement batch is
+    /// scrolled back to the top before any input reaches it.
+    pub fn host_review_at_end(&self, batch: &str) -> bool {
+        let limit = self.scroll_limit.get();
+        let scroll = match &self.host_review {
+            Some((token, _)) if token == batch => self.modal_scroll,
+            _ => 0,
+        };
+        self.host_review_rendered.borrow().as_deref() == Some(batch)
+            && limit != u16::MAX
+            && scroll >= limit
+    }
+
+    /// Whether every row of this host-change batch has been displayed.
+    pub fn host_review_seen(&self, batch: &str) -> bool {
+        matches!(&self.host_review, Some((token, true)) if token == batch)
+            || self.host_review_at_end(batch)
+    }
 }
 
 impl Model {

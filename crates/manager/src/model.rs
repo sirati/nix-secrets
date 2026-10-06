@@ -385,6 +385,11 @@ pub struct Model {
     pub modal_scroll: u16,
     /// The furthest the open dialog can scroll, recorded by the last render.
     pub scroll_limit: std::cell::Cell<u16>,
+    /// The host-change review batch on screen and whether its last line has
+    /// been displayed. Saving requires the whole batch to have been seen.
+    pub host_review: Option<(String, bool)>,
+    /// The review batch whose height `scroll_limit` was measured for.
+    pub host_review_rendered: std::cell::RefCell<Option<String>>,
     pub hover: Option<crate::ui::MouseTarget>,
     pub notifications: VecDeque<Notice>,
     pub pending_approvals: VecDeque<ApprovalRequest>,
@@ -482,6 +487,8 @@ impl Model {
             message: None,
             modal_scroll: 0,
             scroll_limit: std::cell::Cell::new(u16::MAX),
+            host_review: None,
+            host_review_rendered: Default::default(),
             hover: None,
             notifications: VecDeque::new(),
             pending_approvals: VecDeque::new(),

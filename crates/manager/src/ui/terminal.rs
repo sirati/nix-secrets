@@ -273,6 +273,12 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
                     })),
                 },
             );
+            // Tag the measured height with its batch only after this draw, so
+            // a limit is never paired with another dialog's review.
+            *model.host_review_rendered.borrow_mut() = request
+                .host_mutation_token
+                .clone()
+                .filter(|_| !request.host_mutations.is_empty());
             return;
         }
         mode => (modal_title(mode), prompt(model), model.modal_scroll),
@@ -395,19 +401,29 @@ fn draw_dialog(
     }
     let (body, lines) = layout_at(box_area.width);
     frame.render_widget(Clear, box_area);
-    let mut block = Block::default()
-        .title(dialog.title.as_str())
-        .borders(Borders::ALL);
-    if let Some(note) = dialog.note {
-        block = block.title_bottom(Line::from(note).right_aligned());
-    }
-    frame.render_widget(block, box_area);
     let body_area = Rect {
         x: box_area.x + 1,
         y: box_area.y + 1,
         width: box_area.width.saturating_sub(2),
         height: box_area.height.saturating_sub(chrome as u16),
     };
+    let mut block = Block::default()
+        .title(dialog.title.as_str())
+        .borders(Borders::ALL);
+    if let Some(note) = dialog.note {
+        block = block.title_bottom(Line::from(note).right_aligned());
+    }
+    // Hidden lines are announced on the border, so scrolled content is never
+    // mistaken for the whole dialog.
+    let hidden = lines
+        .saturating_sub(body_area.height as usize)
+        .saturating_sub(dialog.scroll as usize);
+    if !selector && hidden > 0 {
+        block = block.title_bottom(
+            Line::styled(format!(" ↓ {hidden} more lines below "), Style::default().fg(Color::Yellow)).left_aligned(),
+        );
+    }
+    frame.render_widget(block, box_area);
     if let Some(items) = dialog.selector {
         let top = selector_selected(model)
             .unwrap_or(0)

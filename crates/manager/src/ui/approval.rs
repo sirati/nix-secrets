@@ -76,11 +76,30 @@ fn host_mutations(
     request: ApprovalRequest,
     event: UiEvent,
 ) -> Action {
+    // Scrolling is line by line from the top, so reaching the last line means
+    // every row was displayed. A replacement batch starts again at the top.
+    let batch = request.host_mutation_token.clone().unwrap_or_default();
+    if model.host_review.as_ref().map(|(token, _)| token) != Some(&batch) {
+        model.host_review = Some((batch, false));
+        model.modal_scroll = 0;
+    }
+    if let UiEvent::Up | UiEvent::Down = event {
+        model.modal_scroll = model.scrolled(model.modal_scroll, event == UiEvent::Down);
+    }
+    let batch = request.host_mutation_token.clone().unwrap_or_default();
+    if model.host_review_at_end(&batch) {
+        model.host_review = Some((batch.clone(), true));
+    }
     let accepted = match event {
+        // The dialog shows how much is still below and offers Save only once
+        // everything has been displayed.
+        UiEvent::Character('y') if !model.host_review_seen(&batch) => {
+            model.mode = Mode::Approval(request);
+            return Action::Continue;
+        }
         UiEvent::Character('y') => true,
         UiEvent::Character('n') | UiEvent::Escape => false,
         UiEvent::Up | UiEvent::Down => {
-            model.modal_scroll = model.scrolled(model.modal_scroll, event == UiEvent::Down);
             model.mode = Mode::Approval(request);
             return Action::Continue;
         }
@@ -159,6 +178,64 @@ mod host_mutation_tests {
             ..Default::default()
         }
     }
+    /// What the terminal records when it draws a review `limit` lines too tall.
+    fn rendered(model: &Model, batch: &str, limit: u16) {
+        *model.host_review_rendered.borrow_mut() = Some(batch.into());
+        model.scroll_limit.set(limit);
+    }
+    #[test]
+    fn save_requires_every_line_of_this_batch_to_have_been_displayed() {
+        let mut model = Model::new(vec![]);
+        let mut writer = Writer { decisions: vec![] };
+        model.mode = Mode::Approval(request());
+        // Never drawn: nothing was shown, so nothing can be saved.
+        crate::ui::reduce(&mut model, UiEvent::Character('y'), &mut writer);
+        assert!(writer.decisions.is_empty());
+        rendered(&model, "shown-batch", 3);
+        for _ in 0..2 {
+            crate::ui::reduce(&mut model, UiEvent::Down, &mut writer);
+            crate::ui::reduce(&mut model, UiEvent::Character('y'), &mut writer);
+            assert!(writer.decisions.is_empty(), "lines remain below");
+        }
+        crate::ui::reduce(&mut model, UiEvent::Down, &mut writer);
+        // Scrolling back up after reading everything keeps the consent valid.
+        crate::ui::reduce(&mut model, UiEvent::Up, &mut writer);
+        assert_eq!(
+            crate::ui::reduce(&mut model, UiEvent::Character('y'), &mut writer),
+            Action::Approved
+        );
+        assert_eq!(writer.decisions, vec![(true, "shown-batch".into())]);
+        // Rejecting never requires reading.
+        let mut model = Model::new(vec![]);
+        let mut writer = Writer { decisions: vec![] };
+        model.mode = Mode::Approval(request());
+        rendered(&model, "shown-batch", 9);
+        assert_eq!(crate::ui::reduce(&mut model, UiEvent::Character('n'), &mut writer), Action::Rejected);
+    }
+    #[test]
+    fn replacement_batch_starts_unread_at_the_top() {
+        let mut model = Model::new(vec![]);
+        let mut writer = Writer { decisions: vec![] };
+        model.mode = Mode::Approval(request());
+        rendered(&model, "shown-batch", 2);
+        crate::ui::reduce(&mut model, UiEvent::Down, &mut writer);
+        crate::ui::reduce(&mut model, UiEvent::Down, &mut writer);
+        let mut next = request();
+        next.host_mutation_token = Some("next-batch".into());
+        model.mode = Mode::Approval(next);
+        // A stale limit of 0 from the old dialog proves nothing about this batch.
+        model.scroll_limit.set(0);
+        crate::ui::reduce(&mut model, UiEvent::Character('y'), &mut writer);
+        assert!(writer.decisions.is_empty());
+        rendered(&model, "next-batch", 2);
+        crate::ui::reduce(&mut model, UiEvent::Character('y'), &mut writer);
+        assert!(writer.decisions.is_empty(), "scrolled back to the top, not at its end");
+        assert_eq!(model.modal_scroll, 0);
+        crate::ui::reduce(&mut model, UiEvent::Down, &mut writer);
+        crate::ui::reduce(&mut model, UiEvent::Down, &mut writer);
+        crate::ui::reduce(&mut model, UiEvent::Character('y'), &mut writer);
+        assert_eq!(writer.decisions, vec![(true, "next-batch".into())]);
+    }
     #[test]
     fn consent_and_rejection_send_only_the_exact_displayed_batch_token() {
         for (event, accepted, action) in [
@@ -169,6 +246,7 @@ mod host_mutation_tests {
             let mut model = Model::new(vec![]);
             let mut writer = Writer { decisions: vec![] };
             model.mode = Mode::Approval(request());
+            rendered(&model, "shown-batch", 0);
             assert_eq!(crate::ui::reduce(&mut model, event, &mut writer), action);
             assert_eq!(writer.decisions, vec![(accepted, "shown-batch".into())]);
         }

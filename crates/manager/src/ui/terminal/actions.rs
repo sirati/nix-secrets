@@ -189,7 +189,12 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                     .as_ref()
                     .is_some_and(|token| !token.is_empty())
                 {
-                    buttons.push(letter("y Save changes", 'y'));
+                    let batch = request.host_mutation_token.as_deref().unwrap_or_default();
+                    buttons.push(if model.host_review_seen(batch) {
+                        letter("y Save changes", 'y')
+                    } else {
+                        letter("↓ Read all changes to save", 'y')
+                    });
                 }
                 buttons.push(letter("n Reject changes", 'n'));
                 return buttons;
