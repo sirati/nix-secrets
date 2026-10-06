@@ -14,6 +14,11 @@ impl Controller {
             Ok((id, (path, spec)))
         })?;
         for (path, spec) in selected {
+            // Without a declared default there is nothing to record: the host
+            // installs its own and keeps it, and nothing is sent for it.
+            if default_record(&spec).is_none() {
+                continue;
+            }
             self.materialize_public_default(&path, &spec)?;
         }
         Ok(())
