@@ -310,6 +310,44 @@ fn signing_manifest_and_reply_reject_role_digest_size_and_host_tampering() {
 }
 
 #[test]
+fn signing_manifest_accepts_optional_network_stage_and_rescue_tools_once() {
+    let base = signing_request();
+    let optional = |role: &str| Artifact {
+        role: role.into(),
+        ..base.manifest.artifacts[0].clone()
+    };
+    for roles in [
+        &["network-stage"][..],
+        &["rescue-tools"],
+        &["network-stage", "rescue-tools"],
+    ] {
+        let mut req = base.clone();
+        req.manifest
+            .artifacts
+            .extend(roles.iter().map(|role| optional(role)));
+        req.validate().unwrap();
+        signatures(&req.manifest).validate(&req.manifest).unwrap();
+    }
+    let mut duplicate = base.clone();
+    duplicate.manifest.artifacts.extend([
+        optional("rescue-tools"),
+        optional("rescue-tools"),
+    ]);
+    assert!(duplicate.validate().is_err());
+    let mut eight = base.clone();
+    eight.manifest.artifacts.extend([
+        optional("network-stage"),
+        optional("rescue-tools"),
+        optional("driver-image"),
+    ]);
+    assert!(eight.validate().is_err());
+    // An optional role never stands in for a required one.
+    let mut replaced = base.clone();
+    replaced.manifest.artifacts[4] = optional("rescue-tools");
+    assert!(replaced.validate().is_err());
+}
+
+#[test]
 fn artifact_request_returns_only_signatures_and_rejects_plaintext_answers() {
     for mode in ["signatures", "plaintext", "ssh-signature", "deny"] {
         let operators = Operators::default();

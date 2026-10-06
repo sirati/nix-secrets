@@ -13,6 +13,9 @@ pub const REQUIRED_ROLES: [&str; 5] = [
     "gen-initrd",
     "rescue-sfs",
 ];
+/// Present only when the host ships them: the rescue networking stage and the
+/// rescue tools image (`nmblctl`).
+pub const OPTIONAL_ROLES: [&str; 2] = ["network-stage", "rescue-tools"];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -31,12 +34,18 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn validate(&self) -> Result<(), String> {
-        if !(5..=6).contains(&self.artifacts.len()) {
-            return Err("artifact batch requires five roles and an optional network stage".into());
+        if !(REQUIRED_ROLES.len()..=REQUIRED_ROLES.len() + OPTIONAL_ROLES.len())
+            .contains(&self.artifacts.len())
+        {
+            return Err(
+                "artifact batch requires five roles plus an optional network stage and rescue tools image"
+                    .into(),
+            );
         }
         let mut roles = BTreeSet::new();
         for artifact in &self.artifacts {
-            if !REQUIRED_ROLES.contains(&artifact.role.as_str()) && artifact.role != "network-stage"
+            if !REQUIRED_ROLES.contains(&artifact.role.as_str())
+                && !OPTIONAL_ROLES.contains(&artifact.role.as_str())
             {
                 return Err("unknown artifact role".into());
             }

@@ -113,7 +113,7 @@ executable.
 The input is a JSON object of bounded size with an `artifacts` field. Each entry
 names its `role`, `path`, lowercase `sha512`, and `size`. The required roles are
 `generation-image`, `boot-config`, `gen-kernel`, `gen-initrd`, and `rescue-sfs`.
-`network-stage` is optional. The output contains `signatures`, each with the
+`network-stage` and `rescue-tools` are optional. The output contains `signatures`, each with the
 same role, digest and size, plus `signature_base64`. The caller must reject
 missing or changed bindings.
 
