@@ -2,7 +2,7 @@
 
 ## Backend socket
 
-The socket is `$XDG_RUNTIME_DIR/nix-secrets/backend-v22-<hash>.sock`, where
+The socket is `$XDG_RUNTIME_DIR/nix-secrets/backend-v23-<hash>.sock`, where
 `<hash>` is 16 hex digits hashed from the canonical repository path and 22 is
 the compatibility version. A `.lock` file next to it belongs to the running
 backend. A starter never removes the socket of a backend that holds the lock.
