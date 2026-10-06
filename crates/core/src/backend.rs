@@ -468,7 +468,7 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
             }
         }
         // Its id is chosen here, so the event follows the response.
-        if let Response::DeploymentRequested { request } = &response {
+        if let Response::DeploymentRequested { request, .. } = &response {
             feed.publish(BackendEvent::ApprovalRequested {
                 request: request.clone(),
             });

@@ -47,5 +47,8 @@ pub(super) fn request(
         BrokerError::Full => "approval broker capacity reached".to_owned(),
         _ => "the deployment request could not be queued".to_owned(),
     })?;
-    Ok(Response::DeploymentRequested { request })
+    Ok(Response::DeploymentRequested {
+        request,
+        waiting_for_operator: !state.has_frontends(),
+    })
 }

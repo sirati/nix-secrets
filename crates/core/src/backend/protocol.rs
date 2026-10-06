@@ -299,6 +299,11 @@ pub enum Response {
     /// The deployment request is queued for the frontends.
     DeploymentRequested {
         request: ApprovalRequest,
+        /// No frontend is registered yet: the request waits in the queue,
+        /// and nothing happens until a TUI claims it and its operator
+        /// approves it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        waiting_for_operator: bool,
     },
     /// The evaluated schema document this backend started with, if it was
     /// given one, its age, and whether requests wait for an operator.

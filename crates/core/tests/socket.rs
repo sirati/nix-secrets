@@ -279,7 +279,7 @@ fn a_deployment_request_reaches_the_registered_frontend() {
     };
     // Nobody can answer yet: the request waits for a frontend instead of
     // being refused, and one that registers later is offered it.
-    let Response::DeploymentRequested { request: early } = call(&mut requester, deploy()) else {
+    let Response::DeploymentRequested { request: early, waiting_for_operator: true } = call(&mut requester, deploy()) else {
         panic!("a deployment without a frontend was refused");
     };
     let mut frontend = UnixStream::connect(&socket).unwrap();
@@ -303,7 +303,7 @@ fn a_deployment_request_reaches_the_registered_frontend() {
         }),
         Response::Error { message } if message.contains("not a host")
     ));
-    let Response::DeploymentRequested { request } = call(&mut requester, deploy()) else {
+    let Response::DeploymentRequested { request, waiting_for_operator: false } = call(&mut requester, deploy()) else {
         panic!("deployment was not queued");
     };
     assert_eq!(request.target, "host");

@@ -290,22 +290,27 @@ impl BackendClient {
         allow_partial: bool,
     ) -> io::Result<ApprovalRequest> {
         self.request_deployment_in(target, allow_partial, None)
+            .map(|(request, _)| request)
     }
 
     /// Like [`Self::request_deployment`], as the next step of the procedure
-    /// whose token this process inherited.
+    /// whose token this process inherited. Also says whether the request
+    /// waits for a TUI to be opened.
     pub fn request_deployment_in(
         &mut self,
         target: &str,
         allow_partial: bool,
         procedure: Option<String>,
-    ) -> io::Result<ApprovalRequest> {
+    ) -> io::Result<(ApprovalRequest, bool)> {
         match self.exchange(&Request::RequestDeployment {
             target: target.to_owned(),
             allow_partial,
             procedure,
         })? {
-            Response::DeploymentRequested { request } => Ok(request),
+            Response::DeploymentRequested {
+                request,
+                waiting_for_operator,
+            } => Ok((request, waiting_for_operator)),
             Response::Error { message } => Err(io::Error::other(message)),
             response => Err(unexpected(response)),
         }

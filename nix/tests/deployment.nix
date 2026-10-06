@@ -474,15 +474,30 @@ pkgs.testers.runNixOSTest {
     def signatures():
         return int(operator.succeed("grep -ac 'process_sign_request2: entering' /home/op/agent.log || true").strip())
     operator.succeed(as_op("touch ~/.ssh/known_hosts"))
-    operator.succeed(as_op(
-        "nix-secrets-backend --repository " + repo + " --socket " + socket
-        + " --manifest ${schema} >/home/op/backend.log 2>&1 &"
-    ))
-    operator.wait_until_succeeds(f"test -S {socket}")
+    def start_backend():
+        operator.succeed(as_op(
+            "nix-secrets-backend --repository " + repo + " --socket " + socket
+            + " --manifest ${schema} >>/home/op/backend.log 2>&1 & echo $! >/home/op/backend.pid"
+        ))
+        operator.wait_until_succeeds(f"test -S {socket}")
+    start_backend()
 
-    # Without a TUI the request is refused, and nothing is queued.
-    error = operator.fail(deploy("machine") + " 2>&1")
-    assert "open the nix-secrets TUI and retry" in error, error
+    # Without a TUI the request is only queued: it waits for an operator,
+    # and nothing connects to the target, signs or deploys meanwhile.
+    signed = signatures()
+    output = operator.succeed(deploy("machine") + " 2>&1")
+    assert "no nix-secrets TUI is attached yet" in output, output
+    import time
+    time.sleep(3)
+    assert signatures() == signed, "a queued request made the agent sign"
+    machine.fail("test -e /persistent/secrets/.current")
+    machine.fail("journalctl -u 'nix-secrets-deployer@*' --no-pager | grep -q Started")
+    # A fresh backend forgets the queue, so the steps below start empty.
+    pid = operator.succeed("cat /home/op/backend.pid").strip()
+    operator.succeed(f"kill {pid}")
+    operator.wait_until_fails(f"kill -0 {pid}")
+    operator.succeed(f"rm -f {socket}")
+    start_backend()
 
     # 1. Nothing is refused for missing values: everything deployable goes,
     #    and each missing value is listed with its reason. The token needs
@@ -492,6 +507,7 @@ pkgs.testers.runNixOSTest {
     signed = signatures()
     status, output = operator.execute(deploy("--wait", "machine") + " 2>&1")
     if status != 0:
+        print(operator.succeed("cat /home/op/first.log /home/op/backend.log"))
         print(machine.succeed("journalctl -u 'nix-secrets-deployer@*' --no-pager | tail -20"))
         raise AssertionError(output)
     stop_operator("first")

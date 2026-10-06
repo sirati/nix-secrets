@@ -90,7 +90,7 @@ pub fn run(
     let stream = connect_backend(&invocation.options, runtime)
         .map_err(|error| error.replace(" (or pass --local to decrypt here)", ""))?;
     let mut client = BackendClient::new(stream);
-    let request = client
+    let (request, waiting) = client
         .request_deployment_in(
             &invocation.host,
             invocation.allow_partial,
@@ -103,6 +103,11 @@ pub fn run(
         request.secrets.len(),
         request.id
     ));
+    if waiting {
+        // Queued only: nothing is deployed before a TUI claims the request
+        // and its operator approves it.
+        progress(crate::with_secrets::WAITING_FOR_OPERATOR);
+    }
     if !invocation.wait {
         return Ok(Outcome::Queued);
     }
@@ -176,7 +181,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             assert!(matches!(read_json::<Request>(&mut stream).unwrap().unwrap(), Request::RequestDeployment { target, .. } if target == "ns1"));
-            write_json(&mut stream, &Response::DeploymentRequested { request: ApprovalRequest { id: id.into(), target: "ns1".into(), secrets: vec!["ns1.services.mail.password".into()], allow_partial: false } }).unwrap();
+            write_json(&mut stream, &Response::DeploymentRequested { waiting_for_operator: false, request: ApprovalRequest { id: id.into(), target: "ns1".into(), secrets: vec!["ns1.services.mail.password".into()], allow_partial: false } }).unwrap();
             for state in [ApprovalStatus::Claimed { lease_id: 1, expires_in_ms: 1000 }, ApprovalStatus::Resolved { decision: Decision::Approved, message: Some("deployed".into()) }] {
                 assert!(matches!(read_json::<Request>(&mut stream).unwrap().unwrap(), Request::ApprovalStatus { request_id } if request_id == id));
                 write_json(&mut stream, &Response::ApprovalState { state }).unwrap();
