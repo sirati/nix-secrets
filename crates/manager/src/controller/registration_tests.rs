@@ -350,6 +350,7 @@ impl Fixture {
             },
             prepared: None,
             target_approved: true,
+            host_key_known: true,
             renewed_at: Instant::now(),
             procedure: None,
             last_error: None,

@@ -112,6 +112,20 @@ fn the_host_key_step_says_nothing_is_decrypted() {
 }
 
 #[test]
+fn a_known_host_asks_before_the_agent_signs_the_login() {
+    let mut request = ns1_request();
+    request.host_key = Some("Known SSH host key of ns1 (ns1.lamk.eu:22): ssh-ed25519 SHA256:abc".into());
+    request.host_key_known = true;
+    let mut model = Model::new(vec![]);
+    model.mode = Mode::Approval(request);
+    let text = screen(&draw(&model, 120, 30));
+    let flat = text.split(['│', '\n']).map(str::trim).filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
+    assert!(text.contains("Deploy ns1 · step 1/3: connect"), "{text}");
+    assert!(flat.contains("your SSH agent (1Password) asks you to approve"), "{text}");
+    assert!(text.contains("y Connect") && !text.contains("Trust"), "{text}");
+}
+
+#[test]
 fn details_show_full_identifiers() {
     let mut model = Model::new(vec![]);
     model.mode = Mode::Approval(ns1_request());

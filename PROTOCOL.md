@@ -185,6 +185,13 @@ separate from the SSH-agent signing protocol.
 
 ## Deployment flow
 
+0. Before anything authenticates, the TUI scans the target's host key without
+   logging in. It then shows step 1. For an unknown key, step 1 asks the
+   operator to trust it. For a known key, step 1 names the forwarder key the
+   TUI will log in with. The TUI logs in only after the operator approves that
+   step, and only then does the SSH agent (1Password) ask to sign. If the agent
+   refuses, the error says that the agent refused. It does not blame the
+   target's authorized keys.
 1. The frontend sends a bounded selection of canonical leaf identifiers.
 2. The target resolves that selection only from its generated Nix-store
    manifest. It returns the exact public leaf metadata and the current opaque

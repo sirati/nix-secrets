@@ -143,6 +143,20 @@ pub struct HostKeyPreflight {
     pub(crate) known_host_lines: Vec<String>,
 }
 
+impl HostKeyPreflight {
+    /// A scan result that known_hosts already trusts, without scanning;
+    /// for tests of what happens before anything connects.
+    pub fn known(identity: HostIdentity) -> Self {
+        Self {
+            identity,
+            status: HostKeyStatus::Known,
+            connection_warnings: Vec::new(),
+            known: Vec::new(),
+            known_host_lines: Vec::new(),
+        }
+    }
+}
+
 pub trait HostKeyDecision {
     fn accept_unknown(&mut self, identity: &HostIdentity) -> Decision;
 }

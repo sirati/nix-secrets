@@ -123,6 +123,25 @@ pub fn unknown_description(
     ))
 }
 
+/// Describes a host key that known_hosts already trusts, for the step that
+/// only logs in.
+pub fn known_description(connection: &Connection, preflight: &HostKeyPreflight) -> String {
+    let keys = preflight
+        .identity
+        .keys
+        .iter()
+        .map(|key| key.describe())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Known SSH host key of {} ({}:{}): {keys}; it matches {}.",
+        connection.name,
+        connection.host,
+        connection.port,
+        connection.known_hosts_files()
+    )
+}
+
 /// Describes a scan whose keys differ from the approved ones.
 fn identity_changed(
     connection: &Connection,

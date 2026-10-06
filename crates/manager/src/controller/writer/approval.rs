@@ -118,6 +118,7 @@ impl Controller {
                 },
                 prepared: None,
                 target_approved: true,
+                host_key_known: true,
                 last_error: None,
                 unchecked: BTreeSet::new(),
                 renewed_at: Instant::now(),
@@ -125,7 +126,7 @@ impl Controller {
             });
             return Ok(Some(details));
         }
-        let host_key = match deployment::preflight(&connection) {
+        let host_key = match (self.transport.preflight)(&connection) {
             Ok(preflight) => preflight,
             Err(error) => {
                 self.client
@@ -136,7 +137,13 @@ impl Controller {
         };
         self.connection_warnings = host_key.connection_warnings.clone();
         let known = host_key.status == HostKeyStatus::Known;
-        details.host_key = deployment::unknown_description(&connection, &host_key);
+        // Logging in signs with the operator's agent key (a 1Password
+        // prompt), so it waits for the step 1 approval even for a known host.
+        details.host_key = Some(
+            deployment::unknown_description(&connection, &host_key)
+                .unwrap_or_else(|| deployment::known_description(&connection, &host_key)),
+        );
+        details.host_key_known = known;
         self.active = Some(ActiveApproval {
             request,
             lease_id,
@@ -144,34 +151,13 @@ impl Controller {
             expected,
             identity: host_key.identity,
             prepared: None,
-            target_approved: known,
+            target_approved: false,
+            host_key_known: known,
             last_error: None,
             unchecked: BTreeSet::new(),
             renewed_at: Instant::now(),
             procedure,
         });
-        if known {
-            if let Err(error) = self.prepare_active() {
-                let active = self.active.take().expect("active approval exists");
-                self.client
-                    .resolve(
-                        active.request.id,
-                        active.lease_id,
-                        false,
-                        Some(error.clone()),
-                    )
-                    .map_err(|resolve| resolve.to_string())?;
-                return Err(error);
-            }
-            let request = self
-                .active
-                .as_ref()
-                .expect("active approval exists")
-                .request
-                .clone();
-            let refreshed = self.prepare_identity_for_active();
-            details = self.finish_claimed_setup(&request, lease_id, refreshed)?;
-        }
         Ok(Some(details))
     }
 
@@ -238,6 +224,13 @@ impl Controller {
                 .target_approved
             {
                 let active = self.active.as_ref().expect("active approval exists");
+                // A known key needs no trust; preparing re-checks it.
+                if active.host_key_known {
+                    self.prepare_active()?;
+                    let active = self.active.as_mut().expect("active approval exists");
+                    active.target_approved = true;
+                    return self.prepare_identity_for_active().map(Some);
+                }
                 let verifier =
                     nix_secrets_transport::HostKeyVerifier::new(self.known_hosts.clone())
                         .with_route(self.backend_route.clone());

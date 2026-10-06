@@ -34,6 +34,8 @@ fn dim() -> Style {
 pub(crate) fn approval_title(request: &ApprovalRequest) -> String {
     if !request.host_mutations.is_empty() {
         "Save host-provided changes".into()
+    } else if request.host_key.is_some() && request.host_key_known {
+        format!("Deploy {} · step 1/3: connect", request.target)
     } else if request.host_key.is_some() {
         format!(
             "Deploy {} · step 1/3: verify the SSH host key",
@@ -185,9 +187,18 @@ pub(crate) fn approval_lines(
             Style::default().add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::styled(
-            "Nothing is decrypted in this step: approving only trusts this host key and reads the target's deployment state."
-                .to_owned(),
+            if request.host_key_known {
+                "Nothing is decrypted in this step: approving only logs in and reads the target's deployment state."
+            } else {
+                "Nothing is decrypted in this step: approving only trusts this host key and reads the target's deployment state."
+            }
+            .to_owned(),
             dim(),
+        ));
+        lines.push(Line::styled(
+            "Logging in signs with the key below: your SSH agent (1Password) asks you to approve that signature after you approve here, never before."
+                .to_owned(),
+            Style::default().fg(Color::Cyan),
         ));
         lines.push(Line::default());
         lines.push(Line::styled(

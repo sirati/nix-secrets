@@ -50,6 +50,8 @@ pub struct ApprovalRequest {
     pub replace: Vec<String>,
     pub recipient_keys: Vec<String>,
     pub host_key: Option<String>,
+    /// The host key in `host_key` is already trusted; step 1 only logs in.
+    pub host_key_known: bool,
     pub tasks: Vec<TaskApproval>,
     /// Unset values the target will generate, with the generator label.
     pub generate: Vec<(String, String)>,

@@ -26,6 +26,8 @@ struct ActiveApproval {
     identity: HostIdentity,
     prepared: Option<PreparedDeployment>,
     target_approved: bool,
+    /// The host key was already in known_hosts; approving step 1 only logs in.
+    host_key_known: bool,
     renewed_at: Instant,
     /// Why the last approval failed, reported if the operator then rejects.
     last_error: Option<String>,
@@ -59,11 +61,30 @@ pub struct Controller {
     last_summary: Option<crate::model::DeploySummary>,
     /// Runs operator keypair generators; tests replace it.
     keypair_runner: KeypairRunner,
+    transport: Transport,
     phase: Option<std::sync::Arc<dyn Fn(&'static str) + Send + Sync>>,
     /// Public-key follow-ups this TUI submitted, with the procedure of the
     /// deployment that caused them. Kept here, never sent to the backend,
     /// which accepts procedure membership only from requesters it checked.
     followup_procedures: std::collections::BTreeMap<String, nix_secrets_core::procedure::ProcedureStep>,
+}
+
+/// The two network steps of a deployment before anything is sent: the
+/// unauthenticated host-key scan and the authenticated login that reads the
+/// target state. Tests replace them.
+#[derive(Clone, Copy)]
+pub struct Transport {
+    pub preflight: fn(&Connection) -> Result<nix_secrets_transport::HostKeyPreflight, String>,
+    pub prepare: fn(&Connection, &ExpectedTarget, &HostIdentity) -> Result<PreparedDeployment, String>,
+}
+
+impl Default for Transport {
+    fn default() -> Self {
+        Self {
+            preflight: deployment::preflight,
+            prepare: deployment::prepare,
+        }
+    }
 }
 
 pub type KeypairRunner =
@@ -100,6 +121,12 @@ impl Controller {
     /// Replaces the program that runs keypair generators, for tests.
     pub fn with_keypair_runner(mut self, runner: KeypairRunner) -> Self {
         self.keypair_runner = runner;
+        self
+    }
+
+    /// Replaces the deployment's host-key scan and login, for tests.
+    pub fn with_transport(mut self, transport: Transport) -> Self {
+        self.transport = transport;
         self
     }
 
@@ -181,6 +208,7 @@ impl Controller {
             last_skipped: Vec::new(),
             last_summary: None,
             keypair_runner: crate::keypair::generate,
+            transport: Transport::default(),
             phase: None,
             followup_procedures: Default::default(),
         })
@@ -324,6 +352,7 @@ impl Controller {
                     .collect()
             },
             host_key: None,
+            host_key_known: false,
             host_mutations: vec![],
             host_mutations_before_deploy: false,
             connection_warnings: self.connection_warnings.clone(),
@@ -741,7 +770,7 @@ impl Controller {
 
     fn prepare_active(&mut self) -> Result<(), String> {
         let active = self.active.as_ref().ok_or("no claimed approval request")?;
-        let prepared = deployment::prepare(&active.connection, &active.expected, &active.identity)?;
+        let prepared = (self.transport.prepare)(&active.connection, &active.expected, &active.identity)?;
         self.active
             .as_mut()
             .expect("active approval exists")

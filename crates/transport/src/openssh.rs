@@ -40,7 +40,11 @@ impl fmt::Display for SshError {
                 destination,
                 stderr,
             } => {
-                let cause = if stderr.contains("Too many authentication failures")
+                let cause = if stderr.contains("agent refused operation")
+                    || stderr.contains("signing failed")
+                {
+                    "the SSH agent refused to sign with the forwarder key; approve it in 1Password (or your agent) when nix-secrets asks"
+                } else if stderr.contains("Too many authentication failures")
                     || stderr.contains("Permission denied")
                 {
                     "authentication failed: the server did not accept the offered key. Check that the forwarder key is authorized for this account on the target"
@@ -418,6 +422,22 @@ impl Drop for TemporaryKnownHosts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_agent_refusal_is_not_reported_as_an_unauthorized_key() {
+        let error = SshError::Disconnected {
+            destination: "nix-secrets-forward@ns1:22".into(),
+            stderr: "sign_and_send_pubkey: signing failed for ED25519 \"/tmp/identity-0.pub\" from agent: agent refused operation\nPermission denied (publickey).".into(),
+        }
+        .to_string();
+        assert!(error.contains("the SSH agent refused to sign with the forwarder key"), "{error}");
+        assert!(!error.contains("not accept the offered key"), "{error}");
+        let denied = SshError::Disconnected {
+            destination: "x".into(),
+            stderr: "Permission denied (publickey).".into(),
+        }
+        .to_string();
+        assert!(denied.contains("did not accept the offered key"), "{denied}");
+    }
     #[test]
     fn pinned_file_is_private_and_removed() {
         use std::os::unix::fs::PermissionsExt;

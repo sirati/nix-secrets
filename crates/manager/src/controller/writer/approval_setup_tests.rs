@@ -17,7 +17,9 @@ impl Fixture {
         let schema = Schema::from_json(&serde_json::json!({"ns1": {
             "metadata": {"socketPath": "/run/unused", "deployment": {"host": "unused", "destination": "forward@unused", "port": 22}},
             "services": {"report": {"authorized": {"kind": "secret", "recipientPublicKeys": ["ssh-ed25519 test"], "recipientIds": ["test"], "consumerUnits": [],
-                "destination": {"path": "/persistent/secrets/report/service/authorized", "category": "service", "owner": "root", "group": "root", "mode": "0400"}}}}
+                "destination": {"path": "/persistent/secrets/report/service/authorized", "category": "service", "owner": "root", "group": "root", "mode": "0400"}},
+                "password": {"kind": "secret", "valueType": "password", "recipientPublicKeys": ["ssh-ed25519 test"], "recipientIds": ["test"], "consumerUnits": [],
+                "destination": {"path": "/persistent/secrets/report/service/password", "category": "service", "owner": "root", "group": "root", "mode": "0400"}}}}
         }}).to_string()).unwrap();
         let backend = Backend::bind(&socket, schema.clone(), SecretStore::new(&store)).unwrap();
         std::thread::spawn(move || backend.serve().unwrap());
@@ -123,6 +125,7 @@ fn refreshed_details_error_clears_active_and_terminally_rejects_exact_claim() {
         },
         prepared: None,
         target_approved: true,
+        host_key_known: true,
         renewed_at: Instant::now(),
         procedure: None,
         last_error: None,
@@ -156,4 +159,54 @@ fn refreshed_details_error_clears_active_and_terminally_rejects_exact_claim() {
         next.id
     );
     controller.approval_inner(false).unwrap();
+}
+
+static LOGINS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn known_host(connection: &Connection) -> Result<nix_secrets_transport::HostKeyPreflight, String> {
+    Ok(nix_secrets_transport::HostKeyPreflight::known(HostIdentity {
+        host: connection.host.clone(),
+        port: connection.port,
+        keys: vec![],
+        other_names_with_keys: vec![],
+    }))
+}
+
+/// Stands in for the authenticated login, which would ask the operator's
+/// SSH agent (1Password) to sign.
+fn recorded_login(
+    _: &Connection,
+    _: &ExpectedTarget,
+    _: &HostIdentity,
+) -> Result<PreparedDeployment, String> {
+    LOGINS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Err("recorded login".into())
+}
+
+#[test]
+fn a_known_host_is_not_logged_into_before_the_operator_approves_connecting() {
+    let fixture = Fixture::new();
+    let mut controller = fixture.controller().with_transport(crate::controller::Transport {
+        preflight: known_host,
+        prepare: recorded_login,
+    });
+    let mut cli = fixture.client();
+    let mut known = request("deploy-known-host");
+    // A password the target generates, so there is something to deploy.
+    known.secrets = vec!["ns1.services.report.password".into()];
+    cli.submit_approval(known).unwrap();
+    let dialog = controller.poll_approval_inner().unwrap().unwrap();
+    // The first dialog explains the login; nothing signed yet.
+    assert_eq!(LOGINS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(dialog.host_key_known, "{dialog:?}");
+    assert!(dialog.host_key.as_deref().is_some_and(|text| text.contains("Known SSH host key")));
+    // Renewing the lease while the dialog is open never logs in either.
+    controller.active.as_mut().unwrap().renewed_at = Instant::now() - Duration::from_secs(120);
+    controller.poll_approval_inner().unwrap();
+    assert_eq!(LOGINS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // Approving the step logs in, exactly once.
+    let error = controller.approval_inner(true).unwrap_err();
+    assert_eq!(error, "recorded login");
+    assert_eq!(LOGINS.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_rejected(&mut cli, "deploy-known-host", "recorded login");
 }

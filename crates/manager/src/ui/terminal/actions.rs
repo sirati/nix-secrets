@@ -201,7 +201,11 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                 return buttons;
             }
             if request.host_key.is_some() {
-                buttons.push(letter("y Trust and connect", 'y'));
+                buttons.push(if request.host_key_known {
+                    letter("y Connect", 'y')
+                } else {
+                    letter("y Trust and connect", 'y')
+                });
                 buttons.push(letter("n Cancel", 'n'));
                 buttons.push(letter("m Minimise", 'm'));
                 return buttons;
