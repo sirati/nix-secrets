@@ -16,6 +16,12 @@ pub(crate) trait Runner {
         let _ = timeout;
         self.run(program, arguments)
     }
+    /// Every address `host` resolves to on this client, so a direct probe
+    /// can try each one; `None` probes the name once per address family.
+    fn resolve(&self, host: &str, port: u16) -> Option<Vec<std::net::IpAddr>> {
+        let _ = (host, port);
+        None
+    }
     fn pause(&self, duration: std::time::Duration) {
         std::thread::sleep(duration);
     }
@@ -25,6 +31,16 @@ pub(crate) trait Runner {
 }
 pub(crate) struct ProcessRunner;
 impl Runner for ProcessRunner {
+    fn resolve(&self, host: &str, port: u16) -> Option<Vec<std::net::IpAddr>> {
+        use std::net::ToSocketAddrs;
+        let mut addresses = Vec::new();
+        for address in (host, port).to_socket_addrs().ok()? {
+            if !addresses.contains(&address.ip()) {
+                addresses.push(address.ip());
+            }
+        }
+        (!addresses.is_empty()).then_some(addresses)
+    }
     fn run(&self, program: &OsStr, arguments: &[OsString]) -> Result<Output, HostKeyError> {
         self.run_bounded(program, arguments, std::time::Duration::from_secs(12))
     }

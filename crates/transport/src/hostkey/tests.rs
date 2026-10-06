@@ -1100,3 +1100,101 @@ fn empty_both_families_complete_all_algorithm_fallbacks_within_total_deadline() 
     assert!(calls[6].1.contains("mldsa44"));
     assert_eq!(probe.elapsed.get(), std::time::Duration::from_secs(3));
 }
+
+/// A client without an IPv6 route to a dual-stack target whose IPv4 answer
+/// takes a real WAN round trip.
+struct ResolvedAddresses {
+    addresses: Vec<std::net::IpAddr>,
+    keys: std::collections::BTreeMap<&'static str, &'static str>,
+    round_trip: std::time::Duration,
+    elapsed: std::cell::Cell<std::time::Duration>,
+    calls: std::cell::RefCell<Vec<(String, String)>>,
+}
+impl ResolvedAddresses {
+    fn new(keys: &[(&'static str, &'static str)]) -> Self {
+        Self {
+            addresses: vec![
+                "2a01:4f8:1c17:5100::1".parse().unwrap(),
+                "88.99.80.66".parse().unwrap(),
+                "88.99.80.67".parse().unwrap(),
+            ],
+            keys: keys.iter().copied().collect(),
+            round_trip: std::time::Duration::from_millis(1200),
+            elapsed: Default::default(),
+            calls: Default::default(),
+        }
+    }
+}
+impl Runner for ResolvedAddresses {
+    fn run(&self, _: &OsStr, _: &[OsString]) -> Result<Output, HostKeyError> {
+        panic!("unbounded direct probe");
+    }
+    fn resolve(&self, host: &str, port: u16) -> Option<Vec<std::net::IpAddr>> {
+        assert_eq!((host, port), ("ns1.example", 22222));
+        Some(self.addresses.clone())
+    }
+    fn elapsed(&self, _: std::time::Instant) -> std::time::Duration {
+        self.elapsed.get()
+    }
+    fn run_bounded(
+        &self,
+        _: &OsStr,
+        args: &[OsString],
+        timeout: std::time::Duration,
+    ) -> Result<Output, HostKeyError> {
+        let family = args[0].to_string_lossy().into_owned();
+        let target = args.last().unwrap().to_string_lossy().into_owned();
+        self.calls.borrow_mut().push((family.clone(), target.clone()));
+        let reachable = self.keys.get(target.as_str()).copied();
+        let (spent, data) = match reachable {
+            // No route: the connect fails at once.
+            None => (std::time::Duration::from_millis(5), ""),
+            Some(_) if timeout < self.round_trip => (timeout, ""),
+            Some(data) => (self.round_trip, data),
+        };
+        assert_eq!(family == "-4", target.contains('.'), "family matches the address");
+        self.elapsed.set(self.elapsed.get() + spent);
+        Ok(Output {
+            success: !data.is_empty(),
+            stdout: data.as_bytes().to_vec(),
+            diagnostic: "address probe".into(),
+        })
+    }
+}
+
+#[test]
+fn every_resolved_address_is_probed_and_ipv4_answers_without_an_ipv6_route() {
+    let tunnel = parse_key_lines(b"loopback ssh-ed25519 EXPECTED\n");
+    let probe = ResolvedAddresses::new(&[
+        ("88.99.80.66", "88.99.80.66 ssh-ed25519 EXPECTED\n"),
+        ("88.99.80.67", "88.99.80.67 ssh-ed25519 EXPECTED\n"),
+    ]);
+    let warnings = verifier()
+        .compare_direct("ns1.example", 22222, &tunnel, &probe)
+        .unwrap();
+    assert!(warnings.is_empty(), "the IPv4 identity was observed: {warnings:?}");
+    let calls = probe.calls.borrow();
+    for address in ["2a01:4f8:1c17:5100::1", "88.99.80.66", "88.99.80.67"] {
+        assert!(calls.iter().any(|(_, target)| target == address), "{address} not probed: {calls:?}");
+    }
+}
+
+#[test]
+fn a_differing_identity_on_any_reachable_address_stays_fatal() {
+    let tunnel = parse_key_lines(b"loopback ssh-ed25519 EXPECTED\n");
+    let probe = ResolvedAddresses::new(&[
+        ("88.99.80.66", "88.99.80.66 ssh-ed25519 EXPECTED\n"),
+        ("88.99.80.67", "88.99.80.67 ssh-ed25519 OTHER\n"),
+    ]);
+    let error = verifier()
+        .compare_direct("ns1.example", 22222, &tunnel, &probe)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("ROUTE MISMATCH"), "{error}");
+    // Nothing reachable at all is only the warning.
+    let unreachable = ResolvedAddresses::new(&[]);
+    let warnings = verifier()
+        .compare_direct("ns1.example", 22222, &tunnel, &unreachable)
+        .unwrap();
+    assert!(warnings.len() == 1 && warnings[0].contains("unavailable"), "{warnings:?}");
+}

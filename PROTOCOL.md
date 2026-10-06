@@ -167,10 +167,13 @@ backend, the frontend's existing SSH master forwards target TCP connections.
 The frontend checks the original target's host key and decrypts locally. If the
 master connection is lost, deployment stops. The frontend does not reconnect
 and does not fall back to a direct connection to the target. The additional
-direct host-key probe has a three-second budget. If the direct route is
-unreachable, the frontend warns. If any key it observes differs from the
-tunneled endpoint's key, it aborts before target authentication or secret
-transmission.
+direct host-key probe resolves the target on the client. It probes every A and
+AAAA address separately and names the address family explicitly. Each address
+gets three seconds, within a total budget of ten seconds. An address without a
+route fails at once. If the name does not resolve, the frontend probes the name
+once per family within three seconds. If no address is reachable, the frontend
+warns. If any key it observes differs from the tunneled endpoint's key, it
+aborts before target authentication or secret transmission.
 
 The frontend uses the user's OpenSSH host-key policy and `known_hosts` files.
 A changed key aborts. For an unknown key, the UI shows the presented key and

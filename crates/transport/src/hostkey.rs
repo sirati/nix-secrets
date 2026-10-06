@@ -360,48 +360,65 @@ impl HostKeyVerifier {
         };
         let mut direct = Vec::new();
         let mut complete_output = false;
-        let mut observed_family = [false; 2];
-        // Explicit families are essential: ssh-keyscan may select an
-        // unreachable IPv6 address without probing a reachable IPv4 identity.
-        // Each family is checked even if the other already matches.
+        // Every address the client resolves is probed on its own, with its
+        // family explicit: ssh-keyscan given the name may select an
+        // unreachable IPv6 address without probing a reachable IPv4
+        // identity. Unreachable addresses fail at once, so the reachable
+        // ones get time for a real round trip. Without a resolution, the
+        // name is probed once per family. Each target is checked even if
+        // another already matches.
+        let millis = std::time::Duration::from_millis;
+        let (targets, total, budgets): (Vec<(&str, String)>, _, [_; 4]) =
+            match runner.resolve(host, port) {
+                Some(addresses) => (
+                    addresses
+                        .iter()
+                        .map(|address| {
+                            (if address.is_ipv4() { "-4" } else { "-6" }, address.to_string())
+                        })
+                        .collect(),
+                    std::time::Duration::from_secs(10),
+                    [millis(3000), millis(2000), millis(1000), millis(1000)],
+                ),
+                None => (
+                    vec![("-4", host.to_owned()), ("-6", host.to_owned())],
+                    std::time::Duration::from_secs(3),
+                    [millis(750), millis(500), millis(125), millis(125)],
+                ),
+            };
+        let mut observed = vec![false; targets.len()];
         for (types, per_probe) in [
-            (selected.join(","), std::time::Duration::from_millis(750)),
-            (
-                "ed25519,ecdsa,rsa".into(),
-                std::time::Duration::from_millis(500),
-            ),
-            (
-                "ed25519-sk,ecdsa-sk".into(),
-                std::time::Duration::from_millis(125),
-            ),
-            (
-                "mldsa44-ed25519".into(),
-                std::time::Duration::from_millis(125),
-            ),
-        ] {
-            for (family_index, family) in ["-4", "-6"].iter().enumerate() {
-                if observed_family[family_index] {
+            selected.join(","),
+            "ed25519,ecdsa,rsa".into(),
+            "ed25519-sk,ecdsa-sk".into(),
+            "mldsa44-ed25519".into(),
+        ]
+        .into_iter()
+        .zip(budgets)
+        {
+            for (index, (family, target)) in targets.iter().enumerate() {
+                if observed[index] {
                     continue;
                 }
-                let remaining =
-                    std::time::Duration::from_secs(3).saturating_sub(runner.elapsed(started));
+                let remaining = total.saturating_sub(runner.elapsed(started));
                 if remaining.is_zero() {
                     break;
                 }
+                let timeout = remaining.min(per_probe);
                 let result = runner.run_bounded(
                     &self.ssh_keyscan,
                     &[
                         (*family).into(),
                         "-T".into(),
-                        "1".into(),
+                        timeout.as_secs().max(1).to_string().into(),
                         "-p".into(),
                         port.to_string().into(),
                         "-t".into(),
                         types.clone().into(),
                         "--".into(),
-                        host.into(),
+                        target.into(),
                     ],
-                    remaining.min(per_probe),
+                    timeout,
                 );
                 if let Ok(output) = result {
                     let keys = parse_key_lines(&output.stdout);
@@ -418,7 +435,7 @@ impl HostKeyVerifier {
                             )));
                         }
                     }
-                    observed_family[family_index] = true;
+                    observed[index] = true;
                     complete_output |= output.success;
                     direct.extend(keys);
                 }
