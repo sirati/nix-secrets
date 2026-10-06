@@ -219,11 +219,13 @@ unexpected owners.
 
 ## Operator-initiated deployment
 
-`RequestDeployment { target, allow_partial }` asks the backend to queue a
-deployment of every deployable leaf of `target` in its evaluated schema. That
-set is every stored leaf, including public information and derived leaves, and
-every generated-secret task. Operator-only leaves are left out. The backend
-picks a random request id, submits `ApprovalRequest { id, target, secrets,
+`RequestDeployment { target, allow_partial, procedure }` asks the backend to
+queue a deployment of every deployable leaf of `target` in its evaluated
+schema. That set is every stored leaf, including public information and derived
+leaves, and every generated-secret task. Operator-only leaves are left out. If
+the request carries a procedure token, it becomes the next step of that
+procedure, as described in Procedures. The backend picks a random request id,
+submits `ApprovalRequest { id, target, secrets,
 allow_partial }` to the approval broker, publishes `ApprovalRequested`, and
 answers `DeploymentRequested { request }`. If no frontend is registered, it
 answers with an error that names the TUI, because no frontend could claim the
@@ -350,26 +352,49 @@ A process on the backend host obtains plaintext only through the operator's
 TUI, which decrypts and returns it after the operator approves.
 
 1. The TUI opens a dedicated connection and sends `AttachOperator`. The
-   backend answers `OperatorAttached`. After that it sends only `Heartbeat`
-   and `SecretRequested { request }` frames on this connection. The TUI sends
-   nothing unasked, so any readable byte or a hang-up detaches it.
+   backend answers `OperatorAttached`. It then sends a `ProcedureUpdate
+   { procedure }` for every live procedure. After that it sends `Heartbeat`,
+   `SecretRequested { request }`, `SecretRequestWithdrawn { request_id }`,
+   `ProcedureUpdate`, and `ProcedureEnded { id }` frames. The TUI may send
+   `AnswerSecretRequest` and `CancelCountdown { request_id }` frames at any
+   time. Any other frame, or a hang-up, detaches it. Several requests can wait
+   on one channel at once. The TUI answers each by its id, in any order. An
+   answer counts once, and only for a request that still waits. A replay, an
+   answer to a withdrawn request, or a made-up id reaches nobody.
 2. `nix-secrets with-secrets ID… -- CMD…` connects to the repository's
    backend socket and never starts a backend. It sends
-   `RequestSecrets { identifiers }` with 1 to 256 distinct canonical
-   identifiers. As on every connection, only same-UID peers are accepted.
+   `RequestSecrets { identifiers, procedure, progress }` with 1 to 256
+   distinct canonical identifiers. As on every connection, only same-UID peers
+   are accepted. `procedure` carries the token from `NIX_SECRETS_PROCEDURE`
+   when the requester runs inside `nix-secrets procedure`, as described in
+   Procedures. With `progress`, the requester also reads `Heartbeat` frames
+   every 30 seconds and one `CountdownCancelled` frame before its answer. A
+   requester that does not set `progress` gets exactly one answer frame, as
+   before.
 3. The backend fills `request.requester` and `request.parent` from
    `/proc/<peer pid>` (PID from `SO_PEERCRED`; executable, argv, cwd), and
    never from the request. It forwards the request to the most recently
-   attached TUI. At most one request waits for the operator, and the backend
-   refuses another one immediately. Without an attached TUI the request fails
-   with "open the nix-secrets TUI and retry".
+   attached TUI. Up to 16 requests from all requesters can wait for the
+   operator at once, and the backend refuses another one immediately. Without
+   an attached TUI the request fails with "open the nix-secrets TUI and
+   retry". The backend withdraws a request when its requester disconnects or
+   when the backend gives up on it. The TUI then drops the prompt, and the
+   request is denied.
 4. The TUI rejects undeclared, public-info, and unset identifiers without
-   asking. Otherwise it shows a modal above every other dialog. The modal shows
-   each value's identifier, kind, and description, its recipient names and SSH
-   key fingerprints, the decryption identity (1Password or an identity file),
-   the requester and its parent, and a 120-second countdown. Only
-   Ctrl+Shift+Y or the Yes button approves. n, Enter, Esc, and the timeout
-   deny.
+   asking. Otherwise it shows a modal. The modal shows each value's
+   identifier, kind, and description, its recipient names and SSH key
+   fingerprints, the decryption identity (1Password or an identity file), and
+   the requester and its parent. Only Ctrl+Shift+Y or the Yes button approves.
+   n, Enter, and Esc deny. A request outside a procedure, or the first step of
+   one, also shows a 120-second countdown and is denied when it runs out.
+   Later steps of a procedure have no countdown. The operator can cancel the
+   countdown with c or the "Keep waiting" button. The TUI then sends
+   `CancelCountdown`. The backend stops its own deadline for that request,
+   which otherwise is 610 seconds and bounds a TUI that stopped answering. It
+   sends `CountdownCancelled` to a requester with `progress`. The CLIs print
+   "operator cancelled the auto-reject countdown; waiting" and keep waiting. A
+   request without a countdown waits until the operator answers it or the TUI
+   or the requester disconnects.
 5. On approval, the TUI decrypts every value in one provider batch. The
    `nix-secrets-1password --batch` launcher authorizes once and runs age once
    per ciphertext inside that authorization. The TUI answers
@@ -399,6 +424,71 @@ and ends the session. `--local` keeps the earlier behaviour of decrypting in
 the calling process. `with-secrets --local` serves such a batch from its own
 process with the same session protocol. Adding these requests raised the
 backend compatibility version to 10.
+
+## Procedures
+
+A procedure groups the operator prompts of one logical operation. An update
+run is an example: it authenticates over SSH, signs a closure, and then
+deploys secrets. The TUI shows all of these prompts in one dialog under a
+common title.
+
+1. `nix-secrets procedure --title TITLE [--steps N] -- CMD…` connects to the
+   repository's backend and sends `BeginProcedure { title, steps }`. The
+   backend removes control characters from the title. It records the
+   procedure with the connecting process as its owner, using the PID from
+   `SO_PEERCRED`. It answers `ProcedureBegun { id, token }`. The `id` is
+   public. The `token` is `id:secret`, where the secret is 32 random bytes. At
+   most 64 procedures live at once.
+2. The command runs with `NIX_SECRETS_PROCEDURE=<token>`. Every nix-secrets
+   requester it starts sends the token as `procedure` in its request. These
+   requesters are `with-ssh-agent`, `with-secrets`, `pipe-secret`,
+   `sign-artifacts`, `sign-closure`, and `deploy`.
+3. The backend accepts a token only when its secret matches. It compares the
+   secret in constant time. The requesting peer must also be the owner or one
+   of its descendants by the parent chain in `/proc`. The backend refuses a
+   process that does not descend from the procedure, even with the right
+   token. An ended procedure refuses every token. Requests without a token
+   behave as before, and each one is a procedure of one step.
+4. Each accepted request becomes the next step. The backend numbers it and
+   labels it from what it asks, for example "SSH authentication to
+   root@ns1", "sign closure for ns1", "release 2 secret values", or "deploy
+   secrets to ns1". It attaches `ProcedureStep { id, title, step, steps,
+   label, deployment }` to the `SecretRequest`, or to the deployment request
+   in the approval broker. `PollApprovals` reports it as
+   `Approvals { requests, procedures }`. A request submitted with
+   `SubmitApproval` can never carry a step. All attached TUIs also receive a
+   `ProcedureUpdate` for each step. They receive `ProcedureEnded` when the
+   procedure's connection sends `EndProcedure` or closes. `nix-secrets
+   procedure` does this when its command exits.
+5. Only step 1 counts down, as described in Secret requests. The backend
+   numbers a step only once a TUI can be asked, so a refused request does not
+   use one up.
+
+A deployment in a procedure can cause public-key follow-ups. These follow-ups
+join that procedure inside the TUI. The TUI remembers which deployment
+submitted them, and the backend is never told.
+
+If no backend is reachable, `nix-secrets procedure` warns and runs the command
+anyway. Its prompts then appear one by one. Adding procedures raised the
+backend compatibility version to 22.
+
+In the TUI, every prompt and every deployment approval belongs to a procedure.
+The foreground procedure's dialog is titled `TITLE · step N/M: LABEL`. The
+body names the requester. A deployment dialog's title continues with its own
+stage, as in `… › Deploy ns1 · step 2/3: choose what to deploy`. `m` minimises
+the dialog into the task bar above the actions. The task bar lists every
+procedure with its current step. It also shows whether the procedure waits for
+the operator or is working. A click on an entry, or `M`, restores a
+procedure. `M` picks flashing entries first. A procedure never takes the
+screen from another dialog. A procedure that starts or asks while anything
+else is open starts minimised, and its entry flashes. The terminal bell and a
+desktop notification announce it once. When nothing is open, the procedure
+opens directly. The operator must read a minimised host-change review again
+from its top before the TUI offers Save. Secret prompts of different
+procedures wait and are answered independently. The TUI claims one deployment
+approval at a time. A second procedure's deployment therefore reaches the task
+bar only once the operator answers the open one. Meanwhile its entry shows
+"deployment queued behind the open one".
 
 ## Generated-secret tasks
 
@@ -458,7 +548,8 @@ are unhealthy.
 
 `with-ssh-agent --public-key FILE --destination USER@HOST [--reason TEXT] -- CMD`
 runs CMD with a private temporary agent. The agent lists only the selected
-public key. A signing request becomes `RequestSshSignature { request, reason }`.
+public key. A signing request becomes `RequestSshSignature { request, reason,
+procedure, progress }`.
 The backend fills in the requester and parent from kernel peer credentials and
 sends a `SecretRequested` with `ssh_signature` set and no secret identifiers.
 

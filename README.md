@@ -170,6 +170,26 @@ nix-secrets with-secrets HOST.services.app.token \
 This sends the approved plaintext to that command on the backend, by design.
 For stdin delivery and client-side SSH authentication, see [Command reference](COMMANDS.md).
 
+## Group the prompts of one operation
+
+Some operations ask the TUI several times. An update run, for example,
+authenticates over SSH, signs its closure, and then deploys secrets. Such an
+operation can run as one procedure:
+
+```sh
+nix-secrets procedure --title 'Update ns1' --steps 4 -- nix-update-remote ns1
+```
+
+Every `nix-secrets` request the command makes then appears in one dialog,
+titled for example `Update ns1 · step 2/4: sign closure for ns1`. Only
+processes that the command started can join the procedure. Press `m` to
+minimise the dialog to the task bar above the actions. Press `M`, or click an
+entry, to restore a procedure. Several procedures can wait at once. A
+procedure that starts while another dialog is open stays minimised and
+flashes. It never takes the screen. Only the first step counts down to an
+automatic denial after 120 seconds. Press `c` to cancel the countdown. The
+requesting command is then told and keeps waiting.
+
 ## Reference
 
 - [Nix declarations](nix/README.md)

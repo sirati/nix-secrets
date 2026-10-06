@@ -139,10 +139,21 @@ values. Decryption stays in the TUI. Plaintext reaches the backend host only
 when the operator approves in the TUI's modal. The modal shows every value, its
 recipient keys, and the requester's PID, executable, command line, and working
 directory. The backend reads these from `/proc` for the peer PID the kernel
-reports, so a requester cannot misreport itself. At most one request waits at a
-time, so requests cannot pile up as stacked prompts. Approval needs the same
-deliberate key as the loss warning, and a request denies itself after 120
-seconds.
+reports, so a requester cannot misreport itself. At most 16 requests wait at
+once. A prompt never takes the screen from a dialog that is already open. A
+prompt that arrives meanwhile waits minimised in the task bar until the
+operator restores it. A key meant for one dialog therefore cannot answer
+another dialog that appeared under it. Approval needs the same deliberate key
+as the loss warning. A request outside a procedure, or the first step of one,
+denies itself after 120 seconds unless the operator cancels that countdown.
+
+The command that registered a procedure chooses its title. The TUI shows the
+title without validating it, as it shows a reason. The backend admits a request
+to a procedure only with the procedure's random token. It also requires that
+the requester descends from the registering process. Another program of the
+same user therefore cannot place its prompt in a procedure's dialog under that
+title unless it runs inside the procedure. The prompt body still names the
+actual requester as the backend read it from `/proc`.
 
 Approved values then stay in backend memory for the lifetime of the command.
 The backend serves them on a 0600 socket in a 0700 directory, only to same-UID

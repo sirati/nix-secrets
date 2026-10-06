@@ -27,6 +27,21 @@ is queued. With `--wait`, the command waits and exits with an error if the
 operator rejects the deployment or it fails. Missing values are skipped and
 reported. `--allow-partial` is accepted for compatibility and has no effect.
 
+## Group requests into a procedure
+
+```text
+nix-secrets procedure [--repository PATH] [--backend-socket PATH] --title TEXT [--steps N] -- COMMAND [ARGUMENT ...]
+```
+
+Runs COMMAND as one procedure. Every `nix-secrets` request that COMMAND or its
+descendants make becomes a numbered step of one TUI dialog titled TEXT. This
+covers `with-ssh-agent`, `with-secrets`, `pipe-secret`, `sign-artifacts`,
+`sign-closure` and `deploy`. `--steps` declares how many steps the title shows,
+as in `step 2/4`. The token in `NIX_SECRETS_PROCEDURE` admits only descendants
+of this command. The procedure ends when COMMAND exits, and the command returns
+COMMAND's exit status. If no backend is reachable, COMMAND still runs, and its
+prompts appear one by one.
+
 ## Request plaintext for a command
 
 These commands, including `--local`, cannot export operator keys declared
@@ -40,9 +55,11 @@ nix-secrets pipe-secret [OPTIONS] IDENTIFIER
 
 The TUI shows the requested values and the requesting process. It displays
 `--reason TEXT` as the caller's explanation without validating it.
-Ctrl+Shift+Y or Yes approves. Enter, Esc or `n` denies. Requests expire after
-120 seconds. Without an attached TUI, these commands fail and do not decrypt
-locally.
+Ctrl+Shift+Y or Yes approves. Enter, Esc or `n` denies. A request expires after
+120 seconds unless the operator cancels the countdown with `c`. The command
+then prints "operator cancelled the auto-reject countdown; waiting" and keeps
+waiting. Inside a procedure, only the first step counts down. Without an
+attached TUI, these commands fail and do not decrypt locally.
 
 `with-secrets` asks once for the whole batch. It then runs the command with
 `NIX_SECRETS_SESSION` pointing to a temporary private socket. Descendant
