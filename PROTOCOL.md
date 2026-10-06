@@ -193,8 +193,9 @@ ends with `EndProcedure` or when that connection closes.
 A request joins a procedure by carrying the token in `procedure`. The backend
 compares the secret in constant time and requires the requester to be the
 owner or its descendant. Each accepted request becomes the next step,
-`ProcedureStep { id, title, step, steps, label, deployment }`. `SubmitApproval`
-requests never carry a step.
+`ProcedureStep { id, title, step, steps, label, deployment }`. An SSH signature
+request with the same label as the SSH signature step before it keeps that
+step number. `SubmitApproval` requests never carry a step.
 
 ## Storage Box tasks
 

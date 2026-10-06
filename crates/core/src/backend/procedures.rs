@@ -23,6 +23,9 @@ struct Live {
     /// The registering process; requesters must descend from it.
     owner: u32,
     step: ProcedureStep,
+    /// The current step may take more than one request; see
+    /// [`Procedures::next_step`].
+    repeatable: bool,
 }
 
 #[derive(Default)]
@@ -88,6 +91,7 @@ impl Procedures {
                 secret: secret.clone(),
                 owner,
                 step: step.clone(),
+                repeatable: false,
             },
         );
         Ok((step, format!("{id}:{secret}")))
@@ -108,12 +112,18 @@ impl Procedures {
 
     /// Verifies that `peer` may act in the procedure of `token` and numbers
     /// its request as the next step.
+    ///
+    /// A `repeatable` request with the same label as the repeatable step
+    /// before it stays on that step: an SSH login to one destination is one
+    /// step however many connections it takes, so a declared total stays
+    /// right when a requester reconnects.
     pub(super) fn next_step(
         &self,
         token: &str,
         peer: u32,
         label: &str,
         deployment: bool,
+        repeatable: bool,
     ) -> Result<ProcedureStep, String> {
         let (id, secret) = split_token(token).ok_or("the procedure token is malformed")?;
         let mut live = self.live.lock().map_err(|_| "procedure registry poisoned")?;
@@ -127,9 +137,17 @@ impl Procedures {
                  `nix-secrets procedure` and its descendants may join it"
             ));
         }
-        procedure.step.step = procedure.step.step.saturating_add(1);
-        procedure.step.label = clean_text(label, MAX_LABEL_BYTES);
+        let label = clean_text(label, MAX_LABEL_BYTES);
+        let repeat = repeatable
+            && procedure.repeatable
+            && procedure.step.step > 0
+            && procedure.step.label == label;
+        if !repeat {
+            procedure.step.step = procedure.step.step.saturating_add(1);
+        }
+        procedure.step.label = label;
         procedure.step.deployment = deployment;
+        procedure.repeatable = repeatable;
         Ok(procedure.step.clone())
     }
 }
@@ -192,31 +210,56 @@ mod tests {
         assert_eq!(first.title, "Update  ns1");
         assert_eq!(first.step, 0);
         let step = procedures
-            .next_step(&token, own, "sign closure for ns1", false)
+            .next_step(&token, own, "sign closure for ns1", false, false)
             .unwrap();
         assert_eq!((step.step, step.label.as_str()), (1, "sign closure for ns1"));
         // A descendant joins as the next step.
         let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
         let step = procedures
-            .next_step(&token, child.id(), "deploy secrets to ns1", true)
+            .next_step(&token, child.id(), "deploy secrets to ns1", true, false)
             .unwrap();
         assert_eq!(step.step, 2);
         assert!(step.deployment);
         // A process that does not descend from the owner is refused, even
         // with the right token.
         let (_, foreign) = procedures.begin(child.id(), "Other", None).unwrap();
-        let error = procedures.next_step(&foreign, own, "x", false).unwrap_err();
+        let error = procedures.next_step(&foreign, own, "x", false, false).unwrap_err();
         assert!(error.contains("does not belong"), "{error}");
         child.kill().unwrap();
         child.wait().unwrap();
         // A wrong secret is refused like an unknown procedure.
         let (id, _) = split_token(&token).unwrap();
         let forged = format!("{id}:{}", "0".repeat(64));
-        assert!(procedures.next_step(&forged, own, "x", false).is_err());
-        assert!(procedures.next_step("garbage", own, "x", false).is_err());
+        assert!(procedures.next_step(&forged, own, "x", false, false).is_err());
+        assert!(procedures.next_step("garbage", own, "x", false, false).is_err());
         procedures.end(id);
-        assert!(procedures.next_step(&token, own, "x", false).is_err());
+        assert!(procedures.next_step(&token, own, "x", false, false).is_err());
         assert_eq!(procedures.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn repeated_logins_to_one_destination_stay_one_step() {
+        let procedures = Procedures::default();
+        let own = std::process::id();
+        let (_, token) = procedures.begin(own, "Update ns1", Some(3)).unwrap();
+        let next = |label: &str, repeatable| {
+            procedures
+                .next_step(&token, own, label, false, repeatable)
+                .unwrap()
+                .step
+        };
+        assert_eq!(next("sign artifacts for ns1", false), 1);
+        // Not repeatable: the same label again is a new step.
+        assert_eq!(next("sign artifacts for ns1", false), 2);
+        assert_eq!(next("SSH authentication to update@ns1", true), 3);
+        // The upload and every reconnect while waiting for the reboot.
+        assert_eq!(next("SSH authentication to update@ns1", true), 3);
+        assert_eq!(next("SSH authentication to update@ns1", true), 3);
+        // Another destination is another step.
+        assert_eq!(next("SSH authentication to update@ns2", true), 4);
+        assert_eq!(next("deploy secrets to ns1", false), 5);
+        // A login after something else is a new step again.
+        assert_eq!(next("SSH authentication to update@ns2", true), 6);
     }
 
     #[test]

@@ -432,7 +432,7 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
             } => deployment::request(schema, broker, target, allow_partial, |label| {
                 procedure
                     .as_deref()
-                    .map(|token| operators.advance(token, peer_pid, label, true))
+                    .map(|token| operators.advance(token, peer_pid, label, true, false))
                     .transpose()
             }),
             Request::EndProcedure => Err("no procedure is registered on this connection".into()),

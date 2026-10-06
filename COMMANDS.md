@@ -28,7 +28,8 @@ nix-secrets procedure --title TEXT [--steps N] -- COMMAND [ARGUMENT ...]
 ```
 
 Runs COMMAND. Every request that COMMAND or its descendants make becomes a
-numbered step of one approval dialog titled TEXT. `--steps` sets the total
+numbered step of one approval dialog titled TEXT. Repeated SSH logins to the
+same destination, one after another, are one step. `--steps` sets the total
 shown in `step 2/4`. COMMAND receives the token in `NIX_SECRETS_PROCEDURE`.
 The command exits with COMMAND's status. If no backend is reachable, COMMAND
 still runs and its requests appear one by one.

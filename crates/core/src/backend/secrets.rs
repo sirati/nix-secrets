@@ -222,8 +222,11 @@ impl Operators {
         peer: u32,
         label: &str,
         deployment: bool,
+        repeatable: bool,
     ) -> Result<ProcedureStep, String> {
-        let step = self.procedures.next_step(token, peer, label, deployment)?;
+        let step = self
+            .procedures
+            .next_step(token, peer, label, deployment, repeatable)?;
         self.broadcast_step(step.clone());
         Ok(step)
     }
@@ -537,7 +540,8 @@ fn request_operator(
                 artifact_signature.as_ref(),
                 closure_signature.as_ref(),
             );
-            operators.advance(token, peer, &label, false)
+            // An SSH login may reconnect; it stays one step.
+            operators.advance(token, peer, &label, false, ssh_signature.is_some())
         })
         .transpose()?;
     let mut random = [0_u8; 8];
