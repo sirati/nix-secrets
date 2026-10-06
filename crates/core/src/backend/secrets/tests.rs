@@ -156,16 +156,22 @@ fn one_channel_carries_several_requests_and_routes_each_answer_by_id_once() {
         answer(&mut tui, &first_request.id, "first");
         assert_eq!(denial(first.join().unwrap()), "first");
         assert_eq!(operators.pending_count(), 0);
-        // A disconnected TUI fails what still waits.
+        // A request whose TUI goes away waits for the next one, which shows
+        // it again; the first TUI's countdown is gone with it.
         let third = scope.spawn(|| ask(&operators, Requester::default()));
-        requested(&mut tui);
+        let shown = requested(&mut tui);
         tui.shutdown(std::net::Shutdown::Both).unwrap();
-        assert_eq!(
-            third.join().unwrap().unwrap_err(),
-            "the nix-secrets TUI disconnected"
-        );
         attached.join().unwrap().unwrap();
         assert!(operators.attached.lock().unwrap().is_empty());
+        let (mut again, mut next) = UnixStream::pair().unwrap();
+        next.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let operators_ref = &operators;
+        scope.spawn(move || attach(&mut again, operators_ref, 2, std::process::id()));
+        assert!(matches!(next_frame(&mut next), Response::OperatorAttached));
+        assert_eq!(requested(&mut next).id, shown.id);
+        answer(&mut next, &shown.id, "third");
+        assert_eq!(denial(third.join().unwrap()), "third");
+        next.shutdown(std::net::Shutdown::Both).unwrap();
     });
 }
 
@@ -181,9 +187,12 @@ fn waiting_requests_are_bounded() {
         let jobs = (0..MAX_PENDING).map(|_| next_job(&jobs)).collect::<Vec<_>>();
         let refused = ask(&operators, Requester::default()).unwrap_err();
         assert!(refused.contains("already waiting"), "{refused}");
-        drop(jobs);
+        for job in jobs {
+            let reason = SecretAnswer::Denied { reason: "no".into() };
+            job.reply.send(Outcome::Answer(Ok(reason))).unwrap();
+        }
         for handle in waiting {
-            assert!(handle.join().unwrap().is_err());
+            assert_eq!(denial(handle.join().unwrap()), "no");
         }
         assert_eq!(operators.pending_count(), 0);
     });
@@ -440,7 +449,11 @@ fn artifact_registry_cleans_on_answer_operator_loss_and_requester_disconnect() {
                     None
                 }
                 "operator-loss" => {
+                    // The request waits for another TUI until its
+                    // requester gives up.
+                    operators.attached.lock().unwrap().clear();
                     drop(job);
+                    drop(peer);
                     None
                 }
                 _ => {
@@ -719,4 +732,38 @@ fn closure_protocol_returns_signatures_only_and_rejects_other_answers() {
         "denied"
     );
     assert!(serde_json::from_slice::<SecretAnswer>(br#"{"answer":"closure-signed","signatures":{"version":1,"signatures":[]},"values":[]}"#).is_err());
+}
+
+#[test]
+fn without_a_tui_a_request_waits_and_its_countdown_starts_when_one_attaches() {
+    let deadline = Duration::from_millis(400);
+    let operators = Operators::default().with_timing(deadline, Duration::from_millis(100));
+    let (requester, client) = UnixStream::pair().unwrap();
+    let (mut backend, tui) = UnixStream::pair().unwrap();
+    thread::scope(|scope| {
+        let mut tui = tui;
+        let mut client = client;
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        tui.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let waiting = scope.spawn(|| ask(&operators, Requester::new(&requester, None, true)));
+        // The requester hears that it waits for a TUI, then heartbeats.
+        assert!(matches!(
+            read_json::<Response>(&mut client).unwrap(),
+            Some(Response::WaitingForOperator)
+        ));
+        // Far longer than the deadline of a shown request.
+        std::thread::sleep(deadline * 3);
+        assert!(matches!(
+            read_json::<Response>(&mut client).unwrap(),
+            Some(Response::Heartbeat)
+        ));
+        scope.spawn(|| attach(&mut backend, &operators, 1, std::process::id()));
+        assert!(matches!(next_frame(&mut tui), Response::OperatorAttached));
+        let request = requested(&mut tui);
+        // Answered within the deadline counted from now.
+        std::thread::sleep(deadline / 4);
+        answer(&mut tui, &request.id, "seen");
+        assert_eq!(denial(waiting.join().unwrap()), "seen");
+        tui.shutdown(std::net::Shutdown::Both).unwrap();
+    });
 }

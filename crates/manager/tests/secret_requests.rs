@@ -378,34 +378,42 @@ fn a_denied_request_never_runs_the_command() {
 }
 
 #[test]
-fn without_an_attached_tui_the_request_fails_clearly() {
+fn without_an_attached_tui_the_request_waits_and_nothing_is_decrypted() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let fixture = fixture();
     let marker = fixture.temp.path().join("ran");
-    let output = finish(fixture.with_secrets(&[TOKEN], &format!("touch '{}'", marker.display())));
-    assert!(!output.status.success());
+    let child = fixture.with_secrets(&[TOKEN], &format!("touch '{}'", marker.display()));
+    // It waits for a TUI instead of failing, and decrypts nowhere else.
+    std::thread::sleep(Duration::from_secs(1));
     assert!(!marker.exists());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("open the nix-secrets TUI and retry"),
-        "{stderr}"
-    );
     assert_eq!(fixture.op_calls(), 0, "never decrypted anywhere else");
-    // pipe-secret on its own, outside a session, goes the same way.
-    let output = Command::new(env!("CARGO_BIN_EXE_nix-secrets"))
+    // pipe-secret on its own, outside a session, waits the same way.
+    let pipe = Command::new(env!("CARGO_BIN_EXE_nix-secrets"))
         .args(["pipe-secret", "--backend-socket"])
         .arg(&fixture.socket)
         .arg(TOKEN)
         .env_remove("NIX_SECRETS_SESSION")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .unwrap();
+    // The first TUI that attaches gets both.
+    let operator = fixture.attach();
+    let prompts = [operator.prompt(), operator.prompt()];
+    for prompt in &prompts {
+        operator.decide(prompt, false);
+    }
+    let output = finish(child);
+    assert!(!output.status.success());
+    assert!(!marker.exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no nix-secrets TUI is attached yet; waiting"), "{stderr}");
+    let output = finish(pipe);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("open the nix-secrets TUI and retry"));
+    assert_eq!(fixture.op_calls(), 0);
 }
 
 #[test]

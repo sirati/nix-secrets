@@ -32,7 +32,9 @@ pub fn run(arguments: Arguments) -> Result<(), Box<dyn Error>> {
     reject_non_file_store(&repository.join("nix-secrets.toml"))?;
     let store = SecretStore::new(repository.join("nix-secrets.toml"));
     let manifest = arguments.manifest.clone();
-    let backend = Backend::bind(arguments.socket, schema, store)?.with_schema_loader(move || {
+    let backend = Backend::bind(arguments.socket, schema, store)?
+        .with_schema_document(input)
+        .with_schema_loader(move || {
         let input = match &manifest {
             Some(path) => load_manifest(path),
             None => evaluate_manifest(&repository),
@@ -42,10 +44,36 @@ pub fn run(arguments: Arguments) -> Result<(), Box<dyn Error>> {
     // Keep the lock for the entire lifetime of this backend. A second launch
     // attaches to this socket instead of replacing its approval broker.
     let _lease = lease;
+    watch_socket(backend.socket_path())?;
 
     // Binding is the readiness boundary: the private socket exists only after
     // the repository and freshly evaluated schema have passed validation.
     backend.serve()?;
+    Ok(())
+}
+
+/// Ends this backend when its socket is removed or replaced. It would
+/// otherwise hold the lock for a socket nobody can reach, and every later
+/// launch would wait for that lock forever.
+fn watch_socket(socket: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let bound = fs::symlink_metadata(socket)?;
+    let (device, inode) = (bound.dev(), bound.ino());
+    let socket = socket.to_owned();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let same = fs::symlink_metadata(&socket)
+                .is_ok_and(|current| current.dev() == device && current.ino() == inode);
+            if !same {
+                eprintln!(
+                    "nix-secrets-backend: {} was removed or replaced; exiting so a new backend can take over",
+                    socket.display()
+                );
+                std::process::exit(3);
+            }
+        }
+    });
     Ok(())
 }
 

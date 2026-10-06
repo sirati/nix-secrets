@@ -272,20 +272,28 @@ fn a_deployment_request_reaches_the_registered_frontend() {
     };
     thread::spawn(move || backend.serve().unwrap());
     let mut requester = UnixStream::connect(&socket).unwrap();
-    // Nobody could answer yet.
     let deploy = || Request::RequestDeployment {
         target: "host".to_owned(),
         allow_partial: true,
         procedure: None,
     };
-    assert!(matches!(
-        call(&mut requester, deploy()),
-        Response::Error { message } if message.contains("open the nix-secrets TUI and retry")
-    ));
+    // Nobody can answer yet: the request waits for a frontend instead of
+    // being refused, and one that registers later is offered it.
+    let Response::DeploymentRequested { request: early } = call(&mut requester, deploy()) else {
+        panic!("a deployment without a frontend was refused");
+    };
     let mut frontend = UnixStream::connect(&socket).unwrap();
     assert!(matches!(
         call(&mut frontend, Request::RegisterFrontend),
         Response::FrontendRegistered
+    ));
+    let Response::Approvals { requests, .. } = call(&mut frontend, Request::PollApprovals) else {
+        panic!("frontend cannot poll");
+    };
+    assert_eq!(requests, std::slice::from_ref(&early));
+    assert!(matches!(
+        call(&mut requester, Request::CancelApproval { request_id: early.id.clone() }),
+        Response::ApprovalCancelled
     ));
     assert!(matches!(
         call(&mut requester, Request::RequestDeployment {

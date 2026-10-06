@@ -190,3 +190,51 @@ fn captures_noisy_launcher_output_and_reports_its_failure() {
     assert!(message.contains("backend-startup-diagnostic"));
     assert!(message.len() < 33 * 1024);
 }
+
+#[test]
+fn a_starter_never_removes_the_socket_of_a_backend_that_holds_the_lock() {
+    use rustix::fs::{flock, FlockOperation};
+    let path = path();
+    // The owner holds the lock while it still evaluates: its socket is
+    // there but does not answer yet.
+    let lock = fs::File::create(path.with_extension("lock")).unwrap();
+    flock(&lock, FlockOperation::NonBlockingLockExclusive).unwrap();
+    drop(UnixListener::bind(&path).unwrap());
+    let inode = fs::symlink_metadata(&path).unwrap().ino();
+    let mut launcher = FakeLauncher {
+        path: path.clone(),
+        starts: 0,
+    };
+    let spec = CommandSpec {
+        program: "unused".into(),
+        arguments: vec![],
+    };
+    let owner_path = path.clone();
+    let owner = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        // The starter has not touched the owner's socket meanwhile.
+        assert_eq!(fs::symlink_metadata(&owner_path).unwrap().ino(), inode);
+        fs::remove_file(&owner_path).unwrap();
+        let listener = UnixListener::bind(&owner_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
+                Err(error) => panic!("the starter never connected: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        let request: Request = read_json(&mut stream).unwrap().unwrap();
+        assert!(matches!(request, Request::List));
+        write_json(&mut stream, &Response::Secrets { entries: Default::default() }).unwrap();
+    });
+    let connection = connect_or_start(&path, &spec, &mut launcher, Duration::from_secs(5)).unwrap();
+    owner.join().unwrap();
+    assert_eq!(launcher.starts, 0, "no second backend was started");
+    drop(connection.stream);
+    drop(lock);
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(path.with_extension("lock"));
+}

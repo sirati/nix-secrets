@@ -332,8 +332,22 @@ fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
     if remote_uid.is_none() {
         progress("Connected.")?;
     }
-    progress("Evaluating Nix...")?;
-    let schema = evaluate(&invocation.ssh_args, &repository)?;
+    let reused = nix_secrets_manager::socket::connect_verified(&local_socket)
+        .ok()
+        .and_then(|stream| BackendClient::new(stream).schema_document().ok())
+        .and_then(|(json, age_ms, waiting)| {
+            startup::reuse_backend_schema(json, Duration::from_millis(age_ms), waiting)
+        });
+    let schema = match reused {
+        Some(json) => {
+            progress("Using the backend's evaluation.")?;
+            Schema::from_json(&json)?
+        }
+        None => {
+            progress("Evaluating Nix...")?;
+            evaluate(&invocation.ssh_args, &repository)?
+        }
+    };
     let provider = one_password_scope(
         invocation
             .identity

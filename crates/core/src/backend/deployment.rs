@@ -39,10 +39,8 @@ pub(super) fn request(
     let mut state = broker
         .lock()
         .map_err(|_| "approval broker lock is poisoned".to_owned())?;
-    // A request nobody can answer would only wait for its lease forever.
-    if !state.has_frontends() {
-        return Err(super::NO_OPERATOR.to_owned());
-    }
+    // Without a registered frontend the request waits in the broker; a
+    // frontend that registers later is offered it at once.
     let procedure = procedure_step(&format!("deploy secrets to {}", request.target))?;
     state.submit_in_procedure(request.clone(), procedure).map_err(|error| match error {
         BrokerError::Invalid(message) => message.to_owned(),

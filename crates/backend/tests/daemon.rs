@@ -350,12 +350,15 @@ fn schema_reload_captures_nix_stderr_without_leaking_to_frontend_terminal() {
             identifiers: vec!["host.services.mail.password".into()],
             reason: Some("reload schema test".into()),
             procedure: None,
-            progress: false,
+            progress: true,
         },
     );
-    assert!(
-        matches!(answer, Response::Error { message } if message.contains("no nix-secrets TUI"))
-    );
+    // Past the reloaded schema it waits for a TUI, and says so.
+    assert!(matches!(answer, Response::WaitingForOperator), "{answer:?}");
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     assert_eq!(fs::read_to_string(&evaluations).unwrap().lines().count(), 2);
     fs::write(&mode, "failure").unwrap();
     let answer = call(
@@ -383,4 +386,42 @@ fn schema_reload_captures_nix_stderr_without_leaking_to_frontend_terminal() {
         !diagnostics.contains("SCHEMA-EVAL-FAILURE-CAPTURED-DIAGNOSTIC"),
         "failure diagnostics leaked to backend stderr: {diagnostics}"
     );
+}
+
+#[test]
+fn a_backend_whose_socket_was_removed_exits_and_frees_the_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("backend.sock");
+    let manifest_path = directory.path().join("manifest.json");
+    fs::write(&manifest_path, manifest(&socket)).unwrap();
+    // Killed even when the test fails, so a stuck backend never outlives it.
+    struct Reaped(Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut first = Reaped(start(directory.path(), &socket, Some(&manifest_path), None));
+    let first = &mut first.0;
+    if !await_socket(first, &socket) {
+        return;
+    }
+    // Another starter removed the socket of the live backend.
+    fs::remove_file(&socket).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = first.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the unreachable backend kept its lock");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!status.success());
+    // The next launch owns the lock and serves.
+    let mut second = start(directory.path(), &socket, Some(&manifest_path), None);
+    assert!(await_socket(&mut second, &socket));
+    assert!(matches!(list(&socket), Response::Secrets { .. }));
+    second.kill().unwrap();
+    second.wait().unwrap();
 }

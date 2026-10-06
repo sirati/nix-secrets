@@ -27,6 +27,19 @@ pub fn socket_name(repository: &Path) -> String {
     )
 }
 
+/// How old a backend's evaluation may be for a TUI to use it instead of
+/// evaluating the repository itself.
+pub const FRESH_EVALUATION: Duration = Duration::from_secs(120);
+
+/// Whether a TUI uses the schema document its backend evaluated: when
+/// requests already wait for the operator (a requester started the backend
+/// and the operator should see them at once), or when the evaluation is
+/// fresh. An older evaluation may miss repository changes, so the TUI then
+/// evaluates as before.
+pub fn reuse_backend_schema(json: Option<String>, age: Duration, waiting: bool) -> Option<String> {
+    json.filter(|_| waiting || age <= FRESH_EVALUATION)
+}
+
 pub trait Launcher {
     type Guard;
     fn start(&mut self, command: &CommandSpec) -> io::Result<Self::Guard>;
@@ -209,18 +222,28 @@ pub fn connect_or_start<L: Launcher>(
         Err(error) if retryable(&error) => {}
         Err(error) => return Err(error),
     }
-    remove_stale_socket(path)?;
-    let mut guard = launcher.start(command)?;
+    // A backend that holds the lock owns this socket even while a probe
+    // fails: it may still be evaluating Nix, or be busy. Removing its socket
+    // would strand it, and a second backend would wait for its lock forever,
+    // so the starter only waits for it to publish.
+    let mut guard = if backend_lock_held(path)? {
+        None
+    } else {
+        remove_stale_socket(path)?;
+        Some(launcher.start(command)?)
+    };
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(error) = launcher.startup_error(&mut guard)? {
-            return Err(io::Error::other(error));
+        if let Some(guard) = &mut guard {
+            if let Some(error) = launcher.startup_error(guard)? {
+                return Err(io::Error::other(error));
+            }
         }
         match connect_ready(path) {
             Ok(stream) => {
                 return Ok(Connection {
                     stream,
-                    _backend: Some(guard),
+                    _backend: guard,
                 })
             }
             Err(error) if retryable(&error) && Instant::now() < deadline => {
@@ -234,6 +257,24 @@ pub fn connect_or_start<L: Launcher>(
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+/// Whether a backend process holds the lock that guards `socket`; see
+/// the backend's socket lease.
+fn backend_lock_held(socket: &Path) -> io::Result<bool> {
+    use rustix::fs::{flock, FlockOperation};
+    let lock = match fs::File::open(socket.with_extension("lock")) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    // A shared lock conflicts only with the owner's exclusive one, and is
+    // released when `lock` closes.
+    match flock(&lock, FlockOperation::NonBlockingLockShared) {
+        Ok(()) => Ok(false),
+        Err(error) if io::Error::from(error).kind() == io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error.into()),
     }
 }
 

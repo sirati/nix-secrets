@@ -169,9 +169,26 @@ pub fn backend_candidates(runtime: &Path, repository: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Connects to the running backend of the repository. Never starts one: a
-/// backend without a TUI could not answer anyway.
+/// Connects to the backend of the repository, starting it when none runs.
+/// The backend evaluates the repository and keeps the request until an
+/// operator's TUI attaches, which then needs no evaluation of its own. It is
+/// the same backend a TUI would start: one socket and lock per repository
+/// and compatibility version. An explicit `--backend-socket` is never
+/// started.
 pub fn connect_backend(options: &Options, runtime: &Path) -> Result<UnixStream, String> {
+    connect_or_start_backend(
+        options,
+        runtime,
+        &mut crate::startup::ProcessLauncher::persistent(),
+    )
+}
+
+/// [`connect_backend`] with a chosen launcher, for tests.
+pub fn connect_or_start_backend<L: crate::startup::Launcher>(
+    options: &Options,
+    runtime: &Path,
+    launcher: &mut L,
+) -> Result<UnixStream, String> {
     if let Some(socket) = &options.backend_socket {
         return connect_verified(socket)
             .map_err(|error| format!("cannot connect to {}: {error}", socket.display()));
@@ -182,11 +199,32 @@ pub fn connect_backend(options: &Options, runtime: &Path) -> Result<UnixStream, 
             return Ok(stream);
         }
     }
-    Err(format!(
-        "no nix-secrets backend runs for {}; open the nix-secrets TUI and retry \
-         (or pass --local to decrypt here)",
-        options.repository.display()
-    ))
+    let repository = std::fs::canonicalize(&options.repository).map_err(|error| {
+        format!("cannot open the repository {}: {error}", options.repository.display())
+    })?;
+    let directory = runtime.join("nix-secrets");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+    let socket = directory.join(crate::startup::socket_name(&repository));
+    eprintln!(
+        "nix-secrets: starting the nix-secrets backend for {}",
+        repository.display()
+    );
+    crate::startup::connect_or_start(
+        &socket,
+        &crate::command::backend(&repository, &socket),
+        launcher,
+        // Evaluating a large configuration can take minutes.
+        std::time::Duration::from_secs(600),
+    )
+    .map(|connection| connection.stream)
+    .map_err(|error| {
+        format!(
+            "cannot start the nix-secrets backend for {}: {error} \
+             (or pass --local to decrypt here)",
+            repository.display()
+        )
+    })
 }
 
 /// An open, approved session on the backend. Dropping it without
@@ -207,6 +245,10 @@ pub fn procedure_token() -> Option<String> {
 pub const COUNTDOWN_CANCELLED: &str =
     "operator cancelled the auto-reject countdown; waiting";
 
+/// The note a requester prints while no TUI is attached.
+pub const WAITING_FOR_OPERATOR: &str =
+    "no nix-secrets TUI is attached yet; waiting until the operator opens it";
+
 /// Reads the answer to a request, past the heartbeats and the countdown
 /// notice a request with `progress` receives while the operator decides.
 pub fn read_answer(stream: &mut UnixStream) -> io::Result<Option<Response>> {
@@ -214,6 +256,7 @@ pub fn read_answer(stream: &mut UnixStream) -> io::Result<Option<Response>> {
         match read_json::<Response>(stream)? {
             Some(Response::Heartbeat) => {}
             Some(Response::CountdownCancelled) => eprintln!("nix-secrets: {COUNTDOWN_CANCELLED}"),
+            Some(Response::WaitingForOperator) => eprintln!("nix-secrets: {WAITING_FOR_OPERATOR}"),
             other => return Ok(other),
         }
     }

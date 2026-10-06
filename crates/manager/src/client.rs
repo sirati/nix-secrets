@@ -192,6 +192,20 @@ impl BackendClient {
         }
     }
 
+    /// The schema document the backend evaluated, its age in milliseconds,
+    /// and whether requests wait for an operator.
+    pub fn schema_document(&mut self) -> io::Result<(Option<String>, u64, bool)> {
+        match self.exchange(&Request::GetSchema)? {
+            Response::SchemaDocument {
+                json,
+                age_ms,
+                waiting,
+            } => Ok((json, age_ms, waiting)),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
     pub fn register_frontend(&mut self) -> io::Result<()> {
         match self.exchange(&Request::RegisterFrontend)? {
             Response::FrontendRegistered => Ok(()),

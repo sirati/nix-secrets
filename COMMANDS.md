@@ -14,7 +14,10 @@ one backend.
 
 The commands below run on the machine that holds the repository and backend.
 They accept `--repository PATH`, which defaults to the working directory, and
-`--backend-socket PATH`.
+`--backend-socket PATH`. Without `--backend-socket`, they start the repository's
+backend when none runs. This is the same backend the TUI would start. A TUI
+opened later shows their waiting requests at once and does not evaluate the
+repository again.
 
 ## Deploy secrets
 
@@ -59,7 +62,9 @@ Ctrl+Shift+Y or Yes approves. Enter, Esc or `n` denies. A request expires after
 120 seconds unless the operator cancels the countdown with `c`. The command
 then prints "operator cancelled the auto-reject countdown; waiting" and keeps
 waiting. Inside a procedure, only the first step counts down. Without an
-attached TUI, these commands fail and do not decrypt locally.
+attached TUI, these commands print "no nix-secrets TUI is attached yet; waiting
+until the operator opens it" and wait. Nothing is decrypted locally, and
+nothing counts down until the TUI shows the request.
 
 `with-secrets` asks once for the whole batch. It then runs the command with
 `NIX_SECRETS_SESSION` pointing to a temporary private socket. Descendant

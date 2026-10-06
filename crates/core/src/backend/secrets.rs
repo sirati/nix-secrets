@@ -49,6 +49,8 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(600);
 const ANSWER_GRACE: Duration = Duration::from_secs(10);
 const HEARTBEAT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_secs(1);
+/// How often a request without a TUI looks for one.
+const ATTACH_POLL: Duration = Duration::from_millis(100);
 /// Requests waiting for the operator at once, over all requesters.
 pub const MAX_PENDING: usize = 16;
 
@@ -170,9 +172,22 @@ impl Operators {
             })
     }
 
-    #[cfg(test)]
     pub(super) fn pending_count(&self) -> usize {
         self.pending.load(Ordering::SeqCst)
+    }
+
+    /// Whether the TUI of this operator session is still attached.
+    fn is_attached(&self, session: u64) -> bool {
+        self.attached
+            .lock()
+            .is_ok_and(|attached| attached.iter().any(|(id, _)| *id == session))
+    }
+
+    /// Forgets an operator session whose connection is gone.
+    fn detach(&self, session: u64) {
+        if let Ok(mut attached) = self.attached.lock() {
+            attached.retain(|(id, _)| *id != session);
+        }
     }
 
     fn latest(&self) -> Option<(u64, Sender<Inbox>)> {
@@ -505,7 +520,9 @@ fn request_operator(
         return Err("request reason exceeds 4096 bytes".into());
     }
     let _pending = operators.claim()?;
-    let (operator_session, operator) = operators.latest().ok_or(NO_OPERATOR)?;
+    // Without an attached TUI the request waits for one; nothing counts
+    // down meanwhile.
+    let (operator_session, operator) = wait_for_operator(operators, requester, &mut true)?;
     // Checked and numbered only once a TUI can be asked, so a refusal never
     // uses up a step.
     let procedure = requester
@@ -566,35 +583,99 @@ fn request_operator(
         }
     }
     let _registered = Registered(operators, request.id.clone());
-    if request.closure_signature.is_some() {
-        let owner = *operators
-            .operator_peers
-            .lock()
-            .map_err(|_| "operator registry poisoned")?
-            .get(&operator_session)
-            .ok_or(NO_OPERATOR)?;
-        let socket = requester
-            .stream
-            .ok_or("missing closure requester")?
-            .try_clone()
-            .map_err(|e| e.to_string())?;
-        operators
-            .closure_requests
-            .lock()
-            .map_err(|_| "closure registry poisoned")?
-            .insert(request.id.clone(), (socket, owner));
-    }
     let id = request.id.clone();
-    let mut deadline = request
-        .countdown()
-        .then(|| Instant::now() + operators.deadline);
     let (reply, answer) = mpsc::channel();
-    operator
-        .send(Inbox::Job(Job { request, reply }))
-        .map_err(|_| NO_OPERATOR.to_owned())?;
+    let mut operator = operator;
+    let mut operator_session = operator_session;
+    loop {
+        if request.closure_signature.is_some() {
+            let owner = *operators
+                .operator_peers
+                .lock()
+                .map_err(|_| "operator registry poisoned")?
+                .get(&operator_session)
+                .ok_or(NO_OPERATOR)?;
+            let socket = requester
+                .stream
+                .ok_or("missing closure requester")?
+                .try_clone()
+                .map_err(|e| e.to_string())?;
+            operators
+                .closure_requests
+                .lock()
+                .map_err(|_| "closure registry poisoned")?
+                .insert(request.id.clone(), (socket, owner));
+        }
+        // The countdown starts when a TUI receives the request, not while it
+        // waits for one.
+        let deadline = request
+            .countdown()
+            .then(|| Instant::now() + operators.deadline);
+        let job = Job {
+            request: request.clone(),
+            reply: reply.clone(),
+        };
+        if operator.send(Inbox::Job(job)).is_ok() {
+            match wait_for_answer(operators, operator_session, &operator, &id, &answer, requester, deadline)? {
+                Some(answer) => return Ok(answer),
+                None => {}
+            }
+        } else {
+            operators.detach(operator_session);
+        }
+        // That TUI went away before answering. The request waits for the
+        // next one, which shows it again from the start.
+        (operator_session, operator) = wait_for_operator(operators, requester, &mut true)?;
+    }
+}
+
+/// Waits until a TUI is attached. A requester that reads progress is told
+/// once (`announce`) and gets heartbeats; one that leaves ends the wait.
+fn wait_for_operator(
+    operators: &Operators,
+    requester: Requester<'_>,
+    announce: &mut bool,
+) -> Result<(u64, Sender<Inbox>), String> {
+    let mut last_heartbeat = Instant::now();
+    loop {
+        if let Some(operator) = operators.latest() {
+            return Ok(operator);
+        }
+        if requester.stream.is_some_and(peer_done) {
+            return Err("the requester disconnected".into());
+        }
+        if let Some(stream) = requester.stream.filter(|_| requester.progress) {
+            let frame = if std::mem::take(announce) {
+                Some(Response::WaitingForOperator)
+            } else if last_heartbeat.elapsed() >= operators.heartbeat {
+                Some(Response::Heartbeat)
+            } else {
+                None
+            };
+            if let Some(frame) = frame {
+                write_json(&mut &*stream, &frame)
+                    .map_err(|_| "the requester disconnected".to_owned())?;
+                last_heartbeat = Instant::now();
+            }
+        }
+        std::thread::sleep(ATTACH_POLL);
+    }
+}
+
+/// Waits for the operator's answer to the request `id` sent to `operator`.
+/// `None` means that TUI went away without answering.
+fn wait_for_answer(
+    operators: &Operators,
+    operator_session: u64,
+    operator: &Sender<Inbox>,
+    id: &str,
+    answer: &mpsc::Receiver<Outcome>,
+    requester: Requester<'_>,
+    mut deadline: Option<Instant>,
+) -> Result<Option<SecretAnswer>, String> {
     // The TUI drops a request that no longer waits.
     let withdraw = |reason: &str| {
-        let _ = operator.send(Inbox::Withdraw(id.clone()));
+        let _ = operator.send(Inbox::Withdraw(id.to_owned()));
         Err(reason.to_owned())
     };
     let mut last_heartbeat = Instant::now();
@@ -603,7 +684,7 @@ fn request_operator(
             POLL.min(deadline.saturating_duration_since(Instant::now()))
         });
         match answer.recv_timeout(poll) {
-            Ok(Outcome::Answer(answer)) => return answer,
+            Ok(Outcome::Answer(answer)) => return answer.map(Some),
             Ok(Outcome::CountdownCancelled) => {
                 deadline = None;
                 if let Some(stream) = requester.stream.filter(|_| requester.progress) {
@@ -612,10 +693,14 @@ fn request_operator(
                     }
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err("the nix-secrets TUI disconnected".into());
-            }
+            // Only this function holds a sender besides the TUI's, so the
+            // channel never disconnects; a TUI that went away is noticed
+            // through the operator registry instead.
+            Err(RecvTimeoutError::Disconnected) => return Ok(None),
             Err(RecvTimeoutError::Timeout) => {
+                if !operators.is_attached(operator_session) {
+                    return Ok(None);
+                }
                 if requester.stream.is_some_and(peer_done) {
                     return withdraw("the requester disconnected");
                 }

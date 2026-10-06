@@ -35,6 +35,8 @@ pub struct Backend {
     next_session: Arc<AtomicU64>,
     feed: Arc<Feed>,
     operators: Arc<secrets::Operators>,
+    /// The schema document this backend was started with, and when.
+    document: Arc<Option<(String, std::time::Instant)>>,
 }
 
 impl Backend {
@@ -63,6 +65,7 @@ impl Backend {
             next_session: Arc::new(AtomicU64::new(1)),
             feed: Arc::new(Feed::default()),
             operators: Arc::new(secrets::Operators::default()),
+            document: Arc::new(None),
         })
     }
 
@@ -71,6 +74,13 @@ impl Backend {
     pub fn with_schema_loader<F>(mut self, loader: F) -> Self
     where F: Fn() -> Result<Schema, String> + Send + Sync + 'static {
         self.schema_loader = Some(Arc::new(loader));
+        self
+    }
+
+    /// Keeps the evaluated schema document this backend serves, so a TUI
+    /// that attaches later need not evaluate the repository again.
+    pub fn with_schema_document(mut self, json: String) -> Self {
+        self.document = Arc::new(Some((json, std::time::Instant::now())));
         self
     }
 
@@ -99,6 +109,7 @@ impl Backend {
             let broker = Arc::clone(&self.broker);
             let feed = Arc::clone(&self.feed);
             let operators = Arc::clone(&self.operators);
+            let document = Arc::clone(&self.document);
             let peer_pid = rustix::process::Pid::as_raw(Some(peer.pid)) as u32;
             let session = self.next_session.fetch_add(1, Ordering::Relaxed);
             thread::spawn(move || {
@@ -110,6 +121,7 @@ impl Backend {
                     broker: &broker,
                     feed: &feed,
                     operators: &operators,
+                    document: &document,
                     session,
                     peer_pid,
                 };
@@ -135,6 +147,7 @@ struct Context<'a> {
     broker: &'a Mutex<ApprovalBroker>,
     feed: &'a Feed,
     operators: &'a secrets::Operators,
+    document: &'a Option<(String, std::time::Instant)>,
     session: u64,
     /// The connected process, from the kernel's peer credentials.
     peer_pid: u32,
@@ -149,6 +162,7 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
         broker,
         feed,
         operators,
+        document,
         session,
         peer_pid,
     } = *context;
@@ -422,6 +436,17 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                     .transpose()
             }),
             Request::EndProcedure => Err("no procedure is registered on this connection".into()),
+            Request::GetSchema => {
+                let waiting = operators.pending_count() > 0
+                    || broker.lock().is_ok_and(|state| state.has_pending());
+                Ok(Response::SchemaDocument {
+                    json: document.as_ref().as_ref().map(|(json, _)| json.clone()),
+                    age_ms: document.as_ref().as_ref().map_or(0, |(_, at)| {
+                        at.elapsed().as_millis().min(u64::MAX as u128) as u64
+                    }),
+                    waiting,
+                })
+            }
             Request::CancelCountdown { .. } => {
                 Err("countdowns are cancelled only on an attached operator connection".into())
             }

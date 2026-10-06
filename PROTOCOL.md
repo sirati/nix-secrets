@@ -81,6 +81,24 @@ arguments or framed input. The backend publishes its socket only after it is
 ready. When several frontends start a backend at once, they all end up using
 the one process that binds the socket.
 
+Requester commands start the backend the same way when none runs. These are
+`with-secrets`, `pipe-secret`, `with-ssh-agent`, `sign-artifacts`,
+`sign-closure`, `deploy`, and `procedure`. They use the same versioned socket,
+`backend-v<version>-<repository hash>.sock`, and its `.lock`. A backend that a
+requester started and one that the TUI started are therefore the same process.
+The requester's request then waits until an operator attaches. A starter never
+removes the socket of a backend that holds the lock. This holds even while that
+backend still evaluates or does not answer a probe. The starter waits for it
+instead. A backend whose socket was removed or replaced exits and releases the
+lock, so it can never block later starts.
+
+`GetSchema` returns the schema document the backend evaluated, its age, and
+whether requests wait for an operator. The TUI uses this document instead of
+evaluating the repository itself when requests wait or when the evaluation is
+at most two minutes old. An operator who opens the TUI for a waiting request
+therefore sees it at once.
+
+
 ## Stored record
 
 `nix-secrets.toml` maps stable schema paths to records. Each record contains:
@@ -237,13 +255,14 @@ the request carries a procedure token, it becomes the next step of that
 procedure, as described in Procedures. The backend picks a random request id,
 submits `ApprovalRequest { id, target, secrets,
 allow_partial }` to the approval broker, publishes `ApprovalRequested`, and
-answers `DeploymentRequested { request }`. If no frontend is registered, it
-answers with an error that names the TUI, because no frontend could claim the
-request. Registered TUIs claim it like any approval, so the deployment flow
-above applies unchanged. The requester then tracks it with `ApprovalStatus`.
-`ResolveApproval` carries an optional `message`. The frontend fills it with the
-deployment summary or the reason for refusing. `Resolved` reports it to the
-requester.
+answers `DeploymentRequested { request }`. If no frontend is registered, the
+backend still queues the request. A frontend that registers later is offered
+it at once. Nothing happens to the target until a TUI claims the request and
+its operator approves it. Registered TUIs claim it like any approval, so the
+deployment flow above applies unchanged. The requester then tracks it with
+`ApprovalStatus`. `ResolveApproval` carries an optional `message`. The frontend
+fills it with the deployment summary or the reason for refusing. `Resolved`
+reports it to the requester.
 
 `allow_partial` is the requester's proposal, and the operator can toggle it in
 the dialog. When it is set and the only missing values are derived values whose
@@ -372,22 +391,25 @@ TUI, which decrypts and returns it after the operator approves.
    answer counts once, and only for a request that still waits. A replay, an
    answer to a withdrawn request, or a made-up id reaches nobody.
 2. `nix-secrets with-secrets ID… -- CMD…` connects to the repository's
-   backend socket and never starts a backend. It sends
-   `RequestSecrets { identifiers, procedure, progress }` with 1 to 256
-   distinct canonical identifiers. As on every connection, only same-UID peers
-   are accepted. `procedure` carries the token from `NIX_SECRETS_PROCEDURE`
-   when the requester runs inside `nix-secrets procedure`, as described in
-   Procedures. With `progress`, the requester also reads `Heartbeat` frames
-   every 30 seconds and one `CountdownCancelled` frame before its answer. A
-   requester that does not set `progress` gets exactly one answer frame, as
-   before.
+   backend socket. If no backend runs, it starts one, as described in Local
+   backend discovery. It sends `RequestSecrets { identifiers, procedure,
+   progress }` with 1 to 256 distinct canonical identifiers. As on every
+   connection, only same-UID peers are accepted. `procedure` carries the token
+   from `NIX_SECRETS_PROCEDURE` when the requester runs inside `nix-secrets
+   procedure`, as described in Procedures. With `progress`, the requester also
+   reads `Heartbeat` frames every 30 seconds and one `CountdownCancelled` frame
+   before its answer. A requester that does not set `progress` gets exactly one
+   answer frame, as before.
 3. The backend fills `request.requester` and `request.parent` from
    `/proc/<peer pid>` (PID from `SO_PEERCRED`; executable, argv, cwd), and
    never from the request. It forwards the request to the most recently
    attached TUI. Up to 16 requests from all requesters can wait for the
    operator at once, and the backend refuses another one immediately. Without
-   an attached TUI the request fails with "open the nix-secrets TUI and
-   retry". The backend withdraws a request when its requester disconnects or
+   an attached TUI, the request waits for one. A requester with `progress`
+   gets one `WaitingForOperator` frame and then heartbeats. Nothing counts
+   down until a TUI receives the request. If that TUI detaches before it
+   answers, the request waits for the next TUI, which shows it again from the
+   start. The backend withdraws a request when its requester disconnects or
    when the backend gives up on it. The TUI then drops the prompt, and the
    request is denied.
 4. The TUI rejects undeclared, public-info, and unset identifiers without

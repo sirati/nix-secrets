@@ -230,6 +230,13 @@ impl ApprovalBroker {
             .collect()
     }
 
+    /// Whether any request waits for a frontend to claim it.
+    pub fn has_pending(&self) -> bool {
+        self.entries
+            .values()
+            .any(|entry| matches!(entry.state, State::Pending))
+    }
+
     /// Whether any frontend is registered to answer approval requests.
     pub fn has_frontends(&self) -> bool {
         !self.frontends.is_empty()

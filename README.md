@@ -168,6 +168,9 @@ nix-secrets with-secrets HOST.services.app.token \
   --reason 'Authenticate the maintenance command.' -- maintenance-command
 ```
 
+If no backend runs yet, the command starts it. It then waits until you open the
+TUI, and nothing counts down meanwhile. The TUI shows the request at once and
+does not evaluate the repository again.
 This sends the approved plaintext to that command on the backend, by design.
 For stdin delivery and client-side SSH authentication, see [Command reference](COMMANDS.md).
 

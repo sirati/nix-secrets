@@ -192,6 +192,10 @@ pub enum Request {
         steps: Option<u32>,
     },
     EndProcedure,
+    /// The schema document the backend evaluated; see
+    /// [`Response::SchemaDocument`]. A TUI that finds requests waiting uses it
+    /// instead of evaluating the repository again.
+    GetSchema,
     /// On the operator channel: the operator stopped the automatic denial
     /// of this request. The backend drops its own deadline for it and tells
     /// the requester.
@@ -296,6 +300,13 @@ pub enum Response {
     DeploymentRequested {
         request: ApprovalRequest,
     },
+    /// The evaluated schema document this backend started with, if it was
+    /// given one, its age, and whether requests wait for an operator.
+    SchemaDocument {
+        json: Option<String>,
+        age_ms: u64,
+        waiting: bool,
+    },
     /// The procedure is registered; `token` goes to the requesters in
     /// [`crate::procedure::PROCEDURE_ENVIRONMENT`].
     ProcedureBegun {
@@ -316,6 +327,9 @@ pub enum Response {
     SecretRequestWithdrawn {
         request_id: String,
     },
+    /// To a requester that asked for progress: no TUI is attached yet; the
+    /// request waits for one, and nothing counts down meanwhile.
+    WaitingForOperator,
     /// To a requester that asked for progress: the operator cancelled the
     /// automatic denial; the request now waits for the operator's decision.
     CountdownCancelled,
