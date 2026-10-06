@@ -10,6 +10,7 @@ mod frontend;
 mod help;
 mod hit;
 mod layout;
+mod taskbar;
 mod text;
 mod tree;
 use crate::model::NoticeSeverity;
@@ -19,7 +20,9 @@ use filters::render_filters;
 use frontend::CrosstermFrontend;
 use help::help_text;
 use hit::HitMap;
-use layout::{dialog_area, regions};
+use layout::{dialog_area, regions_with_taskbar};
+#[cfg(test)]
+use layout::regions;
 pub(super) use text::ellipsize;
 use text::{prompt, selected_text, selector_items, selector_selected};
 use tree::render_tree;
@@ -36,7 +39,11 @@ pub fn run(rows: Vec<Row>, writer: &mut impl SecretWriter) -> io::Result<()> {
 fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
     let area = frame.area();
     let selected = selected_text(model, area.width.saturating_sub(2));
-    let zones = regions(area, selected.lines().count() as u16);
+    let zones = regions_with_taskbar(
+        area,
+        selected.lines().count() as u16,
+        model.procedures.len() as u16,
+    );
     let mut hits = HitMap::default();
     measure_host_review(model, area);
     render_filters(frame, model, zones.filters, &mut hits);
@@ -80,6 +87,7 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
             zones.status,
         );
     }
+    taskbar::render_taskbar(frame, model, zones.taskbar, &mut hits);
     if zones.keys.height > 0 {
         frame.render_widget(
             Block::default()
@@ -300,8 +308,18 @@ fn approval_dialog<'a>(model: &'a Model, request: &'a ApprovalRequest, footer: V
         (Some(_), _) if !request.host_mutations.is_empty() => 0,
         _ => model.modal_scroll,
     };
+    // Inside a procedure the title leads with the procedure and its step.
+    let title = match &request.procedure {
+        Some(step) => format!(
+            "{} · {} › {}",
+            step.title,
+            step.position(),
+            deploy_view::approval_title(request)
+        ),
+        None => deploy_view::approval_title(request),
+    };
     Dialog {
-        title: deploy_view::approval_title(request),
+        title,
         body: Box::new(move |width| deploy_view::plain(&styled(width))),
         padded: true,
         note: None,
@@ -612,39 +630,48 @@ fn render_secret_request(
     area: Rect,
     hits: &mut HitMap,
 ) {
-    let Some(prompt) = &model.secret_prompt else {
+    let Some(prompt) = model.shown_prompt() else {
         return;
     };
+    let mut footer = vec![
+        Button::new("Ctrl+Shift+Y Yes, send", MouseTarget::ConfirmLoss),
+        Button::new("n Deny", MouseTarget::Shortcut(Shortcut::Character('n'))),
+        Button::new("Esc Deny", MouseTarget::Shortcut(Shortcut::Escape)),
+        Button::new(
+            if model.secret_details {
+                "d Summary"
+            } else {
+                "d Details"
+            },
+            MouseTarget::Shortcut(Shortcut::Character('d')),
+        ),
+    ];
+    if prompt.deadline.is_some() {
+        footer.push(Button::new(
+            "c Keep waiting",
+            MouseTarget::Shortcut(Shortcut::Character('c')),
+        ));
+    }
+    footer.push(Button::new(
+        "m Minimise",
+        MouseTarget::Shortcut(Shortcut::Character('m')),
+    ));
     draw_dialog(
         frame,
         model,
         area,
         hits,
         Dialog {
-            title: super::secret_request::title(prompt),
+            title: super::secret_request::dialog_title(prompt),
             body: Box::new(|width| {
                 super::secret_request::body(prompt, model.secret_details, width)
             }),
             padded: true,
-            note: Some(format!(
-                " denies in {} s ",
-                super::secret_request::remaining_seconds(prompt)
-            )),
+            note: super::secret_request::remaining_seconds(prompt)
+                .map(|seconds| format!(" denies in {seconds} s · c keeps waiting ")),
             scroll: model.secret_scroll,
             selector: None,
-            footer: Some(vec![
-                Button::new("Ctrl+Shift+Y Yes, send", MouseTarget::ConfirmLoss),
-                Button::new("n Deny", MouseTarget::Shortcut(Shortcut::Character('n'))),
-                Button::new("Esc Deny", MouseTarget::Shortcut(Shortcut::Escape)),
-                Button::new(
-                    if model.secret_details {
-                        "d Summary"
-                    } else {
-                        "d Details"
-                    },
-                    MouseTarget::Shortcut(Shortcut::Character('d')),
-                ),
-            ]),
+            footer: Some(footer),
             exclusive: true,
             styled: None,
             min_width: 0,

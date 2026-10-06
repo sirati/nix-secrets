@@ -8,6 +8,7 @@ use nix_secrets_core::{
     EncryptedSecret as StoredSecret, GeneratedPublicKey, ProfileSnapshot, PublicInfoRecord,
     Request, Response, SecretPath, ViewProfile,
 };
+use nix_secrets_core::procedure::ProcedureStep;
 use nix_secrets_crypto::{encrypt_secret, CryptoProvider, Recipient};
 use std::collections::BTreeMap;
 use std::io;
@@ -199,8 +200,21 @@ impl BackendClient {
     }
 
     pub fn poll_and_claim(&mut self) -> io::Result<Option<(ApprovalRequest, u64)>> {
-        let requests = match self.exchange(&Request::PollApprovals)? {
-            Response::Approvals { requests } => requests,
+        Ok(self
+            .poll_and_claim_step()?
+            .map(|(request, lease_id, _)| (request, lease_id)))
+    }
+
+    /// Like [`Self::poll_and_claim`], with the procedure step the backend
+    /// assigned to the claimed request, if any.
+    pub fn poll_and_claim_step(
+        &mut self,
+    ) -> io::Result<Option<(ApprovalRequest, u64, Option<ProcedureStep>)>> {
+        let (requests, mut procedures) = match self.exchange(&Request::PollApprovals)? {
+            Response::Approvals {
+                requests,
+                procedures,
+            } => (requests, procedures),
             response => return Err(unexpected(response)),
         };
         for request in requests {
@@ -208,7 +222,10 @@ impl BackendClient {
                 request_id: request.id.clone(),
                 lease_ms: 300_000,
             })? {
-                Response::ApprovalClaimed { lease_id, .. } => return Ok(Some((request, lease_id))),
+                Response::ApprovalClaimed { lease_id, .. } => {
+                    let step = procedures.remove(&request.id);
+                    return Ok(Some((request, lease_id, step)));
+                }
                 // Another frontend can win a claim after our availability
                 // snapshot. Try the remaining requests without losing them.
                 Response::Error { message } if message == "approval request is unavailable" => {
@@ -223,7 +240,7 @@ impl BackendClient {
 
     pub fn has_pending_approvals(&mut self) -> io::Result<bool> {
         match self.exchange(&Request::PollApprovals)? {
-            Response::Approvals { requests } => Ok(!requests.is_empty()),
+            Response::Approvals { requests, .. } => Ok(!requests.is_empty()),
             Response::Error { message } => Err(io::Error::other(message)),
             response => Err(unexpected(response)),
         }
@@ -247,9 +264,21 @@ impl BackendClient {
         target: &str,
         allow_partial: bool,
     ) -> io::Result<ApprovalRequest> {
+        self.request_deployment_in(target, allow_partial, None)
+    }
+
+    /// Like [`Self::request_deployment`], as the next step of the procedure
+    /// whose token this process inherited.
+    pub fn request_deployment_in(
+        &mut self,
+        target: &str,
+        allow_partial: bool,
+        procedure: Option<String>,
+    ) -> io::Result<ApprovalRequest> {
         match self.exchange(&Request::RequestDeployment {
             target: target.to_owned(),
             allow_partial,
+            procedure,
         })? {
             Response::DeploymentRequested { request } => Ok(request),
             Response::Error { message } => Err(io::Error::other(message)),

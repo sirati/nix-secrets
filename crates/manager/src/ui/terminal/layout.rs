@@ -6,9 +6,25 @@ pub(super) struct Regions {
     pub selected: Rect,
     pub status: Rect,
     pub keys: Rect,
+    /// The procedure task bar, above the actions; empty without procedures.
+    pub taskbar: Rect,
 }
 
+#[cfg(test)]
 pub(super) fn regions(area: Rect, selected_lines: u16) -> Regions {
+    regions_with_taskbar(area, selected_lines, 0)
+}
+
+/// Like [`regions`], with room for `procedures` task bar entries: one
+/// bordered line each, up to three, on a tall screen; one plain line on a
+/// short one.
+pub(super) fn regions_with_taskbar(area: Rect, selected_lines: u16, procedures: u16) -> Regions {
+    let taskbar = match procedures {
+        0 => 0,
+        count if area.height >= 17 => count.min(3) + 2,
+        _ if area.height >= 12 => 1,
+        _ => 0,
+    };
     let (filters, selected, status, keys) = if area.height >= 17 {
         (
             if area.width < 70 { 6 } else { 4 },
@@ -30,6 +46,8 @@ pub(super) fn regions(area: Rect, selected_lines: u16) -> Regions {
     let available = area.height - filters;
     let keys = keys.min(available);
     let available = available - keys;
+    let taskbar = taskbar.min(available.saturating_sub(3));
+    let available = available - taskbar;
     let status = status.min(available);
     let available = available - status;
     let selected = selected.min(available.saturating_sub(3));
@@ -45,7 +63,8 @@ pub(super) fn regions(area: Rect, selected_lines: u16) -> Regions {
         tree: at(filters, tree),
         selected: at(filters + tree, selected),
         status: at(filters + tree + selected, status),
-        keys: at(filters + tree + selected + status, keys),
+        taskbar: at(filters + tree + selected + status, taskbar),
+        keys: at(filters + tree + selected + status + taskbar, keys),
     }
 }
 

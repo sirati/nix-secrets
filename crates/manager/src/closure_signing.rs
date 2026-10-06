@@ -1,7 +1,7 @@
 //! Standard Nix closure signatures made only in the approving client.
 use crate::{
     client::BackendClient,
-    operator_channel::{ChannelEvent, Decision, SecretPrompt, DECISION_TIMEOUT},
+    operator_channel::{deadline_for, not_approved, ChannelEvent, Decisions, SecretPrompt, Waited},
     secret_values,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -17,8 +17,7 @@ use std::{
     ffi::OsString,
     io::Read,
     path::Path,
-    sync::mpsc::{Receiver, Sender},
-    time::Instant,
+    sync::mpsc::Sender,
 };
 use zeroize::Zeroizing;
 
@@ -106,7 +105,7 @@ pub(crate) fn handle(
     provider: &impl CryptoProvider,
     identity: &str,
     events: &Sender<ChannelEvent>,
-    decisions: &Receiver<Decision>,
+    decisions: &Decisions,
 ) -> (SecretAnswer, ChannelEvent) {
     let label = format!(
         "Nix closure update of {} (PID {})",
@@ -118,6 +117,7 @@ pub(crate) fn handle(
                 reason: reason.clone(),
             },
             ChannelEvent::ArtifactSignatureFinished {
+                id: request.id.clone(),
                 requester: label.clone(),
                 result: Err(reason),
             },
@@ -169,24 +169,18 @@ pub(crate) fn handle(
         ssh_signature: false,
         artifact_signature: false,
         closure_signature: true,
-        deadline: Instant::now() + DECISION_TIMEOUT,
+        deadline: deadline_for(request),
+        procedure: request.procedure.clone(),
     };
     let deadline = prompt.deadline;
-    while decisions.try_recv().is_ok() {}
     if events.send(ChannelEvent::Prompt(prompt)).is_err() {
         return deny("the TUI closed".into());
     }
-    loop {
-        match decisions.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(d) if d.id == request.id => {
-                if !d.approved {
-                    return deny("operator denied closure signing".into());
-                }
-                break;
-            }
-            Ok(_) => {}
-            Err(_) => return deny("operator did not approve closure signing in time".into()),
-        }
+    match decisions.wait(deadline) {
+        Waited::Approved => {}
+        Waited::Denied => return deny("operator denied closure signing".into()),
+        Waited::TimedOut => return deny("operator did not approve closure signing in time".into()),
+        other => return deny(not_approved(other, "closure signing")),
     }
     match client.exchange(&Request::CheckClosureSigningRequest {
         request_id: request.id.clone(),
@@ -228,6 +222,7 @@ pub(crate) fn handle(
         Ok(signatures) => (
             SecretAnswer::ClosureSigned { signatures },
             ChannelEvent::ArtifactSignatureFinished {
+                id: request.id.clone(),
                 requester: label,
                 result: Ok(()),
             },
@@ -301,16 +296,19 @@ pub fn run(arguments: Vec<OsString>, runtime: &Path) -> Result<(), String> {
         public_key_sha256,
         manifest,
     };
+    let procedure = crate::with_secrets::procedure_token();
     request.validate()?;
     nix_secrets_core::framing::write_json(
         &mut stream,
         &Request::RequestClosureSignatures {
             request,
             reason: options.reason,
+            progress: true,
+            procedure,
         },
     )
     .map_err(|e| e.to_string())?;
-    match nix_secrets_core::framing::read_json::<Response>(&mut stream)
+    match crate::with_secrets::read_answer(&mut stream)
         .map_err(|e| e.to_string())?
     {
         Some(Response::ClosureSignatures { signatures }) => {

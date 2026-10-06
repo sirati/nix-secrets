@@ -22,6 +22,18 @@ pub fn reduce(model: &mut Model, event: UiEvent, writer: &mut impl SecretWriter)
     };
     let mode = std::mem::replace(&mut model.mode, Mode::Browse);
     match (mode, event) {
+        // Procedures: m minimises the deployment dialog to the task bar, M
+        // restores the next procedure that waits.
+        (Mode::Approval(request), UiEvent::Character('m')) => {
+            model.mode = Mode::Approval(request);
+            model.minimise();
+        }
+        (mode @ (Mode::Browse | Mode::Approval(_)), UiEvent::Character('M')) => {
+            model.mode = mode;
+            if let Err(reason) = model.restore_next() {
+                model.inform(reason);
+            }
+        }
         (Mode::Browse, UiEvent::Up) => model.move_by(-1),
         (Mode::Browse, UiEvent::Down) => model.move_by(1),
         (Mode::Browse, UiEvent::Character('f')) => model.cycle_filter(),

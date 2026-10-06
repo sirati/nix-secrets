@@ -341,6 +341,7 @@ mod commit_tests;
 mod deploy_host_tests;
 mod generation_tests;
 mod navigation_tests;
+mod procedure_tests;
 mod secret_request_tests;
 
 #[test]

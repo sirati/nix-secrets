@@ -196,23 +196,53 @@ pub struct BackendSession {
     pub socket: PathBuf,
 }
 
+/// The procedure token this process inherited from `nix-secrets procedure`.
+pub fn procedure_token() -> Option<String> {
+    std::env::var(nix_secrets_core::procedure::PROCEDURE_ENVIRONMENT)
+        .ok()
+        .filter(|token| !token.is_empty())
+}
+
+/// The note a requester prints when the operator stops the automatic denial.
+pub const COUNTDOWN_CANCELLED: &str =
+    "operator cancelled the auto-reject countdown; waiting";
+
+/// Reads the answer to a request, past the heartbeats and the countdown
+/// notice a request with `progress` receives while the operator decides.
+pub fn read_answer(stream: &mut UnixStream) -> io::Result<Option<Response>> {
+    loop {
+        match read_json::<Response>(stream)? {
+            Some(Response::Heartbeat) => {}
+            Some(Response::CountdownCancelled) => eprintln!("nix-secrets: {COUNTDOWN_CANCELLED}"),
+            other => return Ok(other),
+        }
+    }
+}
+
 /// Asks the TUI behind `stream` for `identifiers`; blocks until the
-/// operator answers.
+/// operator answers. Inside a procedure the request is its next step and
+/// reads progress frames.
 pub fn request(
     mut stream: UnixStream,
     identifiers: &[String],
     reason: Option<&str>,
+    procedure: Option<String>,
 ) -> Result<BackendSession, String> {
     let io = |error: io::Error| format!("backend connection failed: {error}");
+    // This build only ever talks to a backend of its own compatibility
+    // version, which sends the progress frames `read_answer` handles.
+    let progress = true;
     write_json(
         &mut stream,
         &Request::RequestSecrets {
             identifiers: identifiers.to_vec(),
             reason: reason.map(str::to_owned),
+            procedure,
+            progress,
         },
     )
     .map_err(io)?;
-    match read_json::<Response>(&mut stream).map_err(io)? {
+    match read_answer(&mut stream).map_err(io)? {
         Some(Response::SecretSession { socket }) => Ok(BackendSession { stream, socket }),
         Some(Response::Error { message }) => Err(message),
         Some(other) => Err(format!("unexpected backend response: {other:?}")),

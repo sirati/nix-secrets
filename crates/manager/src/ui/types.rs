@@ -37,6 +37,18 @@ pub enum MouseTarget {
     /// A checkbox row of the deployment dialog, by its index in
     /// [`crate::model::ApprovalRequest::rows`].
     DeployRow(usize),
+    /// A task bar entry, by its index in [`Model::procedures`]: restores it.
+    Procedure(usize),
+}
+
+/// What the operator channel reports about procedures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcedureEvent {
+    /// A procedure started or reached a new step.
+    Step(nix_secrets_core::procedure::ProcedureStep),
+    Ended(String),
+    /// The backend withdrew this secret request.
+    Withdrawn(String),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -136,14 +148,17 @@ pub enum Completion {
     /// A secret request from the backend host finished: the number of values
     /// sent, or why nothing was sent.
     SecretRequestFinished {
+        id: String,
         requester: String,
         result: Result<usize, String>,
     },
     SshSignatureFinished {
+        id: String,
         requester: String,
         result: Result<(), String>,
     },
     ArtifactSignatureFinished {
+        id: String,
         requester: String,
         result: Result<(), String>,
     },
@@ -268,6 +283,16 @@ pub trait SecretWriter {
     /// A secret request waiting for the operator.
     fn poll_secret_prompt(&mut self) -> Option<crate::operator_channel::SecretPrompt> {
         None
+    }
+    /// What the operator channel reported about procedures since the last
+    /// call.
+    fn poll_procedure_event(&mut self) -> Option<ProcedureEvent> {
+        None
+    }
+    /// Stops the automatic denial of the secret request `id`; the backend
+    /// and the requester are told.
+    fn cancel_countdown(&mut self, _id: &str) -> Result<(), String> {
+        Err("secret requests are unavailable".into())
     }
     /// Answers the secret request `id`; approval decrypts and sends the values.
     fn answer_secret(&mut self, _id: &str, _approved: bool, _count: usize) -> Result<(), String> {

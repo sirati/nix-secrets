@@ -55,6 +55,11 @@ impl Model {
             return;
         }
         self.apply_task_status(&request);
+        let procedure = super::approval_procedure(&request);
+        let title = format!("Deploy {}", request.target);
+        let step = request.procedure.clone();
+        self.ensure_procedure(&procedure, || title, step.as_ref())
+            .awaiting_deployment = false;
         if let Some(queued) = self
             .pending_approvals
             .iter_mut()
@@ -75,8 +80,10 @@ impl Model {
                 return;
             }
             self.pending_approvals.push_back(request);
+            self.arrive(&procedure);
         } else {
             self.pending_approvals.push_back(request);
+            self.arrive(&procedure);
         }
         self.show_pending_approval();
     }
@@ -87,21 +94,38 @@ impl Model {
         if matches!(&self.mode, Mode::Approval(request) if request.id == id) {
             self.mode = Mode::Browse;
         }
+        self.tidy_procedures();
     }
 
     pub fn show_pending_approval(&mut self) {
         // Notices must not hide a newly arrived request. Preserve failures
         // as well as informational messages for acknowledgement afterward.
+        self.tidy_procedures();
+        // Only the foreground procedure's approval opens by itself; others
+        // wait in the task bar until the operator restores them.
+        let foreground_approval = self
+            .foreground
+            .as_deref()
+            .filter(|id| self.procedure(id).is_some_and(|procedure| !procedure.minimised))
+            .and_then(|id| {
+                self.pending_approvals
+                    .iter()
+                    .position(|request| super::approval_procedure(request) == id)
+            });
         if matches!(self.mode, Mode::Browse)
-            && (!self.pending_dialogs.is_empty() || !self.pending_approvals.is_empty())
+            && (!self.pending_dialogs.is_empty() || foreground_approval.is_some())
         {
             if let Some(notice) = self.message.take() {
                 self.notifications.push_front(notice);
             }
-            self.mode = self
-                .pending_dialogs
-                .pop_front()
-                .unwrap_or_else(|| Mode::Approval(self.pending_approvals.pop_front().unwrap()));
+            self.mode = match self.pending_dialogs.pop_front() {
+                Some(dialog) => dialog,
+                None => Mode::Approval(
+                    self.pending_approvals
+                        .remove(foreground_approval.expect("checked above"))
+                        .expect("index from position"),
+                ),
+            };
             return;
         }
         if self.message.is_none() && matches!(self.mode, Mode::Browse) {

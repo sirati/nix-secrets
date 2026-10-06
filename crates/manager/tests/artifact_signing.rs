@@ -10,7 +10,7 @@ use nix_secrets_crypto::{AgeCommandProvider, CryptoError, CryptoProvider, Recipi
 use nix_secrets_manager::{
     client::BackendClient,
     keypair,
-    operator_channel::{self, ChannelEvent, Decision},
+    operator_channel::{self, ChannelEvent, Decision, OperatorInput},
 };
 use sha2::{Digest, Sha256, Sha512};
 use std::{
@@ -179,13 +179,13 @@ fn encrypted_key_is_decrypted_once_on_client_and_backend_returns_only_verified_s
         .send(Decision {
             id: "stale-request-id".into(),
             approved: true,
-        })
+        }.into())
         .unwrap();
     decisions
         .send(Decision {
             id: prompt.id.clone(),
             approved: true,
-        })
+        }.into())
         .unwrap();
     let signatures = match requester.join().unwrap() {
         Response::ArtifactSignatures { signatures } => signatures,
@@ -238,6 +238,8 @@ fn encrypted_key_is_decrypted_once_on_client_and_backend_returns_only_verified_s
             &Request::RequestArtifactSignatures {
                 request,
                 reason: None,
+                procedure: None,
+                progress: false,
             },
         )
         .unwrap();
@@ -267,6 +269,8 @@ fn encrypted_key_is_decrypted_once_on_client_and_backend_returns_only_verified_s
             &Request::RequestArtifactSignatures {
                 request: denied_request,
                 reason: None,
+                procedure: None,
+                progress: false,
             },
         )
         .unwrap();
@@ -280,7 +284,7 @@ fn encrypted_key_is_decrypted_once_on_client_and_backend_returns_only_verified_s
         .send(Decision {
             id: prompt.id,
             approved: false,
-        })
+        }.into())
         .unwrap();
     assert!(
         matches!(denied.join().unwrap(), Response::Error { message } if message.contains("denied"))
@@ -298,6 +302,8 @@ fn encrypted_key_is_decrypted_once_on_client_and_backend_returns_only_verified_s
         &Request::RequestArtifactSignatures {
             request,
             reason: None,
+            procedure: None,
+            progress: false,
         },
     )
     .unwrap();
@@ -321,7 +327,7 @@ fn encrypted_key_is_decrypted_once_on_client_and_backend_returns_only_verified_s
         .send(Decision {
             id: prompt.id,
             approved: true,
-        })
+        }.into())
         .unwrap();
     assert!(matches!(
         receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
@@ -335,6 +341,8 @@ fn encrypted_key_is_decrypted_once_on_client_and_backend_returns_only_verified_s
         &Request::RequestSecrets {
             identifiers: vec![IDENTIFIER.into()],
             reason: None,
+            procedure: None,
+            progress: false,
         },
     )
     .unwrap();

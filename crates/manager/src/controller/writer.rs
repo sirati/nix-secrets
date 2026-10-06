@@ -266,17 +266,20 @@ impl SecretWriter for Controller {
     }
 
     fn poll_approval(&mut self) -> Result<Option<UiApproval>, String> {
-        self.poll_approval_inner()
+        let result = self.poll_approval_inner();
+        self.with_procedure(result)
     }
     fn approve_host_mutations(
         &mut self,
         accepted: bool,
         token: &str,
     ) -> Result<Option<UiApproval>, String> {
-        self.approve_host_mutations_inner(accepted, token)
+        let result = self.approve_host_mutations_inner(accepted, token);
+        self.with_procedure(result)
     }
     fn approval(&mut self, accepted: bool) -> Result<Option<UiApproval>, String> {
-        self.approval_inner(accepted)
+        let result = self.approval_inner(accepted);
+        self.with_procedure(result)
     }
     fn approval_with(
         &mut self,
@@ -286,7 +289,8 @@ impl SecretWriter for Controller {
         if let Some(active) = &mut self.active {
             active.unchecked = unchecked.clone();
         }
-        self.approval_inner(accepted)
+        let result = self.approval_inner(accepted);
+        self.with_procedure(result)
     }
     fn request_deployment(&mut self, host: &str) -> Result<(), String> {
         self.client

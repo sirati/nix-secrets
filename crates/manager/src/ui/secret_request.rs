@@ -1,16 +1,29 @@
-//! The secret-request modal. It sits above every other dialog and notice;
-//! the dialog underneath keeps its state and is usable again once the
-//! request is answered.
+//! The secret-request modal. It belongs to a procedure (see
+//! [`crate::model::Procedure`]) and is on screen while that procedure is in
+//! the foreground; the dialog underneath keeps its state and is usable
+//! again once the request is answered or minimised.
 //!
 //! Only Ctrl+Shift+Y or the Yes button approves. n, Esc and Enter deny; d
-//! toggles the details. After [`crate::operator_channel::DECISION_TIMEOUT`]
-//! the channel denies on its own and the modal closes.
+//! toggles the details; m minimises the procedure to the task bar and M
+//! restores the next waiting one. A request outside a procedure, or the
+//! first step of one, denies itself after
+//! [`crate::operator_channel::DECISION_TIMEOUT`] unless c cancels that.
 use super::*;
 use crate::operator_channel::SecretPrompt;
 use nix_secrets_core::secret_request::ProcessInfo;
 use std::path::Path;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
+
+/// Restores a task bar entry, or explains why it cannot.
+pub(super) fn restore(model: &mut Model, index: usize) {
+    let Some(id) = model.procedures.get(index).map(|procedure| procedure.id.clone()) else {
+        return;
+    };
+    if let Err(reason) = model.restore(&id) {
+        model.inform(reason);
+    }
+}
 
 /// Handles input while a request is shown. Returns whether it consumed the
 /// event; if not, no request is open and the event goes on as usual.
@@ -19,7 +32,7 @@ pub(super) fn intercept(
     event: &UiEvent,
     writer: &mut impl SecretWriter,
 ) -> bool {
-    let Some(prompt) = &model.secret_prompt else {
+    let Some(prompt) = model.shown_prompt() else {
         return false;
     };
     let decision = match event {
@@ -45,6 +58,30 @@ pub(super) fn intercept(
             model.secret_scroll = 0;
             return true;
         }
+        UiEvent::Character('m')
+        | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Character('m'))) => {
+            model.minimise();
+            return true;
+        }
+        UiEvent::Character('M') => {
+            if let Err(reason) = model.restore_next() {
+                model.inform(reason);
+            }
+            return true;
+        }
+        UiEvent::Click(MouseTarget::Procedure(index)) => {
+            restore(model, *index);
+            return true;
+        }
+        UiEvent::Character('c')
+        | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Character('c'))) => {
+            if let Some(id) = model.cancel_countdown() {
+                if let Err(error) = writer.cancel_countdown(&id) {
+                    model.fail(error);
+                }
+            }
+            return true;
+        }
         UiEvent::ConfirmLoss | UiEvent::Click(MouseTarget::ConfirmLoss) => true,
         UiEvent::Character('n')
         | UiEvent::Escape
@@ -55,53 +92,66 @@ pub(super) fn intercept(
         // Everything else is swallowed: no key reaches the dialog below.
         _ => return true,
     };
-    let id = prompt.id.clone();
     // SSH authentication returns a signature and zero secret values.
     let count = if prompt.ssh_signature || prompt.artifact_signature || prompt.closure_signature {
         0
     } else {
         prompt.values.len()
     };
-    model.secret_prompt = None;
-    model.secret_scroll = 0;
-    model.secret_details = false;
+    let prompt = model.take_shown_prompt().expect("a prompt is shown");
     // An approval shows the progress strip; the outcome arrives as a notice.
-    if let Err(error) = writer.answer_secret(&id, decision, count) {
+    if let Err(error) = writer.answer_secret(&prompt.id, decision, count) {
         model.fail(error);
     }
     true
 }
 
-/// Shows a new request, or closes one whose time ran out.
+/// Takes in new requests and procedure news, closes requests whose time
+/// ran out and moves the flashing. Returns whether to redraw.
 pub(super) fn tick(model: &mut Model, writer: &mut impl SecretWriter) -> bool {
     let mut changed = false;
-    if let Some(prompt) = writer.poll_secret_prompt() {
-        model.secret_prompt = Some(prompt);
-        model.secret_scroll = 0;
-        model.secret_details = false;
+    while let Some(event) = writer.poll_procedure_event() {
+        match event {
+            ProcedureEvent::Step(step) => model.procedure_step(step),
+            ProcedureEvent::Ended(id) => model.procedure_ended(&id),
+            ProcedureEvent::Withdrawn(id) => {
+                model.remove_prompt(&id);
+            }
+        }
         changed = true;
     }
-    if model
-        .secret_prompt
-        .as_ref()
-        .is_some_and(|prompt| Instant::now() >= prompt.deadline)
-    {
-        // The channel denies at the same deadline and reports it.
-        model.secret_prompt = None;
+    while let Some(prompt) = writer.poll_secret_prompt() {
+        model.offer_prompt(prompt);
         changed = true;
     }
-    // The countdown moves.
-    changed || model.secret_prompt.is_some()
+    let now = Instant::now();
+    // The channel denies at the same deadline and reports it.
+    changed |= model.expire_prompts(now);
+    changed |= model.flash_tick(now);
+    if changed {
+        model.show_pending_approval();
+    }
+    // Countdowns move, in the dialog and in the task bar.
+    changed
+        || model
+            .procedures
+            .iter()
+            .any(|procedure| procedure.prompts.iter().any(|prompt| prompt.deadline.is_some()))
 }
 
-pub(super) fn finished(model: &mut Model, requester: String, result: Result<usize, String>) {
+pub(super) fn finished(
+    model: &mut Model,
+    id: &str,
+    requester: String,
+    result: Result<usize, String>,
+) {
     match result {
         Ok(count) => model.inform(format!(
             "Sent {count} secret value{} to {requester}.",
             if count == 1 { "" } else { "s" }
         )),
         Err(reason) => {
-            model.secret_prompt = None;
+            model.remove_prompt(id);
             model.fail(format!("Secret request from {requester} failed: {reason}"))
         }
     }
@@ -155,6 +205,15 @@ pub(crate) fn title(prompt: &SecretPrompt) -> String {
     )
 }
 
+/// The dialog title: the procedure and its step, or for a request of its
+/// own, who asked.
+pub(crate) fn dialog_title(prompt: &SecretPrompt) -> String {
+    match &prompt.procedure {
+        Some(step) => format!("{} · {}: {}", step.title, step.position(), step.label),
+        None => title(prompt),
+    }
+}
+
 /// Where the private key comes from, in one word.
 fn key_source(identity: &str) -> &str {
     if identity.starts_with("1Password") {
@@ -183,18 +242,23 @@ fn short_recipient(recipient: &str) -> String {
     }
 }
 
-/// The seconds until the request denies itself.
-pub(crate) fn remaining_seconds(prompt: &SecretPrompt) -> u64 {
+/// The seconds until the request denies itself, if it counts down.
+pub(crate) fn remaining_seconds(prompt: &SecretPrompt) -> Option<u64> {
     prompt
         .deadline
-        .saturating_duration_since(Instant::now())
-        .as_secs()
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()).as_secs())
 }
 
 /// The modal body. Long descriptions and commands wrap in the dialog.
 pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String {
     let source = key_source(&prompt.identity);
-    let mut lines = vec![
+    let mut lines = Vec::new();
+    // Inside a procedure the title names the step; this names who asked.
+    if prompt.procedure.is_some() {
+        lines.push(format!("{}.", title(prompt)));
+        lines.push(String::new());
+    }
+    lines.extend([
         if prompt.closure_signature {
             format!("Approve to decrypt this signing key once with {source} and sign requester-supplied public Nix closure metadata on this client. This client has not verified NAR contents. Only signatures are returned.")
         } else if prompt.artifact_signature {
@@ -211,7 +275,7 @@ pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String
             .clone()
             .unwrap_or_else(|| "(none supplied)".into()),
         String::new(),
-    ];
+    ]);
     if details {
         return details_body(prompt, lines);
     }

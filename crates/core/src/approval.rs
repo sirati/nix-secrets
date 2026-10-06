@@ -25,6 +25,8 @@ struct Lease {
 struct Entry {
     request: ApprovalRequest,
     state: State,
+    /// Set only by the backend for a request it made for a procedure.
+    procedure: Option<crate::procedure::ProcedureStep>,
 }
 enum State {
     Pending,
@@ -73,6 +75,15 @@ impl ApprovalBroker {
     }
 
     pub fn submit(&mut self, request: ApprovalRequest) -> Result<ApprovalStatus, BrokerError> {
+        self.submit_in_procedure(request, None)
+    }
+
+    /// Queues a request the backend made as a step of a procedure.
+    pub fn submit_in_procedure(
+        &mut self,
+        request: ApprovalRequest,
+        procedure: Option<crate::procedure::ProcedureStep>,
+    ) -> Result<ApprovalStatus, BrokerError> {
         request.validate().map_err(BrokerError::Invalid)?;
         self.reclaim();
         if let Some(entry) = self.entries.get(&request.id) {
@@ -90,6 +101,7 @@ impl ApprovalBroker {
             Entry {
                 request,
                 state: State::Pending,
+                procedure,
             },
         );
         self.broadcast(id);
@@ -202,6 +214,20 @@ impl ApprovalBroker {
     pub fn status(&mut self, id: &str) -> Result<ApprovalStatus, BrokerError> {
         self.reclaim();
         self.entries.get(id).map(status).ok_or(BrokerError::Unknown)
+    }
+
+    /// The procedure steps of these requests, for those that have one.
+    pub fn procedures<'a>(
+        &self,
+        requests: impl IntoIterator<Item = &'a ApprovalRequest>,
+    ) -> BTreeMap<String, crate::procedure::ProcedureStep> {
+        requests
+            .into_iter()
+            .filter_map(|request| {
+                let step = self.entries.get(&request.id)?.procedure.clone()?;
+                Some((request.id.clone(), step))
+            })
+            .collect()
     }
 
     /// Whether any frontend is registered to answer approval requests.

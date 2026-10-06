@@ -127,19 +127,39 @@ pub enum Request {
         identifiers: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// The token from [`crate::procedure::PROCEDURE_ENVIRONMENT`]: the
+        /// request becomes the next step of that procedure.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        procedure: Option<String>,
+        /// The requester reads [`Response::Heartbeat`] and
+        /// [`Response::CountdownCancelled`] frames before the answer.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        progress: bool,
     },
     EndSecretSession,
     RequestSshSignature {
         request: crate::ssh_auth::SignatureRequest,
         reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        procedure: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        progress: bool,
     },
     RequestArtifactSignatures {
         request: crate::artifact_signing::SigningRequest,
         reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        procedure: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        progress: bool,
     },
     RequestClosureSignatures {
         request: crate::closure_signing::SigningRequest,
         reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        procedure: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        progress: bool,
     },
     CheckClosureSigningRequest {
         request_id: String,
@@ -158,6 +178,25 @@ pub enum Request {
         target: String,
         #[serde(default)]
         allow_partial: bool,
+        /// A procedure token: the deployment becomes its next step.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        procedure: Option<String>,
+    },
+    /// Registers a procedure owned by this connection's process; see
+    /// [`crate::procedure`]. The backend answers
+    /// [`Response::ProcedureBegun`] and the procedure lives until
+    /// [`Request::EndProcedure`] or a disconnect.
+    BeginProcedure {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+    },
+    EndProcedure,
+    /// On the operator channel: the operator stopped the automatic denial
+    /// of this request. The backend drops its own deadline for it and tells
+    /// the requester.
+    CancelCountdown {
+        request_id: String,
     },
 }
 
@@ -200,6 +239,11 @@ pub enum Response {
     FrontendRegistered,
     Approvals {
         requests: Vec<ApprovalRequest>,
+        /// The procedure step of each request that belongs to one, by
+        /// request id. Only the backend assigns these; a submitted request
+        /// never carries one.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        procedures: std::collections::BTreeMap<String, crate::procedure::ProcedureStep>,
     },
     ApprovalState {
         state: ApprovalStatus,
@@ -252,4 +296,27 @@ pub enum Response {
     DeploymentRequested {
         request: ApprovalRequest,
     },
+    /// The procedure is registered; `token` goes to the requesters in
+    /// [`crate::procedure::PROCEDURE_ENVIRONMENT`].
+    ProcedureBegun {
+        id: String,
+        token: String,
+    },
+    /// On the operator channel: a procedure started or reached a new step.
+    ProcedureUpdate {
+        procedure: crate::procedure::ProcedureStep,
+    },
+    /// The procedure is over: on the operator channel, and as the answer to
+    /// [`Request::EndProcedure`].
+    ProcedureEnded {
+        id: String,
+    },
+    /// On the operator channel: the request no longer waits, because its
+    /// requester left or the backend gave up. A late answer is ignored.
+    SecretRequestWithdrawn {
+        request_id: String,
+    },
+    /// To a requester that asked for progress: the operator cancelled the
+    /// automatic denial; the request now waits for the operator's decision.
+    CountdownCancelled,
 }

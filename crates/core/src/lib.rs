@@ -9,6 +9,7 @@ pub mod framing;
 pub mod generator;
 pub mod git;
 pub mod private_socket;
+pub mod procedure;
 pub mod profiles;
 pub mod schema;
 pub mod secret_request;

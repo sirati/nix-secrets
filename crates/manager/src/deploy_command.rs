@@ -91,7 +91,11 @@ pub fn run(
         .map_err(|error| error.replace(" (or pass --local to decrypt here)", ""))?;
     let mut client = BackendClient::new(stream);
     let request = client
-        .request_deployment(&invocation.host, invocation.allow_partial)
+        .request_deployment_in(
+            &invocation.host,
+            invocation.allow_partial,
+            crate::with_secrets::procedure_token(),
+        )
         .map_err(|error| error.to_string())?;
     progress(&format!(
         "requested a deployment of {} ({} values), request {}; approve it in the nix-secrets TUI",

@@ -9,6 +9,7 @@ fn failed_approval_preempts_signing_success_and_acknowledgement_restores_it() {
     crate::ui::apply_completion_for_tests(
         &mut model,
         crate::ui::Completion::ArtifactSignatureFinished {
+            id: "r".into(),
             requester: "nix-secrets (pid 42)".into(),
             result: Ok(()),
         },

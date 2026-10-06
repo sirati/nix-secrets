@@ -106,6 +106,21 @@ pub struct SecretRequest {
     pub requester: ProcessInfo,
     /// Its parent, which is usually the program that wants the values.
     pub parent: Option<ProcessInfo>,
+    /// The procedure and step this request belongs to, as the backend
+    /// verified and numbered it. `None` is a request of its own: a
+    /// procedure of one step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure: Option<crate::procedure::ProcedureStep>,
+}
+
+impl SecretRequest {
+    /// Whether the TUI denies this request on its own after a while: only
+    /// the first step of a procedure counts down.
+    pub fn countdown(&self) -> bool {
+        self.procedure
+            .as_ref()
+            .is_none_or(crate::procedure::ProcedureStep::countdown)
+    }
 }
 
 /// One decrypted value. The encoding is erased when the value is dropped.

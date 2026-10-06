@@ -124,6 +124,7 @@ fn refreshed_details_error_clears_active_and_terminally_rejects_exact_claim() {
         prepared: None,
         target_approved: true,
         renewed_at: Instant::now(),
+        procedure: None,
         last_error: None,
         unchecked: BTreeSet::new(),
     });

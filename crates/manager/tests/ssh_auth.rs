@@ -5,7 +5,7 @@ use nix_secrets_core::git::agent::{read_message, write_message};
 use nix_secrets_core::ssh_auth::{self, SignatureRequest};
 use nix_secrets_core::{Backend, Schema, SecretStore};
 use nix_secrets_crypto::AgeCommandProvider;
-use nix_secrets_manager::operator_channel::{self, ChannelEvent, Decision};
+use nix_secrets_manager::operator_channel::{self, ChannelEvent, Decision, OperatorInput};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -206,7 +206,7 @@ fn exercise(approve: bool, wrong_user: bool, host_bound: bool) {
             .send(Decision {
                 id: prompt.id,
                 approved: approve,
-            })
+            }.into())
             .unwrap();
         match incoming.recv_timeout(Duration::from_secs(5)).unwrap() {
             ChannelEvent::SignatureFinished { result, .. } => assert_eq!(result.is_ok(), approve),

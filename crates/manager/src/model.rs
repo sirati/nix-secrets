@@ -6,8 +6,10 @@ mod attributes;
 mod catalog;
 mod collapse;
 mod dialogs;
+mod procedures;
 mod profiles;
 mod visibility;
+pub use procedures::{approval_procedure, prompt_procedure, Procedure, FLASH_PERIOD};
 pub use attributes::{Attribute, Facet, FacetMode};
 use std::collections::BTreeMap;
 pub use visibility::SearchSummary;
@@ -70,6 +72,9 @@ pub struct ApprovalRequest {
     pub unchecked: std::collections::BTreeSet<String>,
     /// The row the cursor is on, among the rows with a checkbox.
     pub cursor: usize,
+    /// The procedure step the backend assigned, if the request is part of
+    /// a procedure.
+    pub procedure: Option<nix_secrets_core::procedure::ProcedureStep>,
 }
 
 impl ApprovalRequest {
@@ -413,10 +418,13 @@ pub struct Model {
     pub collapsed: std::collections::BTreeSet<Vec<String>>,
     /// Groups folded during a search, with the query they belong to.
     pub search_collapsed: (String, std::collections::BTreeSet<Vec<String>>),
-    /// A secret request from the backend host, shown above everything else
-    /// until the operator answers or it times out. The dialog underneath is
-    /// kept as it was.
-    pub secret_prompt: Option<crate::operator_channel::SecretPrompt>,
+    /// Procedures with prompts, in task bar order; see `procedures`.
+    pub procedures: Vec<Procedure>,
+    /// The procedure whose dialog is on screen, if any.
+    pub foreground: Option<String>,
+    /// The phase of flashing task bar entries.
+    pub flash_on: bool,
+    pub flash_since: std::time::Instant,
     pub secret_scroll: u16,
     /// Whether the secret-request modal shows full commands, fingerprints
     /// and descriptions instead of its summary.
@@ -506,7 +514,10 @@ impl Model {
             commit_draft: CommitDraft::default(),
             collapsed: Default::default(),
             search_collapsed: Default::default(),
-            secret_prompt: None,
+            procedures: Vec::new(),
+            foreground: None,
+            flash_on: false,
+            flash_since: std::time::Instant::now(),
             secret_scroll: 0,
             secret_details: false,
             approval_details: false,

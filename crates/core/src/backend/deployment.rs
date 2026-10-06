@@ -15,6 +15,9 @@ pub(super) fn request(
     broker: &Mutex<ApprovalBroker>,
     target: String,
     allow_partial: bool,
+    // Numbers the request as the next step of its procedure, if any. Called
+    // once the request is valid, so a refusal never uses up a step.
+    procedure_step: impl FnOnce(&str) -> Result<Option<crate::procedure::ProcedureStep>, String>,
 ) -> Result<Response, String> {
     let secrets = schema
         .deployable_identifiers(&target)
@@ -40,7 +43,8 @@ pub(super) fn request(
     if !state.has_frontends() {
         return Err(super::NO_OPERATOR.to_owned());
     }
-    state.submit(request.clone()).map_err(|error| match error {
+    let procedure = procedure_step(&format!("deploy secrets to {}", request.target))?;
+    state.submit_in_procedure(request.clone(), procedure).map_err(|error| match error {
         BrokerError::Invalid(message) => message.to_owned(),
         BrokerError::Full => "approval broker capacity reached".to_owned(),
         _ => "the deployment request could not be queued".to_owned(),

@@ -12,7 +12,7 @@ use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_manager::client::BackendClient;
 use nix_secrets_manager::controller::Controller;
 use nix_secrets_manager::keypair::{self, Keypair};
-use nix_secrets_manager::operator_channel::{self, ChannelEvent, Decision};
+use nix_secrets_manager::operator_channel::{self, ChannelEvent, Decision, OperatorInput};
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -136,7 +136,7 @@ fn fixture() -> Fixture {
 /// The TUI's operator channel on a thread, answering with `decide`.
 struct Operator {
     events: Receiver<ChannelEvent>,
-    decisions: Sender<Decision>,
+    decisions: Sender<OperatorInput>,
 }
 
 impl Fixture {
@@ -251,7 +251,7 @@ impl Operator {
             .send(Decision {
                 id: prompt.id.clone(),
                 approved,
-            })
+            }.into())
             .unwrap();
     }
 }
@@ -436,7 +436,7 @@ fn pipe_secret_alone_is_a_one_value_request_to_the_tui() {
 }
 
 #[test]
-fn a_second_request_waits_for_none_and_unset_values_are_refused_unasked() {
+fn a_second_request_waits_alongside_the_first_and_unset_values_are_refused_unasked() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -444,10 +444,15 @@ fn a_second_request_waits_for_none_and_unset_values_are_refused_unasked() {
     let operator = fixture.attach();
     let first = fixture.with_secrets(&[TOKEN], "exit 0");
     let prompt = operator.prompt();
-    // Only one request may wait for the operator.
-    let second = finish(fixture.with_secrets(&[KEY], "exit 0"));
-    assert!(!second.status.success());
-    assert!(String::from_utf8_lossy(&second.stderr).contains("another secret request"));
+    // Requests of different requesters wait at once; the operator answers
+    // them in any order.
+    let second = fixture.with_secrets(&[KEY], "exit 0");
+    let second_prompt = operator.prompt();
+    assert_ne!(prompt.id, second_prompt.id);
+    assert_eq!(second_prompt.values[0].identifier, KEY);
+    operator.decide(&second_prompt, false);
+    let _ = operator.next();
+    assert!(!finish(second).status.success());
     operator.decide(&prompt, false);
     let _ = operator.next();
     assert!(!finish(first).status.success());

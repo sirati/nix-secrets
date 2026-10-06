@@ -265,6 +265,9 @@ fn apply_completion(model: &mut Model, completion: Completion) {
             if matches!(model.mode, Mode::Approval(_)) {
                 model.mode = Mode::Browse;
             }
+            // The TUI claims one deployment at a time: a minimised copy is
+            // the lost one.
+            model.pending_approvals.clear();
             model.fail(message);
         }
         Completion::ProfileSaved { name, snapshot } => {
@@ -288,19 +291,21 @@ fn apply_completion(model: &mut Model, completion: Completion) {
         // time they open, so they see the new commit without a refresh.
         Completion::Committed(result) => super::commit::committed(model, result),
         Completion::CommitFailed(error) => model.fail(format!("git commit failed:\n{error}")),
-        Completion::SecretRequestFinished { requester, result } => {
-            super::secret_request::finished(model, requester, result)
-        }
-        Completion::SshSignatureFinished { requester, result } => {
+        Completion::SecretRequestFinished {
+            id,
+            requester,
+            result,
+        } => super::secret_request::finished(model, &id, requester, result),
+        Completion::SshSignatureFinished { id, requester, result } => {
             match result {
                 Ok(()) => model.inform(format!("Returned one SSH authentication signature to {requester}; the private key stayed on this client.")),
-                Err(error) => { model.secret_prompt = None; model.fail(format!("SSH authentication for {requester} failed: {error}")); }
+                Err(error) => { model.remove_prompt(&id); model.fail(format!("SSH authentication for {requester} failed: {error}")); }
             }
         }
-        Completion::ArtifactSignatureFinished { requester, result } => {
+        Completion::ArtifactSignatureFinished { id, requester, result } => {
             match result {
                 Ok(()) => model.inform(format!("Returned detached signatures to {requester}; the private key stayed on this client.")),
-                Err(error) => { model.secret_prompt = None; model.fail(format!("Signing for {requester} failed: {error}")); }
+                Err(error) => { model.remove_prompt(&id); model.fail(format!("Signing for {requester} failed: {error}")); }
             }
         }
     }

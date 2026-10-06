@@ -1,7 +1,7 @@
 //! Run a command with a private agent exposing exactly one public key.
 //! Every SSH authentication signature is approved and produced by the TUI.
 use crate::with_secrets::{connect_backend, Options};
-use nix_secrets_core::framing::{read_json, write_json};
+use nix_secrets_core::framing::write_json;
 use nix_secrets_core::git::agent::{AgentProxy, FAILURE};
 use nix_secrets_core::ssh_auth::{identities, key_blob, SignatureRequest};
 use nix_secrets_core::{Request, Response};
@@ -87,6 +87,7 @@ pub fn run(invocation: Invocation, runtime: &Path) -> Result<std::process::ExitS
     let key = invocation.public_key;
     let destination = invocation.destination;
     let reason = invocation.options.reason;
+    let procedure = crate::with_secrets::procedure_token();
     let (done, finished) = mpsc::channel();
     let serving = std::thread::spawn(move || {
         let request = |message: &[u8]| SignatureRequest {
@@ -107,9 +108,11 @@ pub fn run(invocation: Invocation, runtime: &Path) -> Result<std::process::ExitS
                         &Request::RequestSshSignature {
                             request: request(message),
                             reason: reason.clone(),
+                            procedure: procedure.clone(),
+                            progress: true,
                         },
                     )?;
-                    match read_json::<Response>(&mut backend)? {
+                    match crate::with_secrets::read_answer(&mut backend)? {
                         Some(Response::SshSignature { reply }) => {
                             nix_secrets_core::ssh_auth::validate_reply(&reply)
                                 .map_err(io::Error::other)?;

@@ -98,7 +98,7 @@ fn socket_frontends_receive_and_atomically_claim_an_approval() {
     for frontend in [&mut first, &mut second] {
         assert!(matches!(
             call(frontend, Request::PollApprovals),
-            Response::Approvals { requests } if requests.len() == 1
+            Response::Approvals { requests, .. } if requests.len() == 1
         ));
     }
     let clients = [first, second].map(|mut stream| {
@@ -276,6 +276,7 @@ fn a_deployment_request_reaches_the_registered_frontend() {
     let deploy = || Request::RequestDeployment {
         target: "host".to_owned(),
         allow_partial: true,
+        procedure: None,
     };
     assert!(matches!(
         call(&mut requester, deploy()),
@@ -290,6 +291,7 @@ fn a_deployment_request_reaches_the_registered_frontend() {
         call(&mut requester, Request::RequestDeployment {
             target: "absent".to_owned(),
             allow_partial: false,
+            procedure: None,
         }),
         Response::Error { message } if message.contains("not a host")
     ));
@@ -299,7 +301,7 @@ fn a_deployment_request_reaches_the_registered_frontend() {
     assert_eq!(request.target, "host");
     assert_eq!(request.secrets, [common::path().to_string()]);
     assert!(request.allow_partial);
-    let Response::Approvals { requests } = call(&mut frontend, Request::PollApprovals) else {
+    let Response::Approvals { requests, .. } = call(&mut frontend, Request::PollApprovals) else {
         panic!("frontend cannot poll");
     };
     assert_eq!(requests, std::slice::from_ref(&request));

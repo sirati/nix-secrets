@@ -79,9 +79,9 @@ n / Esc  Reject the request
 
 SECRET REQUESTS
 A program on the backend host (nix-secrets with-secrets or pipe-secret)
-asks for values. A modal opens over any view with a table of the values
-and their kinds, the recipient, the key source, the requesting command,
-its directory and parent, and a countdown. The dialog underneath is kept.
+asks for values. A modal opens with a table of the values and their
+kinds, the recipient, the key source, the requesting command, its
+directory and parent, and a countdown. The dialog underneath is kept.
 The terminal bell rings, a desktop notification is sent where the
 terminal supports one, and the window title shows the request; the bell
 rings again 30 s before the request expires.
@@ -89,8 +89,27 @@ Ctrl+Shift+Y or Yes  Decrypt all of them with one 1Password authorization
                      and send them to that program
 d or Details         Show full descriptions, fingerprints and commands
 n / Enter / Esc      Deny; the program gets nothing
-After 120 s the request is denied. A notice names the requester and
-whether the values were sent.
+c or Keep waiting    Cancel the countdown; the program is told and waits
+After 120 s the request is denied unless c cancelled that. A notice names
+the requester and whether the values were sent.
+
+PROCEDURES
+Prompts of one operation started with `nix-secrets procedure` (for
+example SSH authentication, signing and deployment of an update) share
+one dialog titled with the procedure and its step, such as
+Update ns1 · step 2/4: sign closure for ns1. Any other request or
+deployment is a procedure of its own. Only the first step of a procedure
+counts down; later steps wait until answered.
+m      Minimise the open secret request or deployment dialog
+M      Restore the next procedure that waits for you, flashing ones first
+Click  A task bar entry restores it
+The task bar above the actions lists every procedure with its step and
+whether it waits for you. A procedure never takes the screen from an open
+dialog: one that starts meanwhile stays minimised and its entry flashes,
+with a bell and a desktop notification. With nothing open it opens
+directly. Several procedures can wait at once; the TUI handles one
+deployment dialog at a time, and another procedure's deployment opens
+once that one is answered.
 
 WORKING
 A strip at the top names a running decryption or save and counts seconds.

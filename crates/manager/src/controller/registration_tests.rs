@@ -351,6 +351,7 @@ impl Fixture {
             prepared: None,
             target_approved: true,
             renewed_at: Instant::now(),
+            procedure: None,
             last_error: None,
             unchecked: BTreeSet::new(),
         });

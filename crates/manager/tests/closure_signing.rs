@@ -10,7 +10,7 @@ use nix_secrets_core::{
 use nix_secrets_crypto::{CryptoError, CryptoProvider, Recipient};
 use nix_secrets_manager::{
     client::BackendClient,
-    operator_channel::{self, ChannelEvent, Decision, SecretPrompt},
+    operator_channel::{self, ChannelEvent, Decision, OperatorInput, SecretPrompt},
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -49,7 +49,7 @@ struct Fixture {
     schema: Schema,
     count: Arc<AtomicUsize>,
     events: Receiver<ChannelEvent>,
-    decisions: Sender<Decision>,
+    decisions: Sender<OperatorInput>,
     key: SigningKey,
     fingerprint: String,
     manifest: Manifest,
@@ -160,6 +160,8 @@ impl Fixture {
                 &Request::RequestClosureSignatures {
                     request,
                     reason: Some("test closure update".into()),
+                    procedure: None,
+                    progress: false,
                 },
             )
             .unwrap();
@@ -173,7 +175,7 @@ impl Fixture {
         }
     }
     fn decide(&self, id: String, approved: bool) {
-        self.decisions.send(Decision { id, approved }).unwrap();
+        self.decisions.send(Decision { id, approved }.into()).unwrap();
     }
     fn finished(&self, success: bool) {
         match self.events.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -280,7 +282,7 @@ fn cli_default_repository_discovers_backend_and_returns_only_native_verified_sig
     ));
     // Plaintext exports are refused before an operator prompt or decryption.
     assert!(
-        matches!(exchange(&f.socket, &Request::RequestSecrets {identifiers:vec![IDENTIFIER.into()],reason:None}).unwrap(),Response::Error {message} if message.contains("plaintext export is forbidden"))
+        matches!(exchange(&f.socket, &Request::RequestSecrets {identifiers:vec![IDENTIFIER.into()],reason:None,procedure:None,progress:false}).unwrap(),Response::Error {message} if message.contains("plaintext export is forbidden"))
     );
     assert!(nix_secrets_manager::secret_values::load(
         &mut f.client,
@@ -332,6 +334,8 @@ fn denial_invalid_metadata_stale_public_key_and_disconnect_never_decrypt() {
         &Request::RequestClosureSignatures {
             request: f.request(),
             reason: None,
+            procedure: None,
+            progress: false,
         },
     )
     .unwrap();
@@ -373,11 +377,11 @@ fn closed_decision_channel_never_decrypts() {
         ChannelEvent::ArtifactSignatureFinished {
             result: Err(message),
             ..
-        } => assert!(message.contains("in time")),
+        } => assert!(message.contains("closed"), "{message}"),
         _ => panic!("expected closed decision channel rejection"),
     }
     assert!(
-        matches!(requester.join().unwrap(),Response::Error {message} if message.contains("in time"))
+        matches!(requester.join().unwrap(),Response::Error {message} if message.contains("closed"))
     );
     assert_eq!(f.count.load(Ordering::SeqCst), 0);
     assert!(matches!(

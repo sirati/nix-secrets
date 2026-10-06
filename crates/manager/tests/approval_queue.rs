@@ -102,6 +102,7 @@ fn another_frontend_winning_the_first_claim_does_not_hide_the_second_candidate()
             &mut server,
             &Response::Approvals {
                 requests: vec![first.clone(), second.clone()],
+                procedures: Default::default(),
             },
         )
         .unwrap();

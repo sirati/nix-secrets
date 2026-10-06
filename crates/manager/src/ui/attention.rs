@@ -23,6 +23,11 @@
 //!
 //! When 30 seconds are left, BEL sounds once more. Terminals that support
 //! none of this ignore the sequences.
+//!
+//! A procedure that starts or asks again while another dialog is open stays
+//! in the task bar and flashes there. Its request gets the bell and the
+//! desktop notifications once, without the window title, which belongs to
+//! the dialog on screen; restoring it later only sets the title.
 use crate::operator_channel::SecretPrompt;
 use std::time::Duration;
 
@@ -44,6 +49,27 @@ pub(super) struct Attention {
     /// The request that was announced, while it is open.
     announced: Option<String>,
     reminded: bool,
+    /// Requests announced while their procedure flashed in the task bar.
+    background: std::collections::BTreeSet<String>,
+    /// Of those, the ones whose countdown reminder rang.
+    background_reminded: std::collections::BTreeSet<String>,
+}
+
+/// The request a procedure waits on, as the attention key of its dialog.
+fn waiting_request(model: &crate::model::Model, procedure: &crate::model::Procedure) -> Option<String> {
+    if let Some(prompt) = procedure.prompts.front() {
+        return Some(format!("secret:{}", prompt.id));
+    }
+    if let crate::model::Mode::Approval(request) = &model.mode {
+        if crate::model::approval_procedure(request) == procedure.id {
+            return Some(format!("deployment:{}", request.id));
+        }
+    }
+    model
+        .pending_approvals
+        .iter()
+        .find(|request| crate::model::approval_procedure(request) == procedure.id)
+        .map(|request| format!("deployment:{}", request.id))
 }
 
 impl Attention {
@@ -52,12 +78,66 @@ impl Attention {
         model: Option<&crate::model::Model>,
         tmux: bool,
     ) -> Option<Vec<u8>> {
-        let prompt = model.and_then(|model| model.secret_prompt.as_ref());
-        let remaining = prompt.map_or(Duration::MAX, |prompt| {
-            prompt
-                .deadline
-                .saturating_duration_since(std::time::Instant::now())
-        });
+        let background = model.map(|model| self.background(model, tmux));
+        let foreground = self.foreground(model, tmux);
+        match (foreground, background.flatten()) {
+            (None, None) => None,
+            (Some(bytes), None) | (None, Some(bytes)) => Some(bytes),
+            (Some(mut first), Some(second)) => {
+                first.extend(second);
+                Some(first)
+            }
+        }
+    }
+
+    /// Bell and notifications for procedures that flash in the task bar.
+    fn background(&mut self, model: &crate::model::Model, tmux: bool) -> Option<Vec<u8>> {
+        let mut output = String::new();
+        let mut current = std::collections::BTreeSet::new();
+        for procedure in model.procedures.iter().filter(|procedure| procedure.flashing) {
+            let Some(key) = waiting_request(model, procedure) else {
+                continue;
+            };
+            current.insert(key.clone());
+            if self.background.insert(key.clone()) {
+                output.push_str(&announce_quietly(
+                    &format!("{} waits in the task bar", procedure.heading()),
+                    tmux,
+                ));
+            }
+            let remaining = procedure
+                .prompts
+                .front()
+                .and_then(|prompt| prompt.deadline)
+                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+            if remaining.is_some_and(|left| left <= REMINDER_AT)
+                && self.background_reminded.insert(key)
+            {
+                output.push_str(BEL);
+            }
+        }
+        // Restored requests stay known, so their dialog does not ring again.
+        let open = model
+            .procedures
+            .iter()
+            .filter_map(|procedure| waiting_request(model, procedure))
+            .collect::<std::collections::BTreeSet<_>>();
+        self.background.retain(|key| open.contains(key));
+        self.background_reminded.retain(|key| current.contains(key));
+        (!output.is_empty()).then(|| output.into_bytes())
+    }
+
+    fn foreground(
+        &mut self,
+        model: Option<&crate::model::Model>,
+        tmux: bool,
+    ) -> Option<Vec<u8>> {
+        let prompt = model.and_then(|model| model.shown_prompt());
+        let remaining = prompt
+            .and_then(|prompt| prompt.deadline)
+            .map_or(Duration::MAX, |deadline| {
+                deadline.saturating_duration_since(std::time::Instant::now())
+            });
         if prompt.is_some() {
             self.update(prompt, remaining, tmux)
         } else if let Some(crate::model::Model {
@@ -138,7 +218,12 @@ impl Attention {
             if self.announced.is_none() {
                 self.announced = Some(id.to_owned());
                 self.reminded = remaining <= REMINDER_AT;
-                output.push_str(&announce_with_title(summary, title, tmux));
+                if self.background.contains(id) {
+                    // Already rung for while it flashed in the task bar.
+                    output.push_str(&title_only(title));
+                } else {
+                    output.push_str(&announce_with_title(summary, title, tmux));
+                }
             } else if !self.reminded && remaining <= REMINDER_AT {
                 self.reminded = true;
                 output.push_str(BEL);
@@ -169,6 +254,22 @@ fn announce_with_title(summary: &str, title: &str, tmux: bool) -> String {
         passthrough(&format!("\x1b]777;notify;nix-secrets;{summary}\x07"), tmux),
         passthrough(&format!("\x1b]9;nix-secrets: {summary}\x07"), tmux),
     )
+}
+
+/// The bell and the notifications, without touching the window title.
+fn announce_quietly(summary: &str, tmux: bool) -> String {
+    let summary: String = summary.chars().filter(|c| !c.is_control()).collect();
+    format!(
+        "{BEL}{}{}",
+        passthrough(&format!("\x1b]777;notify;nix-secrets;{summary}\x07"), tmux),
+        passthrough(&format!("\x1b]9;nix-secrets: {summary}\x07"), tmux),
+    )
+}
+
+/// The warning title alone.
+fn title_only(title: &str) -> String {
+    let title: String = title.chars().filter(|c| !c.is_control()).collect();
+    format!("{PUSH_TITLE}\x1b]2;{title}\x07")
 }
 
 /// Takes the warning title away again.
@@ -213,7 +314,8 @@ mod tests {
                 cwd: None,
             },
             parent: None,
-            deadline: Instant::now(),
+            deadline: Some(Instant::now()),
+            procedure: None,
         }
     }
 

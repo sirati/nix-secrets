@@ -20,8 +20,9 @@ use feed::Feed;
 mod protocol;
 pub use protocol::{Request, Response};
 mod commit;
+mod procedures;
 mod secrets;
-pub use secrets::NO_OPERATOR;
+pub use secrets::{MAX_PENDING, NO_OPERATOR};
 
 pub struct Backend {
     socket_path: PathBuf,
@@ -70,6 +71,16 @@ impl Backend {
     pub fn with_schema_loader<F>(mut self, loader: F) -> Self
     where F: Fn() -> Result<Schema, String> + Send + Sync + 'static {
         self.schema_loader = Some(Arc::new(loader));
+        self
+    }
+
+    /// Changes how long a secret request that counts down waits for the
+    /// operator (610 s by default) and how often idle requesters and TUIs get
+    /// a heartbeat (30 s). Tests shorten both.
+    pub fn with_operator_timing(mut self, deadline: Duration, heartbeat: Duration) -> Self {
+        let operators = Arc::get_mut(&mut self.operators)
+            .expect("operators are shared only once the backend serves");
+        *operators = std::mem::take(operators).with_timing(deadline, heartbeat);
         self
     }
 
@@ -166,35 +177,41 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
             }
             // The connection becomes the TUI's operator channel for good.
             Request::AttachOperator => return secrets::attach(&mut stream, operators, session, peer_pid),
+            Request::BeginProcedure { title, steps } => {
+                procedures::serve(&mut stream, operators, peer_pid, title, steps)?;
+                return Ok(());
+            }
             Request::RequestSecrets {
                 identifiers,
                 reason,
+                procedure,
+                progress,
             } => {
                 let fresh = match schema_loader.map(|load| load()).transpose() {
                     Ok(fresh) => fresh,
                     Err(message) => { write_json(&mut stream, &Response::Error { message: format!("reloading signing policy failed: {message}") })?; continue; }
                 };
-                secrets::request(&mut stream, operators, peer_pid, identifiers, reason, fresh.as_ref().unwrap_or(schema))?;
+                secrets::request(&mut stream, operators, peer_pid, identifiers, reason, procedure, progress, fresh.as_ref().unwrap_or(schema))?;
                 continue;
             }
-            Request::RequestSshSignature { request, reason } => {
-                secrets::request_signature(&mut stream, operators, peer_pid, request, reason)?;
+            Request::RequestSshSignature { request, reason, procedure, progress } => {
+                secrets::request_signature(&mut stream, operators, peer_pid, request, reason, procedure, progress)?;
                 continue;
             }
-            Request::RequestArtifactSignatures { request, reason } => {
+            Request::RequestArtifactSignatures { request, reason, procedure, progress } => {
                 let fresh = match schema_loader.map(|load| load()).transpose() {
                     Ok(fresh) => fresh,
                     Err(message) => { write_json(&mut stream, &Response::Error { message: format!("reloading signing policy failed: {message}") })?; continue; }
                 };
-                secrets::request_artifacts(&mut stream, operators, peer_pid, request, reason, fresh.as_ref().unwrap_or(schema))?;
+                secrets::request_artifacts(&mut stream, operators, peer_pid, request, reason, procedure, progress, fresh.as_ref().unwrap_or(schema))?;
                 continue;
             }
-            Request::RequestClosureSignatures { request, reason } => {
+            Request::RequestClosureSignatures { request, reason, procedure, progress } => {
                 let fresh = match schema_loader.map(|load| load()).transpose() {
                     Ok(fresh) => fresh,
                     Err(message) => { write_json(&mut stream, &Response::Error { message: format!("reloading signing policy failed: {message}") })?; continue; }
                 };
-                secrets::request_closure(&mut stream, operators, peer_pid, request, reason, fresh.as_ref().unwrap_or(schema), store)?;
+                secrets::request_closure(&mut stream, operators, peer_pid, request, reason, procedure, progress, fresh.as_ref().unwrap_or(schema), store)?;
                 continue;
             }
             request => request,
@@ -331,9 +348,10 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                     .map(|()| Response::FrontendRegistered)
             }),
             Request::PollApprovals => with_broker(broker, |state| {
-                state
-                    .pending(session)
-                    .map(|requests| Response::Approvals { requests })
+                state.pending(session).map(|requests| Response::Approvals {
+                    procedures: state.procedures(&requests),
+                    requests,
+                })
             }),
             Request::SubmitApproval { request } => with_broker(broker, |state| {
                 state
@@ -396,14 +414,25 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
             Request::RequestDeployment {
                 target,
                 allow_partial,
-            } => deployment::request(schema, broker, target, allow_partial),
+                procedure,
+            } => deployment::request(schema, broker, target, allow_partial, |label| {
+                procedure
+                    .as_deref()
+                    .map(|token| operators.advance(token, peer_pid, label, true))
+                    .transpose()
+            }),
+            Request::EndProcedure => Err("no procedure is registered on this connection".into()),
+            Request::CancelCountdown { .. } => {
+                Err("countdowns are cancelled only on an attached operator connection".into())
+            }
             Request::SubscribeChanges
             | Request::Commit { .. }
             | Request::AttachOperator
             | Request::RequestSecrets { .. }
             | Request::RequestArtifactSignatures { .. }
             | Request::RequestClosureSignatures { .. }
-            | Request::RequestSshSignature { .. } => unreachable!("handled above"),
+            | Request::RequestSshSignature { .. }
+            | Request::BeginProcedure { .. } => unreachable!("handled above"),
         }
         .unwrap_or_else(|error| Response::Error {
             message: error.to_string(),

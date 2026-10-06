@@ -31,6 +31,9 @@ struct ActiveApproval {
     last_error: Option<String>,
     /// Rows the operator unchecked in the dialog; never sent.
     unchecked: BTreeSet<String>,
+    /// The procedure step the backend assigned, or the one of the
+    /// deployment whose follow-up this is.
+    procedure: Option<nix_secrets_core::procedure::ProcedureStep>,
 }
 
 pub struct Controller {
@@ -57,6 +60,10 @@ pub struct Controller {
     /// Runs operator keypair generators; tests replace it.
     keypair_runner: KeypairRunner,
     phase: Option<std::sync::Arc<dyn Fn(&'static str) + Send + Sync>>,
+    /// Public-key follow-ups this TUI submitted, with the procedure of the
+    /// deployment that caused them. Kept here, never sent to the backend,
+    /// which accepts procedure membership only from requesters it checked.
+    followup_procedures: std::collections::BTreeMap<String, nix_secrets_core::procedure::ProcedureStep>,
 }
 
 pub type KeypairRunner =
@@ -115,6 +122,23 @@ impl Controller {
         self.active.as_ref().map(|active| active.request.id.clone())
     }
 
+    /// Marks a dialog of the claimed approval with its procedure step.
+    pub(crate) fn with_procedure(
+        &self,
+        result: Result<Option<UiApproval>, String>,
+    ) -> Result<Option<UiApproval>, String> {
+        result.map(|approval| {
+            approval.map(|mut approval| {
+                approval.procedure = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.request.id == approval.id)
+                    .and_then(|active| active.procedure.clone());
+                approval
+            })
+        })
+    }
+
     pub fn take_generated(&mut self) -> Vec<String> {
         std::mem::take(&mut self.last_generated)
     }
@@ -158,6 +182,7 @@ impl Controller {
             last_summary: None,
             keypair_runner: crate::keypair::generate,
             phase: None,
+            followup_procedures: Default::default(),
         })
     }
 
@@ -270,6 +295,7 @@ impl Controller {
         }
         let plan = unset::plan_unset(&self.schema, &request.secrets, set)?;
         Ok(UiApproval {
+            procedure: None,
             skippable: plan.skippable.clone(),
             missing_kinds: plan
                 .reasons

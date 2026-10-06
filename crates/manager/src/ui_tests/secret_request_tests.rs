@@ -53,7 +53,8 @@ fn prompt(id: &str, deadline: Instant) -> SecretPrompt {
         identity: "1Password on this machine".into(),
         requester: process(42, &["nix-secrets", "with-secrets"]),
         parent: Some(process(41, &["nmbl-install", "--target", "dns-vps"])),
-        deadline,
+        deadline: Some(deadline),
+        procedure: None,
     }
 }
 
@@ -70,7 +71,7 @@ fn drive_with(model: &mut Model, writer: &mut Requests, events: Vec<UiEvent>) {
 }
 
 #[test]
-fn a_request_opens_over_an_open_dialog_and_leaves_it_intact() {
+fn a_request_never_takes_the_screen_from_an_open_dialog() {
     let mut model = model(true);
     let mut writer = Requests::default();
     // An entry dialog with typed text is open.
@@ -80,20 +81,41 @@ fn a_request_opens_over_an_open_dialog_and_leaves_it_intact() {
         .prompts
         .push(prompt("r1", Instant::now() + Duration::from_secs(120)));
     crate::ui::secret_request_tick_for_tests(&mut model, &mut writer);
-    assert!(model.secret_prompt.is_some());
-    // Typing, Enter-to-save and paste never reach the entry dialog below.
+    // It waits in the task bar, flashing, and the entry keeps the keys.
+    assert!(model.shown_prompt().is_none());
+    assert!(model.procedures[0].minimised && model.procedures[0].flashing);
+    reduce(&mut model, UiEvent::Character('y'), &mut writer);
+    assert!(writer.answers.is_empty());
+    match &model.mode {
+        Mode::Edit { value, .. } => assert_eq!(value.as_slice(), b"xy"),
+        other => panic!("the entry dialog was lost: {other:?}"),
+    }
+    // Restoring is refused while the entry is open, so typed text is never
+    // lost to a dialog switch.
+    reduce(
+        &mut model,
+        UiEvent::Click(MouseTarget::Procedure(0)),
+        &mut writer,
+    );
+    assert!(model.shown_prompt().is_none());
+    assert!(model
+        .notifications
+        .iter()
+        .any(|notice| notice.text.contains("close the open dialog")));
+    reduce(&mut model, UiEvent::Escape, &mut writer);
+    reduce(&mut model, UiEvent::Character('M'), &mut writer);
+    assert!(model.shown_prompt().is_some());
+    assert!(!model.procedures[0].flashing, "restoring stops the flashing");
+    // Typing and paste never reach anything below; y alone never answers.
     reduce(&mut model, UiEvent::Character('y'), &mut writer);
     reduce(&mut model, UiEvent::Paste(b"pasted".to_vec()), &mut writer);
-    assert!(model.secret_prompt.is_some(), "y alone never answers");
+    assert!(model.shown_prompt().is_some(), "y alone never answers");
     assert!(writer.answers.is_empty());
     reduce(&mut model, UiEvent::Enter, &mut writer);
     assert_eq!(writer.answers, [("r1".to_owned(), false)], "Enter denies");
     assert_eq!(writer.writes, 0);
-    assert!(model.secret_prompt.is_none());
-    match &model.mode {
-        Mode::Edit { value, .. } => assert_eq!(value.as_slice(), b"x"),
-        other => panic!("the entry dialog was lost: {other:?}"),
-    }
+    assert!(model.shown_prompt().is_none());
+    assert!(model.procedures.is_empty(), "an answered request leaves the task bar");
 }
 
 #[test]
@@ -134,11 +156,12 @@ fn the_request_expires_and_the_outcome_names_the_requester() {
     let mut writer = Requests::default();
     writer.prompts.push(prompt("r", Instant::now()));
     drive_with(&mut model, &mut writer, vec![UiEvent::Tick]);
-    assert!(model.secret_prompt.is_none(), "expired requests close");
+    assert!(model.shown_prompt().is_none(), "expired requests close");
     assert!(writer.answers.is_empty(), "the channel denies on its own");
     crate::ui::apply_completion_for_tests(
         &mut model,
         crate::ui::Completion::SecretRequestFinished {
+            id: "r".into(),
             requester: "nmbl-install (PID 41)".into(),
             result: Ok(1),
         },
@@ -151,6 +174,7 @@ fn the_request_expires_and_the_outcome_names_the_requester() {
     crate::ui::apply_completion_for_tests(
         &mut model,
         crate::ui::Completion::SecretRequestFinished {
+            id: "r".into(),
             requester: "nmbl-install (PID 41)".into(),
             result: Err("the operator denied the secret request".into()),
         },
@@ -238,7 +262,7 @@ fn render(model: &Model, width: u16, height: u16) -> String {
 #[test]
 fn the_modal_wraps_complete_descriptions_commands_and_unvalidated_reasons() {
     let mut model = model(true);
-    model.secret_prompt = Some(detailed_prompt());
+    model.offer_prompt(detailed_prompt());
     for (width, height, aspect) in [
         (200, 60, true),
         (120, 40, true),
@@ -282,7 +306,7 @@ fn the_modal_wraps_complete_descriptions_commands_and_unvalidated_reasons() {
             assert!(!screen.contains(hidden), "{hidden:?} shown at {size}");
         }
         let body = crate::ui::secret_request::body(
-            model.secret_prompt.as_ref().unwrap(),
+            model.shown_prompt().unwrap(),
             false,
             width as usize,
         );
@@ -314,7 +338,7 @@ fn d_shows_the_details_and_hides_them_again() {
     writer.prompts.push(detailed_prompt());
     crate::ui::secret_request_tick_for_tests(&mut model, &mut writer);
     reduce(&mut model, UiEvent::Character('d'), &mut writer);
-    assert!(model.secret_prompt.is_some(), "d never answers");
+    assert!(model.shown_prompt().is_some(), "d never answers");
     assert!(writer.answers.is_empty());
     for (width, height) in [(200, 60), (120, 40), (80, 24), (60, 20)] {
         let screen = render(&model, width, height);

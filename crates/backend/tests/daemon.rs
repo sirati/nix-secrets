@@ -158,7 +158,7 @@ fn concurrent_launches_share_the_live_approval_broker() {
     ));
     assert!(matches!(
         call(&mut frontend_two, Request::PollApprovals),
-        Response::Approvals { requests } if requests.len() == 1 && requests[0].id == "same-broker"
+        Response::Approvals { requests, .. } if requests.len() == 1 && requests[0].id == "same-broker"
     ));
 
     first.kill().unwrap();
@@ -349,6 +349,8 @@ fn schema_reload_captures_nix_stderr_without_leaking_to_frontend_terminal() {
         Request::RequestSecrets {
             identifiers: vec!["host.services.mail.password".into()],
             reason: Some("reload schema test".into()),
+            procedure: None,
+            progress: false,
         },
     );
     assert!(
@@ -361,6 +363,8 @@ fn schema_reload_captures_nix_stderr_without_leaking_to_frontend_terminal() {
         Request::RequestSecrets {
             identifiers: vec!["host.services.mail.password".into()],
             reason: Some("failed schema reload test".into()),
+            procedure: None,
+            progress: false,
         },
     );
     assert!(

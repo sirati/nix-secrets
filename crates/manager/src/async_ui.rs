@@ -1,7 +1,7 @@
 use crate::controller::Controller;
 use crate::model::ApprovalRequest;
 use crate::tree::Row;
-use crate::ui::{Action, Completion, GenerateKind, SecretWriter, OPERATION_QUEUED};
+use crate::ui::{Action, Completion, GenerateKind, ProcedureEvent, SecretWriter, OPERATION_QUEUED};
 use nix_secrets_core::{ProfileSnapshot, ViewProfile};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -82,10 +82,12 @@ pub struct AsyncWriter {
     socket: Option<PathBuf>,
     /// Secret requests from the backend host; see `operator_channel`.
     channel: Option<Receiver<crate::operator_channel::ChannelEvent>>,
-    decisions: Option<Sender<crate::operator_channel::Decision>>,
+    decisions: Option<Sender<crate::operator_channel::OperatorInput>>,
     secret_prompts: Vec<crate::operator_channel::SecretPrompt>,
-    /// Shown while an approved secret request decrypts.
-    secret_activity: Option<crate::model::Activity>,
+    /// Shown while approved secret requests decrypt or sign, by request id.
+    secret_activity: std::collections::BTreeMap<String, crate::model::Activity>,
+    /// Procedure news from the operator channel, for the UI.
+    procedure_events: Vec<ProcedureEvent>,
 }
 
 impl AsyncWriter {
@@ -199,7 +201,8 @@ impl AsyncWriter {
             channel: Some(channel),
             decisions: Some(decisions),
             secret_prompts: vec![],
-            secret_activity: None,
+            secret_activity: Default::default(),
+            procedure_events: vec![],
         }
     }
 
@@ -210,18 +213,28 @@ impl AsyncWriter {
                 match event {
                     ChannelEvent::Attached => {}
                     ChannelEvent::Prompt(prompt) => self.secret_prompts.push(prompt),
-                    ChannelEvent::Finished { requester, result } => {
-                        self.secret_activity = None;
+                    ChannelEvent::Withdrawn(id) => {
+                        self.secret_prompts.retain(|prompt| prompt.id != id);
+                        self.procedure_events.push(ProcedureEvent::Withdrawn(id));
+                    }
+                    ChannelEvent::Procedure(step) => {
+                        self.procedure_events.push(ProcedureEvent::Step(step))
+                    }
+                    ChannelEvent::ProcedureEnded(id) => {
+                        self.procedure_events.push(ProcedureEvent::Ended(id))
+                    }
+                    ChannelEvent::Finished { id, requester, result } => {
+                        self.secret_activity.remove(&id);
                         self.completions
-                            .push(Completion::SecretRequestFinished { requester, result })
+                            .push(Completion::SecretRequestFinished { id, requester, result })
                     }
-                    ChannelEvent::SignatureFinished { requester, result } => {
-                        self.secret_activity = None;
-                        self.completions.push(Completion::SshSignatureFinished { requester, result });
+                    ChannelEvent::SignatureFinished { id, requester, result } => {
+                        self.secret_activity.remove(&id);
+                        self.completions.push(Completion::SshSignatureFinished { id, requester, result });
                     }
-                    ChannelEvent::ArtifactSignatureFinished { requester, result } => {
-                        self.secret_activity = None;
-                        self.completions.push(Completion::ArtifactSignatureFinished { requester, result });
+                    ChannelEvent::ArtifactSignatureFinished { id, requester, result } => {
+                        self.secret_activity.remove(&id);
+                        self.completions.push(Completion::ArtifactSignatureFinished { id, requester, result });
                     }
                     ChannelEvent::Lost(error) => self.completions.push(Completion::Failed(
                         format!("Secret requests from the backend host can no longer reach this TUI: {error}"),
@@ -250,12 +263,12 @@ impl AsyncWriter {
                     }
                 }
                 Event::Progress(done, total, waiting, secret) => {
-                    let target = if secret {
-                        &mut self.secret_activity
+                    let targets: Vec<&mut crate::model::Activity> = if secret {
+                        self.secret_activity.values_mut().collect()
                     } else {
-                        &mut self.activity
+                        self.activity.iter_mut().collect()
                     };
-                    if let Some(activity) = target {
+                    for activity in targets {
                         activity.label = format!(
                             "Decrypting {done}/{total}. {}",
                             if waiting {
@@ -529,6 +542,19 @@ impl SecretWriter for AsyncWriter {
         result.unwrap_or_else(|reason| CommitState::Unknown { reason })
     }
 
+    fn poll_procedure_event(&mut self) -> Option<ProcedureEvent> {
+        self.pump();
+        (!self.procedure_events.is_empty()).then(|| self.procedure_events.remove(0))
+    }
+
+    fn cancel_countdown(&mut self, id: &str) -> Result<(), String> {
+        self.decisions
+            .as_ref()
+            .ok_or("secret requests are unavailable")?
+            .send(crate::operator_channel::OperatorInput::CancelCountdown(id.to_owned()))
+            .map_err(|_| "the secret request channel stopped".to_string())
+    }
+
     fn poll_secret_prompt(&mut self) -> Option<crate::operator_channel::SecretPrompt> {
         self.pump();
         (!self.secret_prompts.is_empty()).then(|| self.secret_prompts.remove(0))
@@ -538,13 +564,16 @@ impl SecretWriter for AsyncWriter {
         self.decisions
             .as_ref()
             .ok_or("secret requests are unavailable")?
-            .send(crate::operator_channel::Decision {
-                id: id.to_owned(),
-                approved,
-            })
+            .send(
+                crate::operator_channel::Decision {
+                    id: id.to_owned(),
+                    approved,
+                }
+                .into(),
+            )
             .map_err(|_| "the secret request channel stopped".to_string())?;
         if approved {
-            self.secret_activity = Some(activity(
+            self.secret_activity.insert(id.to_owned(), activity(
                 if count == 0 {
                     "Signing on this client; the private key stays here".into()
                 } else {
@@ -564,7 +593,7 @@ impl SecretWriter for AsyncWriter {
         let mut activity = self
             .activity
             .clone()
-            .or_else(|| self.secret_activity.clone())
+            .or_else(|| self.secret_activity.values().next().cloned())
             .or_else(|| self.pending.iter().find_map(Clone::clone));
         if let Some(value) = &mut activity {
             if self.pending.len() > 1 {
@@ -584,7 +613,7 @@ fn spawn_operator_channel(
     progress: Sender<Event>,
 ) -> (
     Receiver<crate::operator_channel::ChannelEvent>,
-    Sender<crate::operator_channel::Decision>,
+    Sender<crate::operator_channel::OperatorInput>,
 ) {
     use crate::operator_channel::{run, ChannelEvent};
     let (schema, mut provider) = controller.schema_and_provider();

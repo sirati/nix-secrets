@@ -197,11 +197,13 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                     });
                 }
                 buttons.push(letter("n Reject changes", 'n'));
+                buttons.push(letter("m Minimise", 'm'));
                 return buttons;
             }
             if request.host_key.is_some() {
                 buttons.push(letter("y Trust and connect", 'y'));
                 buttons.push(letter("n Cancel", 'n'));
+                buttons.push(letter("m Minimise", 'm'));
                 return buttons;
             }
             if request.deployable() {
@@ -218,6 +220,7 @@ pub(super) fn hotkeys(model: &Model, narrow: bool) -> Vec<Button> {
                 },
                 'd',
             ));
+            buttons.push(letter("m Minimise", 'm'));
             buttons
         }
         Mode::DeployHost { .. } => vec![

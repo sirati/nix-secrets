@@ -303,9 +303,17 @@ impl Controller {
             if identifiers.is_empty() {
                 continue;
             }
+            let id = format!("pubkey-{}", random_token()?);
+            // The follow-up joins the procedure of the deployment that caused it.
+            if let Some(step) = self.active.as_ref().and_then(|active| active.procedure.clone()) {
+                if self.followup_procedures.len() >= 256 {
+                    self.followup_procedures.clear();
+                }
+                self.followup_procedures.insert(id.clone(), step);
+            }
             self.client
                 .submit_approval(ApprovalRequest {
-                    id: format!("pubkey-{}", random_token()?),
+                    id,
                     target,
                     secrets: identifiers.into_iter().collect(),
                     allow_partial: false,

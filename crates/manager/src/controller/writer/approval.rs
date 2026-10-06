@@ -26,13 +26,14 @@ impl Controller {
         if self.background.is_some() && !std::mem::take(&mut self.approvals_ready) {
             return Ok(None);
         }
-        let Some((request, lease_id)) = self
+        let Some((request, lease_id, procedure)) = self
             .client
-            .poll_and_claim()
+            .poll_and_claim_step()
             .map_err(|error| error.to_string())?
         else {
             return Ok(None);
         };
+        let procedure = procedure.or_else(|| self.followup_procedures.remove(&request.id));
         let set = self.plan_set(&request.secrets);
         let set = self.finish_claimed_setup(&request, lease_id, set)?;
         let mut details = match self.approval_details(&request, None, &set) {
@@ -120,6 +121,7 @@ impl Controller {
                 last_error: None,
                 unchecked: BTreeSet::new(),
                 renewed_at: Instant::now(),
+                procedure,
             });
             return Ok(Some(details));
         }
@@ -146,6 +148,7 @@ impl Controller {
             last_error: None,
             unchecked: BTreeSet::new(),
             renewed_at: Instant::now(),
+            procedure,
         });
         if known {
             if let Err(error) = self.prepare_active() {

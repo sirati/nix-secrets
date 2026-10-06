@@ -44,6 +44,7 @@ fn secret_request(id: &str) -> SecretRequest {
         closure_signature: None,
         requester: ProcessInfo::read(std::process::id()),
         parent: None,
+        procedure: None,
     }
 }
 fn signatures(manifest: &Manifest) -> Signatures {
@@ -65,81 +66,268 @@ fn signatures(manifest: &Manifest) -> Signatures {
 fn schema() -> crate::Schema {
     serde_json::from_value(serde_json::json!({"ns1": {"metadata": {"socketPath":"/run/test", "deployment":{"host":"ns1", "destination":"secrets@ns1", "port":22}}, "services":{"nmbl":{"generation-key":{"kind":"operator", "signingOnly":true,"recipientPublicKeys":[],"recipientIds":[]}}}}})).unwrap()
 }
-#[test]
-fn unix_transport_accepts_bound_signature_and_explicit_denial() {
-    for denied in [false, true] {
-        let (mut backend, mut tui) = UnixStream::pair().unwrap();
-        let req = secret_request("unique-request");
-        let handle =
-            thread::spawn(move || ask_with_timeout(&mut backend, &req, Duration::from_secs(2)));
-        let Some(Response::SecretRequested { request }) = read_json(&mut tui).unwrap() else {
-            panic!("expected request");
-        };
-        let answer = if denied {
-            SecretAnswer::Denied {
-                reason: "operator refused".into(),
-            }
-        } else {
-            SecretAnswer::ArtifactsSigned {
-                signatures: signatures(&request.artifact_signature.unwrap().manifest),
-            }
-        };
-        write_json(
-            &mut tui,
-            &Request::AnswerSecretRequest {
-                request_id: request.id,
-                answer,
-            },
-        )
-        .unwrap();
-        match handle.join().unwrap().unwrap() {
-            SecretAnswer::Denied { reason } if denied => assert_eq!(reason, "operator refused"),
-            SecretAnswer::ArtifactsSigned { signatures: reply } if !denied => {
-                reply.validate(&signing_request().manifest).unwrap()
-            }
-            _ => panic!("unasked answer"),
+fn next_job(jobs: &mpsc::Receiver<Inbox>) -> Job {
+    loop {
+        match jobs.recv_timeout(Duration::from_secs(2)).unwrap() {
+            Inbox::Job(job) => return job,
+            Inbox::Step(_) | Inbox::Ended(_) => continue,
+            _ => panic!("expected a job"),
         }
     }
 }
+
+/// The next frame the TUI end receives, past heartbeats.
+fn next_frame(tui: &mut UnixStream) -> Response {
+    loop {
+        match read_json::<Response>(tui).unwrap().expect("the backend hung up") {
+            Response::Heartbeat => continue,
+            frame => return frame,
+        }
+    }
+}
+
+fn requested(tui: &mut UnixStream) -> SecretRequest {
+    match next_frame(tui) {
+        Response::SecretRequested { request } => request,
+        other => panic!("expected a request, got {other:?}"),
+    }
+}
+
+fn answer(tui: &mut UnixStream, request_id: &str, reason: &str) {
+    write_json(
+        tui,
+        &Request::AnswerSecretRequest {
+            request_id: request_id.into(),
+            answer: SecretAnswer::Denied {
+                reason: reason.into(),
+            },
+        },
+    )
+    .unwrap();
+}
+
+/// Asks for one value as this process, the way `with-secrets` does.
+fn ask<'a>(
+    operators: &'a Operators,
+    requester: Requester<'a>,
+) -> Result<SecretAnswer, String> {
+    request_operator(
+        operators,
+        std::process::id(),
+        vec!["ns1.services.app.token".into()],
+        None,
+        None,
+        None,
+        None,
+        requester,
+    )
+}
+
+fn denial(result: Result<SecretAnswer, String>) -> String {
+    match result {
+        Ok(SecretAnswer::Denied { reason }) => reason,
+        other => panic!("expected the operator's denial, got {other:?}"),
+    }
+}
+
 #[test]
-fn unix_transport_rejects_wrong_id_replay_disconnect_and_timeout() {
-    for mode in ["wrong-id", "replay", "disconnect", "timeout"] {
-        let (mut backend, mut tui) = UnixStream::pair().unwrap();
-        let req = secret_request("current-request");
-        let handle =
-            thread::spawn(move || ask_with_timeout(&mut backend, &req, Duration::from_millis(60)));
-        let _: Option<Response> = read_json(&mut tui).unwrap();
-        if mode == "wrong-id" || mode == "replay" {
+fn one_channel_carries_several_requests_and_routes_each_answer_by_id_once() {
+    let operators = Operators::default();
+    let (mut backend, tui) = UnixStream::pair().unwrap();
+    tui.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    thread::scope(|scope| {
+        // Dropped while a failing test unwinds, so the attached channel ends.
+        let mut tui = tui;
+        let attached = scope.spawn(|| attach(&mut backend, &operators, 1, std::process::id()));
+        assert!(matches!(next_frame(&mut tui), Response::OperatorAttached));
+        let first = scope.spawn(|| ask(&operators, Requester::default()));
+        let first_request = requested(&mut tui);
+        // A second request waits at the same time instead of being refused.
+        let second = scope.spawn(|| ask(&operators, Requester::default()));
+        let second_request = requested(&mut tui);
+        assert_ne!(first_request.id, second_request.id);
+        assert_eq!(operators.pending_count(), 2);
+        // Made-up ids reach nobody and do not break the channel.
+        answer(&mut tui, "secret-made-up", "forged");
+        answer(&mut tui, &second_request.id, "second");
+        assert_eq!(denial(second.join().unwrap()), "second");
+        // A replayed answer to the answered request reaches nobody either.
+        answer(&mut tui, &second_request.id, "replayed");
+        answer(&mut tui, &first_request.id, "first");
+        assert_eq!(denial(first.join().unwrap()), "first");
+        assert_eq!(operators.pending_count(), 0);
+        // A disconnected TUI fails what still waits.
+        let third = scope.spawn(|| ask(&operators, Requester::default()));
+        requested(&mut tui);
+        tui.shutdown(std::net::Shutdown::Both).unwrap();
+        assert_eq!(
+            third.join().unwrap().unwrap_err(),
+            "the nix-secrets TUI disconnected"
+        );
+        attached.join().unwrap().unwrap();
+        assert!(operators.attached.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn waiting_requests_are_bounded() {
+    let operators = Operators::default();
+    let (sender, jobs) = mpsc::channel();
+    operators.attached.lock().unwrap().push((1, sender));
+    thread::scope(|scope| {
+        let waiting = (0..MAX_PENDING)
+            .map(|_| scope.spawn(|| ask(&operators, Requester::default())))
+            .collect::<Vec<_>>();
+        let jobs = (0..MAX_PENDING).map(|_| next_job(&jobs)).collect::<Vec<_>>();
+        let refused = ask(&operators, Requester::default()).unwrap_err();
+        assert!(refused.contains("already waiting"), "{refused}");
+        drop(jobs);
+        for handle in waiting {
+            assert!(handle.join().unwrap().is_err());
+        }
+        assert_eq!(operators.pending_count(), 0);
+    });
+}
+
+#[test]
+fn a_cancelled_countdown_reaches_the_requester_and_lifts_the_backend_deadline() {
+    let deadline = Duration::from_millis(400);
+    for cancel in [false, true] {
+        let operators =
+            Operators::default().with_timing(deadline, Duration::from_millis(100));
+        let (mut backend, tui) = UnixStream::pair().unwrap();
+        tui.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let (requester, client) = UnixStream::pair().unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        thread::scope(|scope| {
+        // Dropped while a failing test unwinds, so the attached channel ends.
+        let mut tui = tui;
+        let mut client = client;
+            scope.spawn(|| attach(&mut backend, &operators, 1, std::process::id()));
+            assert!(matches!(next_frame(&mut tui), Response::OperatorAttached));
+            let waiting =
+                scope.spawn(|| ask(&operators, Requester::new(&requester, None, true)));
+            let request = requested(&mut tui);
+            assert!(request.countdown());
+            if !cancel {
+                // Without a cancellation the backend gives up and tells the
+                // TUI to drop the prompt.
+                let error = waiting.join().unwrap().unwrap_err();
+                assert!(error.contains("did not answer in time"), "{error}");
+                assert!(matches!(
+                    next_frame(&mut tui),
+                    Response::SecretRequestWithdrawn { request_id } if request_id == request.id
+                ));
+                tui.shutdown(std::net::Shutdown::Both).unwrap();
+                return;
+            }
             write_json(
                 &mut tui,
-                &Request::AnswerSecretRequest {
-                    request_id: if mode == "replay" {
-                        "previous-request"
-                    } else {
-                        "unrelated-request"
-                    }
-                    .into(),
-                    answer: SecretAnswer::Denied {
-                        reason: "no".into(),
-                    },
+                &Request::CancelCountdown {
+                    request_id: request.id.clone(),
                 },
             )
             .unwrap();
-        }
-        if mode == "disconnect" {
-            drop(tui);
-        }
-        let error = handle.join().unwrap().unwrap_err();
-        match mode {
-            "wrong-id" | "replay" => assert_eq!(error.kind(), io::ErrorKind::InvalidData),
-            "disconnect" => assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof),
-            _ => assert!(matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            )),
-        }
+            // The requester hears about it, then gets heartbeats while it
+            // waits well past the old deadline.
+            let mut frames = Vec::new();
+            loop {
+                match read_json::<Response>(&mut client).unwrap() {
+                    Some(Response::Heartbeat) => frames.push("heartbeat"),
+                    Some(Response::CountdownCancelled) => break,
+                    other => panic!("unexpected requester frame {other:?}"),
+                }
+            }
+            std::thread::sleep(deadline * 2);
+            assert!(matches!(
+                read_json::<Response>(&mut client).unwrap(),
+                Some(Response::Heartbeat)
+            ));
+            answer(&mut tui, &request.id, "decided late");
+            assert_eq!(denial(waiting.join().unwrap()), "decided late");
+            tui.shutdown(std::net::Shutdown::Both).unwrap();
+        });
     }
 }
+
+#[test]
+fn requesters_without_progress_get_no_interim_frames() {
+    let operators =
+        Operators::default().with_timing(Duration::from_secs(60), Duration::from_millis(50));
+    let (mut backend, tui) = UnixStream::pair().unwrap();
+    tui.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let (requester, client) = UnixStream::pair().unwrap();
+    thread::scope(|scope| {
+        // Dropped while a failing test unwinds, so the attached channel ends.
+        let mut tui = tui;
+        scope.spawn(|| attach(&mut backend, &operators, 1, std::process::id()));
+        assert!(matches!(next_frame(&mut tui), Response::OperatorAttached));
+        let waiting = scope.spawn(|| ask(&operators, Requester::new(&requester, None, false)));
+        let request = requested(&mut tui);
+        write_json(
+            &mut tui,
+            &Request::CancelCountdown {
+                request_id: request.id.clone(),
+            },
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        // An older requester reads exactly one answer frame.
+        assert!(!peer_done(&client), "an interim frame reached a legacy requester");
+        answer(&mut tui, &request.id, "done");
+        assert_eq!(denial(waiting.join().unwrap()), "done");
+        tui.shutdown(std::net::Shutdown::Both).unwrap();
+    });
+}
+
+#[test]
+fn later_steps_of_a_procedure_have_no_deadline() {
+    let deadline = Duration::from_millis(300);
+    let operators = Operators::default().with_timing(deadline, Duration::from_secs(30));
+    let (mut backend, tui) = UnixStream::pair().unwrap();
+    tui.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let (_, token) = operators
+        .procedures
+        .begin(std::process::id(), "Update ns1", Some(3))
+        .unwrap();
+    let (requester, _client) = UnixStream::pair().unwrap();
+    thread::scope(|scope| {
+        // Dropped while a failing test unwinds, so the attached channel ends.
+        let mut tui = tui;
+        scope.spawn(|| attach(&mut backend, &operators, 1, std::process::id()));
+        assert!(matches!(next_frame(&mut tui), Response::OperatorAttached));
+        assert!(matches!(
+            next_frame(&mut tui),
+            Response::ProcedureUpdate { procedure } if procedure.step == 0
+        ));
+        let (requester, token) = (&requester, token.as_str());
+        let operators = &operators;
+        let in_procedure = move || Requester::new(requester, Some(token), true);
+        let first = scope.spawn(move || ask(operators, in_procedure()));
+        assert!(matches!(
+            next_frame(&mut tui),
+            Response::ProcedureUpdate { procedure } if procedure.step == 1
+        ));
+        let request = requested(&mut tui);
+        let step = request.procedure.clone().unwrap();
+        assert_eq!((step.step, step.title.as_str()), (1, "Update ns1"));
+        assert_eq!(step.label, "release 1 secret value");
+        assert!(request.countdown());
+        answer(&mut tui, &request.id, "one");
+        assert_eq!(denial(first.join().unwrap()), "one");
+        let second = scope.spawn(move || ask(operators, in_procedure()));
+        next_frame(&mut tui);
+        let request = requested(&mut tui);
+        assert_eq!(request.procedure.as_ref().unwrap().position(), "step 2/3");
+        assert!(!request.countdown());
+        // Well past the deadline of a first step, it still waits.
+        std::thread::sleep(deadline * 3);
+        answer(&mut tui, &request.id, "two");
+        assert_eq!(denial(second.join().unwrap()), "two");
+        tui.shutdown(std::net::Shutdown::Both).unwrap();
+    });
+}
+
 #[test]
 fn signing_only_key_export_is_rejected_without_operator_request() {
     let (mut backend, mut requester) = UnixStream::pair().unwrap();
@@ -152,6 +340,8 @@ fn signing_only_key_export_is_rejected_without_operator_request() {
         std::process::id(),
         vec!["ns1.services.nmbl.generation-key".into()],
         None,
+        None,
+        false,
         &schema(),
     )
     .unwrap();
@@ -160,7 +350,7 @@ fn signing_only_key_export_is_rejected_without_operator_request() {
     };
     assert!(message.contains("plaintext export is forbidden"));
     assert!(matches!(jobs.try_recv(), Err(mpsc::TryRecvError::Empty)));
-    assert!(!operators.pending.load(Ordering::SeqCst));
+    assert!(operators.pending_count() == 0);
 }
 #[test]
 fn chunks_are_bounded_exact_and_scoped_to_pending_request() {
@@ -229,16 +419,15 @@ fn artifact_registry_cleans_on_answer_operator_loss_and_requester_disconnect() {
                     None,
                     Some(signing_request()),
                     None,
-                    Some(&requester),
+                    Requester { stream: Some(&requester), ..Default::default() },
                 )
             });
-            let job = jobs.recv_timeout(Duration::from_secs(2)).unwrap();
+            let job = next_job(&jobs);
             assert!(read_artifact(&operators, &job.request.id, "generation-image", 0).is_ok());
             let id = job.request.id.clone();
             let held = match mode {
                 "answer" => {
-                    job.reply
-                        .send(Ok(SecretAnswer::ArtifactsSigned {
+                    job.reply.send(Outcome::Answer(Ok(SecretAnswer::ArtifactsSigned {
                             signatures: signatures(
                                 job.request
                                     .artifact_signature
@@ -246,7 +435,7 @@ fn artifact_registry_cleans_on_answer_operator_loss_and_requester_disconnect() {
                                     .map(|r| &r.manifest)
                                     .unwrap(),
                             ),
-                        }))
+                        })))
                         .unwrap();
                     None
                 }
@@ -266,7 +455,7 @@ fn artifact_registry_cleans_on_answer_operator_loss_and_requester_disconnect() {
             }
             drop(held);
             assert!(operators.artifacts.lock().unwrap().is_empty());
-            assert!(!operators.pending.load(Ordering::SeqCst));
+            assert!(operators.pending_count() == 0);
             assert!(read_artifact(&operators, &id, "generation-image", 0).is_err());
         });
     }
@@ -362,10 +551,12 @@ fn artifact_request_returns_only_signatures_and_rejects_plaintext_answers() {
                     std::process::id(),
                     signing_request(),
                     Some("test reason".into()),
+                    None,
+                    false,
                     &schema(),
                 )
             });
-            let job = jobs.recv_timeout(Duration::from_secs(2)).unwrap();
+            let job = next_job(&jobs);
             let answer = match mode {
                 "signatures" => SecretAnswer::ArtifactsSigned {
                     signatures: signatures(&job.request.artifact_signature.unwrap().manifest),
@@ -378,7 +569,7 @@ fn artifact_request_returns_only_signatures_and_rejects_plaintext_answers() {
                     reason: "operator denied".into(),
                 },
             };
-            job.reply.send(Ok(answer)).unwrap();
+            job.reply.send(Outcome::Answer(Ok(answer))).unwrap();
             handle.join().unwrap().unwrap();
             match read_json::<Response>(&mut client).unwrap().unwrap() {
                 Response::ArtifactSignatures { signatures: reply } if mode == "signatures" => {
@@ -394,7 +585,7 @@ fn artifact_request_returns_only_signatures_and_rejects_plaintext_answers() {
                 _ => panic!("backend returned an unexpected answer"),
             }
             assert!(operators.artifacts.lock().unwrap().is_empty());
-            assert!(!operators.pending.load(Ordering::SeqCst));
+            assert!(operators.pending_count() == 0);
         });
     }
 }
@@ -438,10 +629,10 @@ fn closure_metadata_registry_liveness_owner_denial_disconnect_and_no_replay() {
                     None,
                     None,
                     Some(closure_request()),
-                    Some(&requester),
+                    Requester { stream: Some(&requester), ..Default::default() },
                 )
             });
-            let job = jobs.recv_timeout(Duration::from_secs(2)).unwrap();
+            let job = next_job(&jobs);
             let id = job.request.id.clone();
             assert!(job.request.artifact_signature.is_none());
             assert!(operators.artifacts.lock().unwrap().is_empty());
@@ -462,10 +653,9 @@ fn closure_metadata_registry_liveness_owner_denial_disconnect_and_no_replay() {
                         .contains("requester disconnected")
                 );
             } else {
-                job.reply
-                    .send(Ok(SecretAnswer::Denied {
+                job.reply.send(Outcome::Answer(Ok(SecretAnswer::Denied {
                         reason: "operator denied".into(),
-                    }))
+                    })))
                     .unwrap();
                 assert!(matches!(
                     handle.join().unwrap().unwrap(),
@@ -474,7 +664,7 @@ fn closure_metadata_registry_liveness_owner_denial_disconnect_and_no_replay() {
             }
             assert!(operators.closure_requests.lock().unwrap().is_empty());
             assert!(check_closure(&operators, &id, std::process::id()).is_err());
-            assert!(!operators.pending.load(Ordering::SeqCst));
+            assert!(operators.pending_count() == 0);
         });
     }
 }

@@ -50,6 +50,10 @@ pub(super) fn click(
             };
             approval::reduce(model, writer, request, UiEvent::Click(target))
         }
+        MouseTarget::Procedure(index) => {
+            super::secret_request::restore(model, index);
+            Action::Continue
+        }
         MouseTarget::ConfirmLoss => reduce(model, UiEvent::ConfirmLoss, writer),
         MouseTarget::AutosaveToggle => reduce(model, UiEvent::Tab, writer),
         MouseTarget::RevealCurrent => reduce(model, UiEvent::RevealCurrent, writer),

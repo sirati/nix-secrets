@@ -10,10 +10,18 @@
 //! [`SecretSession`] served on a private socket, until the requester ends
 //! the session or disconnects. Without an attached TUI the request fails; it
 //! is never decrypted anywhere else.
+//!
+//! The operator channel carries several requests at once, one per waiting
+//! requester, each answered by its id whenever the operator decides. A
+//! request that belongs to a procedure (see [`crate::procedure`]) carries
+//! its step. Only a request without a procedure or the first step of one
+//! has a deadline; the operator can cancel it, and the backend then waits
+//! without one and tells a requester that asked for progress.
 use super::{Request, Response};
 use crate::SecretPath;
 use crate::framing::{read_json, read_json_sensitive, write_json};
 use crate::private_socket::runtime_directory;
+use crate::procedure::ProcedureStep;
 use crate::secret_request::{
     MAX_REQUEST_IDENTIFIERS, ProcessInfo, SecretAnswer, SecretRequest, parent_pid,
 };
@@ -25,64 +33,184 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-/// How long the backend waits for the operator. The TUI denies on its own
-/// after 120 seconds without a decision; this bounds a TUI that stopped
-/// answering, including the time a 1Password prompt may take after approval.
+/// How long the backend waits for the operator on a request that counts
+/// down. The TUI denies on its own after 120 seconds without a decision;
+/// this bounds a TUI that stopped answering, including the time a 1Password
+/// prompt may take after approval. Requests without a countdown, and those
+/// whose countdown the operator cancelled, wait until answered or until the
+/// TUI or the requester disconnects.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(600);
+/// Grace after [`ANSWER_TIMEOUT`] for the TUI's own denial to arrive.
+const ANSWER_GRACE: Duration = Duration::from_secs(10);
 const HEARTBEAT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_secs(1);
+/// Requests waiting for the operator at once, over all requesters.
+pub const MAX_PENDING: usize = 16;
 
 pub const NO_OPERATOR: &str =
     "no nix-secrets TUI is attached to this backend; open the nix-secrets TUI and retry";
 
-struct Job {
-    request: SecretRequest,
-    reply: Sender<Result<SecretAnswer, String>>,
+/// What the operator channel delivers to a waiting request.
+pub(super) enum Outcome {
+    Answer(Result<SecretAnswer, String>),
+    /// The operator cancelled the automatic denial.
+    CountdownCancelled,
 }
 
-#[derive(Default)]
+pub(super) struct Job {
+    pub(super) request: SecretRequest,
+    pub(super) reply: Sender<Outcome>,
+}
+
+/// What an attached TUI's connection handles, in arrival order.
+pub(super) enum Inbox {
+    Job(Job),
+    /// The request no longer waits; tell the TUI to drop it.
+    Withdraw(String),
+    Step(ProcedureStep),
+    Ended(String),
+    /// From the TUI.
+    Answer {
+        request_id: String,
+        answer: SecretAnswer,
+    },
+    /// From the TUI.
+    CancelCountdown {
+        request_id: String,
+    },
+    /// The TUI hung up or broke the protocol.
+    Closed,
+}
+
 pub(super) struct Operators {
-    closure_requests: Mutex<BTreeMap<String, (UnixStream, u32)>>,
-    operator_peers: Mutex<BTreeMap<u64, u32>>,
-    artifacts: Mutex<BTreeMap<String, BTreeMap<String, std::fs::File>>>,
+    pub(super) closure_requests: Mutex<BTreeMap<String, (UnixStream, u32)>>,
+    pub(super) operator_peers: Mutex<BTreeMap<u64, u32>>,
+    pub(super) artifacts: Mutex<BTreeMap<String, BTreeMap<String, std::fs::File>>>,
     /// Attached TUIs in attach order; the last one receives requests.
-    attached: Mutex<Vec<(u64, Sender<Job>)>>,
-    /// Whether a request is waiting for the operator.
-    pending: AtomicBool,
+    pub(super) attached: Mutex<Vec<(u64, Sender<Inbox>)>>,
+    /// How many requests wait for the operator.
+    pending: AtomicUsize,
     next_request: AtomicU64,
+    pub(super) procedures: super::procedures::Procedures,
+    /// How long a request with a countdown may wait for its answer.
+    deadline: Duration,
+    /// How often idle connections get a heartbeat.
+    heartbeat: Duration,
 }
 
-/// Releases the single pending-request slot.
-struct Pending<'a>(&'a AtomicBool);
+impl Default for Operators {
+    fn default() -> Self {
+        Self {
+            closure_requests: Default::default(),
+            operator_peers: Default::default(),
+            artifacts: Default::default(),
+            attached: Default::default(),
+            pending: AtomicUsize::new(0),
+            next_request: AtomicU64::new(0),
+            procedures: Default::default(),
+            deadline: ANSWER_TIMEOUT + ANSWER_GRACE,
+            heartbeat: HEARTBEAT,
+        }
+    }
+}
+
+/// Releases one pending-request slot.
+struct Pending<'a>(&'a AtomicUsize);
 
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Who asked, beyond the process: its connection, its procedure token and
+/// whether it reads progress frames.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Requester<'a> {
+    pub(super) stream: Option<&'a UnixStream>,
+    pub(super) procedure: Option<&'a str>,
+    pub(super) progress: bool,
+}
+
+impl<'a> Requester<'a> {
+    pub(super) fn new(stream: &'a UnixStream, procedure: Option<&'a str>, progress: bool) -> Self {
+        Self {
+            stream: Some(stream),
+            procedure,
+            progress,
+        }
     }
 }
 
 impl Operators {
+    /// Changes how long a request with a countdown waits for the operator
+    /// and how often idle connections get a heartbeat.
+    pub(super) fn with_timing(mut self, deadline: Duration, heartbeat: Duration) -> Self {
+        self.deadline = deadline;
+        self.heartbeat = heartbeat;
+        self
+    }
+
     fn claim(&self) -> Result<Pending<'_>, String> {
         self.pending
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |pending| {
+                (pending < MAX_PENDING).then_some(pending + 1)
+            })
             .map(|_| Pending(&self.pending))
             .map_err(|_| {
-                "another secret request is waiting for the operator; retry when it is answered"
-                    .to_owned()
+                format!(
+                    "{MAX_PENDING} requests are already waiting for the operator; retry when one \
+                     is answered"
+                )
             })
     }
 
-    fn latest(&self) -> Option<(u64, Sender<Job>)> {
+    #[cfg(test)]
+    pub(super) fn pending_count(&self) -> usize {
+        self.pending.load(Ordering::SeqCst)
+    }
+
+    fn latest(&self) -> Option<(u64, Sender<Inbox>)> {
         self.attached
             .lock()
             .ok()?
             .last()
             .map(|(id, sender)| (*id, sender.clone()))
+    }
+
+    fn broadcast(&self, message: impl Fn() -> Inbox) {
+        if let Ok(attached) = self.attached.lock() {
+            for (_, sender) in attached.iter() {
+                let _ = sender.send(message());
+            }
+        }
+    }
+
+    pub(super) fn broadcast_step(&self, step: ProcedureStep) {
+        self.broadcast(|| Inbox::Step(step.clone()));
+    }
+
+    pub(super) fn broadcast_end(&self, id: &str) {
+        self.broadcast(|| Inbox::Ended(id.to_owned()));
+    }
+
+    /// Verifies a procedure token for `peer`, numbers the next step and
+    /// tells the TUIs.
+    pub(super) fn advance(
+        &self,
+        token: &str,
+        peer: u32,
+        label: &str,
+        deployment: bool,
+    ) -> Result<ProcedureStep, String> {
+        let step = self.procedures.next_step(token, peer, label, deployment)?;
+        self.broadcast_step(step.clone());
+        Ok(step)
     }
 }
 
@@ -98,85 +226,97 @@ pub(super) fn attach(
         .lock()
         .map_err(|_| io::Error::other("operator peer registry poisoned"))?
         .insert(session, peer);
-    let (sender, jobs) = mpsc::channel::<Job>();
+    let (sender, inbox) = mpsc::channel::<Inbox>();
+    // Answers and cancellations arrive at any time, so a reader thread
+    // turns them into inbox messages next to the jobs.
+    let mut reader = stream.try_clone()?;
+    let from_tui = sender.clone();
+    let reading = std::thread::spawn(move || {
+        loop {
+            let message = match read_json_sensitive::<Request>(&mut reader) {
+                Ok(Some(Request::AnswerSecretRequest { request_id, answer })) => {
+                    Inbox::Answer { request_id, answer }
+                }
+                Ok(Some(Request::CancelCountdown { request_id })) => {
+                    Inbox::CancelCountdown { request_id }
+                }
+                _ => Inbox::Closed,
+            };
+            let closed = matches!(message, Inbox::Closed);
+            if from_tui.send(message).is_err() || closed {
+                return;
+            }
+        }
+    });
     operators
         .attached
         .lock()
         .map_err(|_| io::Error::other("operator registry lock is poisoned"))?
         .push((session, sender));
-    let result = write_json(stream, &Response::OperatorAttached).and_then(|()| {
+    // Requests sent to this TUI and not yet answered, by id.
+    let mut waiting: BTreeMap<String, Sender<Outcome>> = BTreeMap::new();
+    let result = (|| -> io::Result<()> {
+        write_json(stream, &Response::OperatorAttached)?;
+        for procedure in operators.procedures.snapshot() {
+            write_json(stream, &Response::ProcedureUpdate { procedure })?;
+        }
         let mut last_heartbeat = Instant::now();
         loop {
-            match jobs.recv_timeout(POLL) {
-                Err(RecvTimeoutError::Disconnected) => break Ok(()),
-                Err(RecvTimeoutError::Timeout) => {
-                    // The TUI sends nothing unasked: readable means it hung
-                    // up or broke the protocol. Either way it is detached
-                    // before the next request can be routed to it.
-                    if peer_done(stream) {
-                        break Ok(());
-                    }
-                    if last_heartbeat.elapsed() >= HEARTBEAT {
-                        write_json(stream, &Response::Heartbeat)?;
-                        last_heartbeat = Instant::now();
+            let wait = operators.heartbeat.saturating_sub(last_heartbeat.elapsed());
+            match inbox.recv_timeout(wait) {
+                Ok(Inbox::Job(job)) => {
+                    write_json(
+                        stream,
+                        &Response::SecretRequested {
+                            request: job.request.clone(),
+                        },
+                    )?;
+                    waiting.insert(job.request.id.clone(), job.reply);
+                }
+                Ok(Inbox::Withdraw(request_id)) => {
+                    if waiting.remove(&request_id).is_some() {
+                        write_json(stream, &Response::SecretRequestWithdrawn { request_id })?;
                     }
                 }
-                Ok(job) => {
-                    let answer = ask(stream, &job.request);
-                    if let Ok(mut requests) = operators.closure_requests.lock() {
-                        requests.remove(&job.request.id);
+                Ok(Inbox::Step(procedure)) => {
+                    write_json(stream, &Response::ProcedureUpdate { procedure })?
+                }
+                Ok(Inbox::Ended(id)) => write_json(stream, &Response::ProcedureEnded { id })?,
+                // An answer counts once, for a request still waiting. A late
+                // answer to a withdrawn request, a replay or a made-up id
+                // reaches nobody.
+                Ok(Inbox::Answer { request_id, answer }) => {
+                    if let Some(reply) = waiting.remove(&request_id) {
+                        if let Ok(mut requests) = operators.closure_requests.lock() {
+                            requests.remove(&request_id);
+                        }
+                        let _ = reply.send(Outcome::Answer(Ok(answer)));
                     }
-                    let broken = answer.is_err();
-                    let _ = job.reply.send(answer.map_err(|error| {
-                        format!("the nix-secrets TUI did not answer the request: {error}")
-                    }));
-                    if broken {
-                        break Ok(());
+                }
+                Ok(Inbox::CancelCountdown { request_id }) => {
+                    if let Some(reply) = waiting.get(&request_id) {
+                        let _ = reply.send(Outcome::CountdownCancelled);
                     }
+                }
+                Ok(Inbox::Closed) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(RecvTimeoutError::Timeout) => {
+                    write_json(stream, &Response::Heartbeat)?;
+                    last_heartbeat = Instant::now();
                 }
             }
         }
-    });
+    })();
     if let Ok(mut attached) = operators.attached.lock() {
         attached.retain(|(id, _)| *id != session);
     }
     if let Ok(mut peers) = operators.operator_peers.lock() {
         peers.remove(&session);
     }
+    // Waiting requesters learn that this TUI is gone.
+    drop(waiting);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    let _ = reading.join();
     result
-}
-
-fn ask(stream: &mut UnixStream, request: &SecretRequest) -> io::Result<SecretAnswer> {
-    ask_with_timeout(stream, request, ANSWER_TIMEOUT)
-}
-
-fn ask_with_timeout(
-    stream: &mut UnixStream,
-    request: &SecretRequest,
-    timeout: Duration,
-) -> io::Result<SecretAnswer> {
-    write_json(
-        stream,
-        &Response::SecretRequested {
-            request: request.clone(),
-        },
-    )?;
-    stream.set_read_timeout(Some(timeout))?;
-    let answer = read_json_sensitive::<Request>(stream);
-    stream.set_read_timeout(None)?;
-    match answer? {
-        Some(Request::AnswerSecretRequest { request_id, answer }) if request_id == request.id => {
-            Ok(answer)
-        }
-        Some(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the TUI sent something other than the answer",
-        )),
-        None => Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "the TUI disconnected",
-        )),
-    }
 }
 
 /// Handles [`Request::RequestSecrets`] from the process `peer`: asks the
@@ -188,6 +328,8 @@ pub(super) fn request(
     peer: u32,
     identifiers: Vec<String>,
     reason: Option<String>,
+    procedure: Option<String>,
+    progress: bool,
     schema: &crate::Schema,
 ) -> io::Result<()> {
     for identifier in &identifiers {
@@ -210,7 +352,13 @@ pub(super) fn request(
             _ => {}
         }
     }
-    let values = match approved_values(operators, peer, identifiers, reason) {
+    let values = match approved_values(
+        operators,
+        peer,
+        identifiers,
+        reason,
+        Requester::new(stream, procedure.as_deref(), progress),
+    ) {
         Ok(values) => values,
         Err(message) => return write_json(stream, &Response::Error { message }),
     };
@@ -255,6 +403,7 @@ fn approved_values(
     peer: u32,
     identifiers: Vec<String>,
     reason: Option<String>,
+    requester: Requester<'_>,
 ) -> Result<BTreeMap<String, Zeroizing<Vec<u8>>>, String> {
     if reason
         .as_ref()
@@ -274,7 +423,16 @@ fn approved_values(
             return Err(format!("{identifier} is requested twice"));
         }
     }
-    let answer = request_operator(operators, peer, identifiers, reason, None, None, None, None)?;
+    let answer = request_operator(
+        operators,
+        peer,
+        identifiers,
+        reason,
+        None,
+        None,
+        None,
+        requester,
+    )?;
     let values = match &answer {
         SecretAnswer::Denied { reason } => return Err(reason.clone()),
         SecretAnswer::Approved { values } => values,
@@ -308,6 +466,28 @@ fn approved_values(
     Ok(decoded)
 }
 
+/// What a request asks for, as a procedure step label.
+fn step_label(
+    identifiers: &[String],
+    ssh_signature: Option<&crate::ssh_auth::SignatureRequest>,
+    artifact_signature: Option<&crate::artifact_signing::SigningRequest>,
+    closure_signature: Option<&crate::closure_signing::SigningRequest>,
+) -> String {
+    if let Some(signing) = closure_signature {
+        format!("sign closure for {}", signing.host)
+    } else if let Some(signing) = artifact_signature {
+        format!("sign artifacts for {}", signing.host)
+    } else if let Some(signature) = ssh_signature {
+        format!("SSH authentication to {}", signature.destination)
+    } else {
+        format!(
+            "release {} secret value{}",
+            identifiers.len(),
+            if identifiers.len() == 1 { "" } else { "s" }
+        )
+    }
+}
+
 fn request_operator(
     operators: &Operators,
     peer: u32,
@@ -316,7 +496,7 @@ fn request_operator(
     ssh_signature: Option<crate::ssh_auth::SignatureRequest>,
     artifact_signature: Option<crate::artifact_signing::SigningRequest>,
     closure_signature: Option<crate::closure_signing::SigningRequest>,
-    requester: Option<&UnixStream>,
+    requester: Requester<'_>,
 ) -> Result<SecretAnswer, String> {
     if reason
         .as_ref()
@@ -324,9 +504,22 @@ fn request_operator(
     {
         return Err("request reason exceeds 4096 bytes".into());
     }
-    // At most one request waits for the operator at a time.
     let _pending = operators.claim()?;
     let (operator_session, operator) = operators.latest().ok_or(NO_OPERATOR)?;
+    // Checked and numbered only once a TUI can be asked, so a refusal never
+    // uses up a step.
+    let procedure = requester
+        .procedure
+        .map(|token| {
+            let label = step_label(
+                &identifiers,
+                ssh_signature.as_ref(),
+                artifact_signature.as_ref(),
+                closure_signature.as_ref(),
+            );
+            operators.advance(token, peer, &label, false)
+        })
+        .transpose()?;
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(|error| error.to_string())?;
     let request = SecretRequest {
@@ -345,6 +538,7 @@ fn request_operator(
         closure_signature,
         requester: ProcessInfo::read(peer),
         parent: parent_pid(peer).map(ProcessInfo::read),
+        procedure,
     };
     // Pin immutable files before the request becomes visible. The frontend
     // can read only these files, by role and opaque request ID, while pending.
@@ -380,6 +574,7 @@ fn request_operator(
             .get(&operator_session)
             .ok_or(NO_OPERATOR)?;
         let socket = requester
+            .stream
             .ok_or("missing closure requester")?
             .try_clone()
             .map_err(|e| e.to_string())?;
@@ -389,26 +584,51 @@ fn request_operator(
             .map_err(|_| "closure registry poisoned")?
             .insert(request.id.clone(), (socket, owner));
     }
+    let id = request.id.clone();
+    let mut deadline = request
+        .countdown()
+        .then(|| Instant::now() + operators.deadline);
     let (reply, answer) = mpsc::channel();
     operator
-        .send(Job {
-            request: request.clone(),
-            reply,
-        })
+        .send(Inbox::Job(Job { request, reply }))
         .map_err(|_| NO_OPERATOR.to_owned())?;
-    let deadline = Instant::now() + ANSWER_TIMEOUT + Duration::from_secs(10);
+    // The TUI drops a request that no longer waits.
+    let withdraw = |reason: &str| {
+        let _ = operator.send(Inbox::Withdraw(id.clone()));
+        Err(reason.to_owned())
+    };
+    let mut last_heartbeat = Instant::now();
     loop {
-        match answer.recv_timeout(POLL.min(deadline.saturating_duration_since(Instant::now()))) {
-            Ok(answer) => return answer,
+        let poll = deadline.map_or(POLL, |deadline| {
+            POLL.min(deadline.saturating_duration_since(Instant::now()))
+        });
+        match answer.recv_timeout(poll) {
+            Ok(Outcome::Answer(answer)) => return answer,
+            Ok(Outcome::CountdownCancelled) => {
+                deadline = None;
+                if let Some(stream) = requester.stream.filter(|_| requester.progress) {
+                    if write_json(&mut &*stream, &Response::CountdownCancelled).is_err() {
+                        return withdraw("the requester disconnected");
+                    }
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err("the nix-secrets TUI disconnected".into());
             }
             Err(RecvTimeoutError::Timeout) => {
-                if requester.is_some_and(peer_done) {
-                    return Err("artifact signing requester disconnected".into());
+                if requester.stream.is_some_and(peer_done) {
+                    return withdraw("the requester disconnected");
                 }
-                if Instant::now() >= deadline {
-                    return Err("the nix-secrets TUI did not answer in time".into());
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    return withdraw("the nix-secrets TUI did not answer in time");
+                }
+                if let Some(stream) = requester.stream.filter(|_| requester.progress) {
+                    if last_heartbeat.elapsed() >= operators.heartbeat {
+                        if write_json(&mut &*stream, &Response::Heartbeat).is_err() {
+                            return withdraw("the requester disconnected");
+                        }
+                        last_heartbeat = Instant::now();
+                    }
                 }
             }
         }
@@ -421,6 +641,8 @@ pub(super) fn request_signature(
     peer: u32,
     request: crate::ssh_auth::SignatureRequest,
     reason: Option<String>,
+    procedure: Option<String>,
+    progress: bool,
 ) -> io::Result<()> {
     let result = request
         .validate()
@@ -433,7 +655,7 @@ pub(super) fn request_signature(
                 Some(request),
                 None,
                 None,
-                None,
+                Requester::new(stream, procedure.as_deref(), progress),
             )
         })
         .and_then(|answer| match answer {
@@ -519,6 +741,8 @@ pub(super) fn request_artifacts(
     peer: u32,
     request: crate::artifact_signing::SigningRequest,
     reason: Option<String>,
+    procedure: Option<String>,
+    progress: bool,
     schema: &crate::Schema,
 ) -> io::Result<()> {
     let result = (|| {
@@ -536,7 +760,7 @@ pub(super) fn request_artifacts(
             None,
             Some(request.clone()),
             None,
-            Some(stream),
+            Requester::new(stream, procedure.as_deref(), progress),
         )?;
         match answer {
             SecretAnswer::ArtifactsSigned { signatures } => {
@@ -565,6 +789,8 @@ pub(super) fn request_closure(
     peer: u32,
     request: crate::closure_signing::SigningRequest,
     reason: Option<String>,
+    procedure: Option<String>,
+    progress: bool,
     schema: &crate::Schema,
     store: &crate::SecretStore,
 ) -> io::Result<()> {
@@ -602,7 +828,7 @@ pub(super) fn request_closure(
             None,
             None,
             Some(request.clone()),
-            Some(stream),
+            Requester::new(stream, procedure.as_deref(), progress),
         )?;
         let signatures = closure_answer(answer, &request.manifest)?;
         let name = text.split_once(':').ok_or("invalid public key envelope")?.0;

@@ -55,6 +55,11 @@ fn main() {
         with_ssh_agent(arguments.collect())
     } else if arguments.next_if(|argument| argument == "deploy").is_some() {
         deploy(arguments.collect())
+    } else if arguments
+        .next_if(|argument| argument == "procedure")
+        .is_some()
+    {
+        procedure(arguments.collect())
     } else {
         run(arguments.collect()).map(|()| 0)
     };
@@ -103,6 +108,7 @@ fn pipe_secret(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Erro
                 stream,
                 std::slice::from_ref(identifier),
                 invocation.options.reason.as_deref(),
+                with_secrets::procedure_token(),
             )?;
             let value = nix_secrets_core::secret_session::fetch(&session.socket, identifier);
             session.end()?;
@@ -163,6 +169,7 @@ fn with_secrets(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Err
         stream,
         &invocation.identifiers,
         invocation.options.reason.as_deref(),
+        with_secrets::procedure_token(),
     )?;
     let status = command.env(SESSION_ENVIRONMENT, &session.socket).status();
     let ended = session.end();
@@ -202,6 +209,14 @@ fn deploy(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
             1
         }
     })
+}
+
+/// Runs a command as one procedure; see `procedure_command`.
+fn procedure(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_manager::procedure_command::{parse, run};
+    let invocation = parse(arguments, env::current_dir()?)?;
+    let status = run(&invocation, &runtime_directory(&home()?))?;
+    Ok(exit_code(status))
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {

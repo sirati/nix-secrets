@@ -92,7 +92,8 @@ fn slow_worker_does_not_block_navigation_or_wait_for_result() {
         channel: None,
         decisions: None,
         secret_prompts: vec![],
-        secret_activity: None,
+        secret_activity: Default::default(),
+        procedure_events: vec![],
     };
     let worker = std::thread::spawn(move || {
         assert!(matches!(incoming.recv().unwrap(), Command::Reveal(_)));
@@ -154,7 +155,8 @@ fn slow_commands_describe_their_activity_until_completion() {
         channel: None,
         decisions: None,
         secret_prompts: vec![],
-        secret_activity: None,
+        secret_activity: Default::default(),
+        procedure_events: vec![],
     };
     assert!(writer.activity().is_none());
     let _ = writer.reveal("host.services.test.first");
@@ -196,7 +198,8 @@ fn deployment_and_failed_save_keep_the_draft_until_retry_succeeds() {
         channel: None,
         decisions: None,
         secret_prompts: vec![],
-        secret_activity: None,
+        secret_activity: Default::default(),
+        procedure_events: vec![],
     };
     assert!(writer.approval(true).is_err());
     assert!(matches!(incoming.recv().unwrap(), Command::Approval(true)));
@@ -312,7 +315,8 @@ fn submitted_values_queue_in_order_and_remain_owned_when_full() {
         channel: None,
         decisions: None,
         secret_prompts: vec![],
-        secret_activity: None,
+        secret_activity: Default::default(),
+        procedure_events: vec![],
     };
     for index in 0..8 {
         assert_eq!(
@@ -364,7 +368,8 @@ fn stopped_worker_returns_every_accepted_draft_even_with_another_event_sender() 
         channel: None,
         decisions: None,
         secret_prompts: vec![],
-        secret_activity: None,
+        secret_activity: Default::default(),
+        procedure_events: vec![],
     };
     for index in 0..3 {
         assert_eq!(
@@ -413,7 +418,8 @@ fn real_counts_and_wait_phases_keep_queued_save_activity() {
         channel: None,
         decisions: None,
         secret_prompts: vec![],
-        secret_activity: None,
+        secret_activity: Default::default(),
+        procedure_events: vec![],
     };
     assert!(writer.approval(true).is_err());
     assert_eq!(
