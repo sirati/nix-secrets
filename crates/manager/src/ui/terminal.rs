@@ -38,6 +38,7 @@ fn render(frame: &mut ratatui::Frame<'_>, model: &Model) -> HitMap {
     let selected = selected_text(model, area.width.saturating_sub(2));
     let zones = regions(area, selected.lines().count() as u16);
     let mut hits = HitMap::default();
+    measure_host_review(model, area);
     render_filters(frame, model, zones.filters, &mut hits);
     if zones.tree.height > 0 {
         render_tree(frame, model, zones.tree, &mut hits);
@@ -227,58 +228,8 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
             *scroll,
         ),
         Mode::Approval(request) => {
-            let failure = model.message_text().map(str::to_owned);
-            let styled = move |width: usize| {
-                deploy_view::approval_lines(
-                    request,
-                    failure.as_deref(),
-                    model.approval_details,
-                    width,
-                )
-            };
-            draw_dialog(
-                frame,
-                model,
-                area,
-                hits,
-                Dialog {
-                    title: deploy_view::approval_title(request),
-                    body: Box::new(move |width| deploy_view::plain(&styled(width))),
-                    padded: true,
-                    note: None,
-                    scroll: model.modal_scroll,
-                    selector: None,
-                    footer: Some(hotkeys(model, area.width < 70)),
-                    exclusive: true,
-                    styled: Some(Box::new(move |width| {
-                        deploy_view::approval_lines(
-                            request,
-                            model.message_text(),
-                            model.approval_details,
-                            width,
-                        )
-                    })),
-                    min_width: deploy_view::needed_width(request, model.approval_details) as u16
-                        + 2,
-                    line_targets: Some(Box::new(move |width| {
-                        deploy_view::checkbox_lines(
-                            request,
-                            model.message_text(),
-                            model.approval_details,
-                            width,
-                        )
-                        .into_iter()
-                        .map(|(line, row)| (line, MouseTarget::DeployRow(row)))
-                        .collect()
-                    })),
-                },
-            );
-            // Tag the measured height with its batch only after this draw, so
-            // a limit is never paired with another dialog's review.
-            *model.host_review_rendered.borrow_mut() = request
-                .host_mutation_token
-                .clone()
-                .filter(|_| !request.host_mutations.is_empty());
+            let footer = hotkeys(model, area.width < 70);
+            draw_dialog(frame, model, area, hits, approval_dialog(model, request, footer));
             return;
         }
         mode => (modal_title(mode), prompt(model), model.modal_scroll),
@@ -337,19 +288,62 @@ struct Dialog<'a> {
     line_targets: Option<LineTargets<'a>>,
 }
 
-fn draw_dialog(
-    frame: &mut ratatui::Frame<'_>,
-    model: &Model,
-    area: Rect,
-    hits: &mut HitMap,
-    dialog: Dialog,
-) -> Rect {
-    if area.width == 0 || area.height == 0 {
-        return Rect::default();
+fn approval_dialog<'a>(model: &'a Model, request: &'a ApprovalRequest, footer: Vec<Button>) -> Dialog<'a> {
+    let failure = model.message_text().map(str::to_owned);
+    let styled = move |width: usize| {
+        deploy_view::approval_lines(request, failure.as_deref(), model.approval_details, width)
+    };
+    // A host-change batch not yet reached by input is shown from its top,
+    // exactly where the next key will find it.
+    let scroll = match (&request.host_mutation_token, &model.host_review) {
+        (Some(batch), Some((token, _))) if token == batch => model.modal_scroll,
+        (Some(_), _) if !request.host_mutations.is_empty() => 0,
+        _ => model.modal_scroll,
+    };
+    Dialog {
+        title: deploy_view::approval_title(request),
+        body: Box::new(move |width| deploy_view::plain(&styled(width))),
+        padded: true,
+        note: None,
+        scroll,
+        selector: None,
+        footer: Some(footer),
+        exclusive: true,
+        styled: Some(Box::new(move |width| {
+            deploy_view::approval_lines(request, model.message_text(), model.approval_details, width)
+        })),
+        min_width: deploy_view::needed_width(request, model.approval_details) as u16 + 2,
+        line_targets: Some(Box::new(move |width| {
+            deploy_view::checkbox_lines(request, model.message_text(), model.approval_details, width)
+                .into_iter()
+                .map(|(line, row)| (line, MouseTarget::DeployRow(row)))
+                .collect()
+        })),
     }
-    if dialog.exclusive {
-        hits.regions.clear();
-    }
+}
+
+/// Measures an open host-change review before anything shows its actions,
+/// so Save is offered in the same frame that first displays the last line.
+fn measure_host_review(model: &Model, area: Rect) {
+    let Mode::Approval(request) = &model.mode else { return };
+    let Some(batch) = request.host_mutation_token.clone().filter(|_| !request.host_mutations.is_empty()) else {
+        return;
+    };
+    let layout = dialog_layout(area, &approval_dialog(model, request, Vec::new()));
+    model.scroll_limit.set(layout.limit);
+    *model.host_review_rendered.borrow_mut() = Some(batch);
+}
+
+struct DialogLayout {
+    box_area: Rect,
+    body: String,
+    body_area: Rect,
+    /// The furthest the body can scroll; zero when it fits.
+    limit: u16,
+}
+
+/// The box, body and scroll range a dialog gets in `area`, without drawing.
+fn dialog_layout(area: Rect, dialog: &Dialog) -> DialogLayout {
     let chrome = if dialog.footer.is_some() { 4 } else { 2 };
     let selector = dialog.selector.is_some();
     // The body in a box `width` wide and its lines, counted exactly as the
@@ -400,13 +394,35 @@ fn draw_dialog(
         };
     }
     let (body, lines) = layout_at(box_area.width);
-    frame.render_widget(Clear, box_area);
     let body_area = Rect {
         x: box_area.x + 1,
         y: box_area.y + 1,
         width: box_area.width.saturating_sub(2),
         height: box_area.height.saturating_sub(chrome as u16),
     };
+    // Scrolling stops once the last line is at the bottom of the box.
+    let limit = lines
+        .saturating_sub(body_area.height as usize)
+        .min(u16::MAX as usize) as u16;
+    DialogLayout { box_area, body, body_area, limit }
+}
+
+fn draw_dialog(
+    frame: &mut ratatui::Frame<'_>,
+    model: &Model,
+    area: Rect,
+    hits: &mut HitMap,
+    dialog: Dialog,
+) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return Rect::default();
+    }
+    if dialog.exclusive {
+        hits.regions.clear();
+    }
+    let selector = dialog.selector.is_some();
+    let DialogLayout { box_area, body, body_area, limit } = dialog_layout(area, &dialog);
+    frame.render_widget(Clear, box_area);
     let mut block = Block::default()
         .title(dialog.title.as_str())
         .borders(Borders::ALL);
@@ -415,9 +431,7 @@ fn draw_dialog(
     }
     // Hidden lines are announced on the border, so scrolled content is never
     // mistaken for the whole dialog.
-    let hidden = lines
-        .saturating_sub(body_area.height as usize)
-        .saturating_sub(dialog.scroll as usize);
+    let hidden = limit - dialog.scroll.min(limit);
     if !selector && hidden > 0 {
         block = block.title_bottom(
             Line::styled(format!(" ↓ {hidden} more lines below "), Style::default().fg(Color::Yellow)).left_aligned(),
@@ -462,10 +476,6 @@ fn draw_dialog(
             }
         }
     } else {
-        // Scrolling stops once the last line is at the bottom of the box.
-        let limit = lines
-            .saturating_sub(body_area.height as usize)
-            .min(u16::MAX as usize) as u16;
         if dialog.exclusive {
             model.scroll_limit.set(limit);
         }
