@@ -1,23 +1,24 @@
 # Protocol
 
 This document defines component boundaries and message flow. Wire messages are
-versioned, length-delimited, and size-limited. Unknown versions, fields that
-change security meaning, duplicate map keys, malformed paths, and trailing data
-are rejected.
+versioned, length-delimited, and size-limited. The receiver rejects unknown
+versions, fields that change security meaning, duplicate map keys, malformed
+paths, and trailing data.
 
 ## Components
 
-- **TUI** evaluates the repository, accepts user input, encrypts and decrypts
+- The TUI evaluates the repository, accepts user input, encrypts and decrypts
   values, asks for deployment consent, and authenticates the final SSH target.
-- **Backend** coordinates frontends and atomically manages
-  `nix-secrets.toml`. It stores ciphertext and public metadata. Approved secret requests also
-  place the requested plaintext in backend memory for the command lifetime.
-- **Deployment relay** carries a byte stream between the TUI and target. It
-  does not terminate the target SSH session.
-- **Target receiver** validates its requirements and atomically installs the
+- The backend coordinates frontends and manages `nix-secrets.toml` with atomic
+  writes. It stores ciphertext and public metadata. An approved secret request
+  also places the requested plaintext in backend memory for the lifetime of the
+  command.
+- The deployment relay carries a byte stream between the TUI and the target.
+  It does not terminate the target SSH session.
+- The target receiver validates its requirements and atomically installs the
   selected secret generation.
-- **Readiness waiter** checks declared paths by metadata without opening secret
-  files. Only consuming units depend on it.
+- The readiness waiter checks declared paths by metadata and does not open
+  secret files. Only consuming units depend on it.
 
 ## Command grammar
 
@@ -25,9 +26,9 @@ are rejected.
 nix-secrets [SSH_ARG ...] -- REPOSITORY
 ```
 
-An empty `SSH_ARG` sequence selects a local repository. Otherwise the sequence
-is passed as individual arguments to OpenSSH. `REPOSITORY` is exactly one
-argument after `--`.
+An empty `SSH_ARG` sequence selects a local repository. Otherwise the program
+passes the sequence to OpenSSH as individual arguments. `REPOSITORY` is exactly
+one argument after `--`.
 
 ```console
 nix-secrets -- ~/config
@@ -36,12 +37,12 @@ nix-secrets -p 222 admin@example.net -- ~/config
 
 The program does not concatenate arguments into a shell command. Remote
 startup invokes a fixed backend command with a framed protocol. The backend
-expands a leading `~/` using the remote account's home directory and rejects
+expands a leading `~/` to the remote account's home directory. It rejects
 other tilde forms, NUL bytes, and paths outside the selected repository.
 
 ## Evaluation
 
-The TUI and target consume a canonical JSON result from a fixed flake output.
+The TUI and the target read a canonical JSON result from a fixed flake output.
 Its outer shape is:
 
 ```text
@@ -50,153 +51,161 @@ Its outer shape is:
 
 A leaf definition includes a stable path identifier, a recipient identifier,
 the target category (`setup`, `service`, or `backup`), ownership, mode, and
-applicable limits. Defaults may be inherited at any tree level, but evaluation
-must resolve every leaf before it reaches the protocol.
+applicable limits. Any level of the tree may set defaults that lower levels
+inherit, but evaluation must resolve every leaf before it reaches the protocol.
 
-The evaluation result contains public configuration only: secret identifiers,
+The evaluation result contains only public configuration: secret identifiers,
 recipients, destinations, ownership, modes, and consumers. Secret values stay
 in the encrypted TOML store until the TUI decrypts them.
 
 For deployment, the frontend compares every selected leaf from its fresh
-evaluation with the target's generated manifest, including identifier,
-recipients, destination, owner, group, mode, and consumers.
+evaluation with the target's generated manifest. The comparison covers
+identifier, recipients, destination, owner, group, mode, and consumers.
 
 ## Local backend discovery
 
-The configured socket path is preferred. The default is:
+The frontend tries the configured socket path first. The default is:
 
 ```text
 $XDG_RUNTIME_DIR/nix-secrets/<repository-id>.sock
 ```
 
 Before protocol negotiation, each side obtains Unix peer credentials from the
-kernel. The connection is accepted only when the peer effective UID is the
+kernel. A side accepts the connection only when the peer's effective UID is the
 expected repository user. A stale socket, wrong owner, non-socket node, or
 unexpected peer causes failure.
 
-If no valid backend exists, the frontend starts it through a fixed `nix run`
-application and passes the repository and evaluated configuration as distinct
+If no valid backend exists, the frontend starts one through a fixed `nix run`
+application. It passes the repository and evaluated configuration as distinct
 arguments or framed input. The backend publishes its socket only after it is
-ready. Concurrent starters converge on the one process that successfully binds
-the socket.
+ready. When several frontends start a backend at once, they all end up using
+the one process that binds the socket.
 
 ## Stored record
 
-`nix-secrets.toml` maps stable schema paths to records containing:
+`nix-secrets.toml` maps stable schema paths to records. Each record contains:
 
 - an opaque random version identifier;
-- the public recipient fingerprints/key identifiers;
+- the public recipient fingerprints or key identifiers;
 - one base64-encoded complete age ciphertext.
 
 The canonical full schema path is the secret identifier. Lookup, schema
 resolution, recipient selection, and destination resolution use only this
-identifier. The opaque version ID is revision metadata and never participates
-in those decisions.
+identifier. The opaque version ID is revision metadata and plays no part in
+those decisions.
 
-The configured SSH public keys remain plaintext Nix schema metadata. They are
-not encrypted or duplicated into the TOML record. The record contains no SSH
+The configured SSH public keys stay in the Nix schema as plaintext metadata.
+The TOML record does not encrypt or duplicate them. The record contains no SSH
 private key.
 
-For encryption, the frontend runs `age --encrypt` with one `--recipient`
-argument for every configured SSH public key. It sends the complete plaintext
-payload through stdin and reads the complete age file from stdout. The compact
-payload contains a fixed tag and format version, canonical identifier, opaque
-version ID, and raw secret bytes. Age authenticates all of it.
+To encrypt, the frontend runs `age --encrypt` with one `--recipient` argument
+for every configured SSH public key. It writes the complete plaintext payload
+to stdin and reads the complete age file from stdout. The compact payload
+contains a fixed tag and format version, the canonical identifier, the opaque
+version ID, and the raw secret bytes. Age authenticates all of it.
 
 On decryption, the requested identifier must equal both the outer TOML map key
-and authenticated inner identifier. The outer and authenticated inner version
-IDs must also match. A mismatch rejects the whole record. Replacing a value at
-the same identifier generates a new opaque version and ciphertext while
-remaining compatible with the same schema leaf, recipients, and destination.
+and the authenticated inner identifier. The outer and authenticated inner
+version IDs must also match. A mismatch rejects the whole record. Replacing a
+value at the same identifier generates a new opaque version and ciphertext.
+The new record stays compatible with the same schema leaf, recipients, and
+destination.
 
 ## Editing flow
 
-1. The TUI obtains the resolved manifest and current encrypted records.
-2. It displays leaves as `set` or `unset` based only on record existence.
-3. Enter accepts masked input; paste on a selected leaf accepts clipboard
-   input. Replacement requires confirmation.
+1. The TUI obtains the resolved manifest and the current encrypted records.
+2. It displays each leaf as `set` or `unset`, based only on whether a record
+   exists.
+3. Enter accepts masked input. Paste on a selected leaf accepts clipboard
+   input. Replacing a value requires confirmation.
 4. The TUI sends the secret to age through a pipe and zeroizes its plaintext
    buffer after use.
-5. The backend validates the leaf, record size, and recipient IDs without
-   decrypting the age ciphertext.
-6. It locks, writes, synchronizes, and atomically replaces
+5. The backend validates the leaf, record size, and recipient IDs. It does not
+   decrypt the age ciphertext.
+6. The backend locks, writes, synchronizes, and atomically replaces
    `nix-secrets.toml`. Other frontends see the update on their next read.
 
 The backend serializes updates under an advisory lock and atomically replaces
-the complete TOML store. Named recipients are stored as versioned references
-such as `primary#0`; one top-level registry holds the corresponding key
-identity. Existing records with inline `recipient_ids` remain readable, and
-rotating a named key adds a new registry revision without changing old records.
-Stored OpenSSH private-key records carry the derived public key as plaintext
-metadata next to the ciphertext. A target-generated key registers its returned
-public half through a version-checked update and read-back; a retry reuses an
-existing target private key.
+the complete TOML store. It stores named recipients as versioned references
+such as `primary#0`. One top-level registry holds the corresponding key
+identity. Existing records with inline `recipient_ids` remain readable.
+Rotating a named key adds a new registry revision and leaves old records
+unchanged. A stored OpenSSH private-key record carries the derived public key
+as plaintext metadata next to the ciphertext. For a target-generated key, the
+frontend registers the public half the target returns through a version-checked
+update and read-back. A retry reuses an existing target private key.
 
 Public-info leaves use a separate plaintext TOML table keyed by stable
-`sharedPublicId`. Their updates and deletions use compare-and-set. Deployment
-is still requested for a whole target and attested against the Nix manifest.
-The privileged target validates the exact known-hosts host, port, Ed25519 key,
-destination, ownership, and mode before publishing a world-readable file in
-`/persistent/public-info`. These values do not enter secret readiness gates.
+`sharedPublicId`. Their updates and deletions use compare-and-set. The operator
+still requests deployment for a whole target, and the target attests it
+against the Nix manifest. The privileged target validates the exact known-hosts
+host, port, Ed25519 key, destination, ownership, and mode before it publishes a
+world-readable file in `/persistent/public-info`. These values do not enter
+secret readiness gates.
 
 ## Commits
 
 `CommitSummary` returns the diff stat and status of `nix-secrets.toml` and
 `nix-secrets-profiles.toml`, the other staged paths, the message of `HEAD`,
 and whether `commit.gpgsign` is set. `Commit { options, forward_agent }`
-stages and commits only those two files and refuses while other paths are
+stages and commits only those two files. It refuses while other paths are
 staged. With `forward_agent`, the backend serves a temporary agent socket
 (0600, in a 0700 directory under `$XDG_RUNTIME_DIR`, same-UID peers only) to
-`git -c gpg.ssh.program=ssh-keygen` and forwards each agent message to the
+`git -c gpg.ssh.program=ssh-keygen`. It forwards each agent message to the
 frontend as `AgentRequest { message }`. The frontend answers with
 `AgentReply { message }` from its own agent. Both sides pass only
-`REQUEST_IDENTITIES` and `SIGN_REQUEST` over an SSHSIG blob in the `git`
-namespace; anything else gets `SSH_AGENT_FAILURE`. The exchange ends with
-`Committed { result }` or `Error { message }` carrying git's stderr. Agent
+`REQUEST_IDENTITIES`, and `SIGN_REQUEST` over an SSHSIG blob in the `git`
+namespace. Every other message gets `SSH_AGENT_FAILURE`. The exchange ends with
+`Committed { result }`, or with `Error { message }` carrying git's stderr. Agent
 messages are limited to 256 KiB. Adding these requests raised the backend
 compatibility version to 9.
 
 ## Deployment transport
 
 The frontend authenticates an SSH session to the final target. With a remote
-backend, its existing SSH master forwards target TCP connections; the frontend
-checks the original target's host key and decrypts locally. A lost master stops
-deployment without reconnecting or falling back to a direct target connection.
-The supplemental direct host-key probe has a three-second budget. An unreachable
-direct route warns; any observed key differing from the tunneled endpoint aborts
-before target authentication or secret transmission.
+backend, the frontend's existing SSH master forwards target TCP connections.
+The frontend checks the original target's host key and decrypts locally. If the
+master connection is lost, deployment stops. The frontend does not reconnect
+and does not fall back to a direct connection to the target. The additional
+direct host-key probe has a three-second budget. If the direct route is
+unreachable, the frontend warns. If any key it observes differs from the
+tunneled endpoint's key, it aborts before target authentication or secret
+transmission.
 
 The frontend uses the user's OpenSSH host-key policy and `known_hosts` files.
 A changed key aborts. For an unknown key, the UI shows the presented key and
-lists known hostnames that already associate with it before asking for an
-explicit decision.
+lists known hostnames already associated with it, then asks for an explicit
+decision.
 
-SSH-agent keys may authenticate either SSH hop. Recipient decryption instead
-uses `age --decrypt -j 1p`: `age-plugin-1p` obtains the matching private key
-from 1Password through `op`. This allows 1Password to authorize access without
-placing a key file in the repository or frontend configuration. It is separate
-from the SSH-agent signing protocol.
+SSH-agent keys may authenticate either SSH hop. Recipient decryption uses
+`age --decrypt -j 1p` instead. With it, `age-plugin-1p` obtains the matching
+private key from 1Password through `op`. 1Password can then authorize access
+with no key file in the repository or the frontend configuration. This path is
+separate from the SSH-agent signing protocol.
 
 ## Deployment flow
 
 1. The frontend sends a bounded selection of canonical leaf identifiers.
 2. The target resolves that selection only from its generated Nix-store
-   manifest and returns the exact public leaf metadata plus current opaque
+   manifest. It returns the exact public leaf metadata and the current opaque
    versions. The frontend compares every field with its fresh evaluation. Any
    extra, duplicate, differently configured, or unresolved leaf aborts.
-3. The TUI presents one modal listing the target, leaves, create/replace state,
-   and SSH recipient identities required to decrypt them.
-4. After approval, the TUI invokes the 1Password-backed provider. Rejection or
-   unlock failure leaves the modal available for retry and sends no plaintext.
-5. The TUI decrypts locally and sends each leaf, its stable identifier, and its
+3. The TUI presents one modal. It lists the target, the leaves, whether each
+   leaf is created or replaced, and the SSH recipient identities required to
+   decrypt them.
+4. After approval, the TUI invokes the 1Password-backed provider. On rejection
+   or unlock failure the modal stays open for a retry, and the TUI sends no
+   plaintext.
+5. The TUI decrypts locally. It sends each leaf, its stable identifier, and its
    opaque version inside the end-to-end SSH channel.
-6. The target independently validates identifiers, paths, sizes, ownership,
-   permissions, completeness, and exact selected set.
+6. The target validates identifiers, paths, sizes, ownership, permissions,
+   completeness, and the exact selected set on its own.
 7. The target stages the whole generation on the persistent destination
    filesystem, writes with restrictive permissions, synchronizes it, and
-   atomically publishes it. Any failure preserves the previous generation.
-8. The target reports only success or a structured error and erases transient
-   plaintext buffers as far as its safe-language and library interfaces allow.
+   publishes it atomically. Any failure keeps the previous generation.
+8. The target reports only success or a structured error. It erases transient
+   plaintext buffers as far as its memory-safe language and library interfaces
+   allow.
 
 The final layout is:
 
@@ -204,294 +213,306 @@ The final layout is:
 /persistent/secrets/<service>/<setup|service|backup>/<secret>
 ```
 
-Path components come from the validated manifest. Absolute components,
-`..`, symlink traversal, hard-link substitution, device nodes, and unexpected
-owners are rejected.
+Path components come from the validated manifest. The target rejects absolute
+components, `..`, symlink traversal, hard-link substitution, device nodes, and
+unexpected owners.
 
 ## Operator-initiated deployment
 
 `RequestDeployment { target, allow_partial }` asks the backend to queue a
-deployment of every deployable leaf of `target` in its evaluated schema: every
-stored leaf, public information and derived leaves included, and every
-generated-secret task; operator-only leaves are left out. The backend picks a
-random request id, submits the `ApprovalRequest { id, target, secrets,
+deployment of every deployable leaf of `target` in its evaluated schema. That
+set is every stored leaf, including public information and derived leaves, and
+every generated-secret task. Operator-only leaves are left out. The backend
+picks a random request id, submits `ApprovalRequest { id, target, secrets,
 allow_partial }` to the approval broker, publishes `ApprovalRequested`, and
-answers `DeploymentRequested { request }`. Without a registered frontend it
-answers an error naming the TUI instead, since nobody could claim the request.
-Registered TUIs claim it like any approval, so the deployment flow above
-applies unchanged. The requester follows it with `ApprovalStatus`.
-`ResolveApproval` carries an optional `message`, which the frontend fills with
-the deployment summary or the reason for refusing. `Resolved` reports it to
-the requester.
+answers `DeploymentRequested { request }`. If no frontend is registered, it
+answers with an error that names the TUI, because no frontend could claim the
+request. Registered TUIs claim it like any approval, so the deployment flow
+above applies unchanged. The requester then tracks it with `ApprovalStatus`.
+`ResolveApproval` carries an optional `message`. The frontend fills it with the
+deployment summary or the reason for refusing. `Resolved` reports it to the
+requester.
 
-`allow_partial` is the requester's proposal and the operator can toggle it in
-the dialog. With it, a deployment whose only missing values are derived values
-with an unset source on another host leaves those values out of the target
-selection, so the target keeps waiting for them. The summary lists them as
-skipped. Any other missing value still refuses the whole deployment. Adding
+`allow_partial` is the requester's proposal, and the operator can toggle it in
+the dialog. When it is set and the only missing values are derived values whose
+source is unset on another host, the frontend leaves those values out of the
+target selection, so the target keeps waiting for them. The summary lists them
+as skipped. Any other missing value still refuses the whole deployment. Adding
 these requests raised the backend compatibility version to 11.
 
 ## Values generated at deployment
 
 Deployment protocol 2 lets the target generate stored values that are unset
-in the operator store. Plaintext of such a value never leaves the target.
+in the operator store. The plaintext of such a value stays on the target.
 
 1. Before connecting, the frontend classifies each requested unset leaf. A
    leaf is generatable when it is not public information, not
-   `externalInputRequired`, not `generateOnDeploy = false`, and is either
+   `externalInputRequired`, not `generateOnDeploy = false`, and either has
    `valueType = "password"` (password generator under its consumer
    constraints) or declares `valueGenerator`. A Storage Box task whose
    bootstrap input is unset is never generatable. If any requested value is
    not generatable, the frontend refuses the whole deployment with one list of
-   all such values and generates, sends and writes nothing. The approval
+   all such values. It generates, sends, and writes nothing. The approval
    dialog shows the same list, or the values the target will generate.
-2. The target's state reports, per stored leaf, a canonical `generator`
-   description derived from its own manifest. Before sending a generation
-   request, the frontend requires this description to equal the one derived
-   from its schema, so the target cannot produce a value in another format.
-3. The batch carries `generate` entries: identifier and 32 frontend CSPRNG
-   bytes. Their identifiers are part of `requested_identifiers` and cannot also
-   appear in `entries`.
+2. The target's state reports a canonical `generator` description for each
+   stored leaf, derived from the target's own manifest. Before sending a
+   generation request, the frontend requires this description to equal the one
+   derived from its schema. The target therefore cannot produce a value in
+   another format.
+3. The batch carries `generate` entries. Each has an identifier and 32 bytes
+   from the frontend CSPRNG. Their identifiers are part of
+   `requested_identifiers` and cannot also appear in `entries`.
 4. If the target already has a nix-secrets version of the leaf installed, it
    re-encrypts that installed value under its installed version (`adopted`).
    Otherwise it writes the contribution to `/dev/urandom`, generates the value
    from kernel randomness, and chooses a fresh 16-byte version. It encrypts
-   the value with the same inner envelope as the frontend (identifier and
-   version authenticated inside the age payload) to the leaf's recipient keys
-   from its manifest, using the receiver's pinned `age`.
-5. The value is staged and published with the rest of the generation. The
-   result carries `generated_records`: format version, version, recipient IDs
-   and age ciphertext, exactly one per requested identifier.
-6. The frontend checks each record without decrypting: format version,
-   16-byte version, recipient IDs equal to the schema's, and an age v1 header
-   whose stanzas are exactly one `ssh-ed25519`/`ssh-rsa` stanza per schema
-   recipient key (matched by age's SHA-256 key tag) and nothing else. It
-   stores the record with a conditional write that requires the value to be
-   still unset, which also publishes the normal change event.
+   the value with the same inner envelope as the frontend, with identifier and
+   version authenticated inside the age payload. It encrypts to the leaf's
+   recipient keys from its manifest, with the receiver's pinned `age`.
+5. The target stages and publishes the value with the rest of the generation.
+   The result carries `generated_records`, exactly one per requested
+   identifier. Each holds the format version, version, recipient IDs, and age
+   ciphertext.
+6. The frontend checks each record without decrypting it. It checks the format
+   version, the 16-byte version, that the recipient IDs equal the schema's, and
+   the age v1 header. The header must contain exactly one `ssh-ed25519` or
+   `ssh-rsa` stanza per schema recipient key, matched by age's SHA-256 key tag,
+   and no other stanzas. The frontend stores the record with a conditional
+   write that requires the value to be still unset. The write also publishes
+   the normal change event.
 
-Retry behaviour: a record lost between target publication and the store write
-(connection loss, backend failure) is recovered by deploying again, because the
-target adopts the installed value instead of generating a different one. If
-someone entered the value in the store meanwhile, the conditional write keeps
-that value, the frontend reports it, and the next deployment installs it.
+Retry behaviour: a record can be lost between target publication and the store
+write, for example through connection loss or backend failure. Deploying again
+recovers it, because the target adopts the installed value and does not
+generate a different one. If someone entered the value in the store in the
+meantime, the conditional write keeps that value, the frontend reports it, and
+the next deployment installs it.
 
 ## Derived values
 
 A stored leaf with `derivedFrom = { identifier; prefix; suffix; }` is never
 stored or generated. The frontend decrypts the named source, which may belong
 to another host, and deploys `prefix + source + suffix` as an ordinary entry.
-Its version is `d-` and 32 hex digits of SHA-256 over the length-prefixed
-source version, source identifier, prefix and suffix. It changes exactly when
-the source value or the framing changes.
+Its version is `d-` followed by 32 hex digits of SHA-256 over the
+length-prefixed source version, source identifier, prefix, and suffix. The
+version changes exactly when the source value or the framing changes.
 
 If the source is unset and in the same deployment's `generate` list, it is on
-the same target, and the batch names the derived value in `derive` instead of
-sending it. The target frames it from the value it generated or adopted for
+the same target. The batch then names the derived value in `derive` and does
+not send it. The target frames it from the value it generated or adopted for
 the source and computes the same version. Every target secret reports its
-canonical `derived` description, which the frontend compares with its schema
-before deploying, so the target frames exactly as declared. A `derive` entry
-whose source is not generated in the same batch is rejected.
+canonical `derived` description. The frontend compares it with its schema
+before deploying, so the target frames exactly as declared. The target rejects
+a `derive` entry whose source is not generated in the same batch.
 
-Protocol 3 adds a shared source: a `generate` entry with `shared = {
+Protocol 3 adds a shared source. A `generate` entry with `shared = {
 generator, recipient_ids, recipient_public_keys }` names a stored symmetric
 secret of another host, taken from the operator's schema. It is not part of
-the selection or `requested_identifiers`. The target accepts it only when a
-requested `derive` value of its own is framed from it, generates it fresh with
-that generator, encrypts it to those recipients, installs nothing for it, and
-returns its record, which the frontend checks against the source leaf and
-stores. Any other unset source leaves its derived value out of the selection;
-the frontend lists it and deploys the rest. `tomlPath` selects a string field
-of a TOML source before framing and is hashed into the version after the
-other parts, so versions without it are unchanged.
+the selection or of `requested_identifiers`. The target accepts it only when a
+requested `derive` value of its own is framed from it. The target generates it
+fresh with that generator, encrypts it to those recipients, installs nothing
+for it, and returns its record. The frontend checks the record against the
+source leaf and stores it. For any other unset source, the frontend leaves the
+derived value out of the selection, lists it, and deploys the rest. `tomlPath`
+selects a string field of a TOML source before framing. It is hashed into the
+version after the other parts, so versions without it are unchanged.
 
-Protocol 4 lets the target leave out a target task whose prerequisite is absent
-on it, such as a Storage Box `knownHostsFile` that is neither installed nor
-supplied in the same batch. The task is removed from the published
-`requested_identifiers` and `Applied.not_deployed` maps its identifier to the
-reason, naming the path; everything else in the batch is published. Public
-information may carry several known_hosts lines for any of the leaf's hosts
-(`expected_ssh_hosts` in its attestation, omitted when empty) with Ed25519,
-ECDSA or RSA keys. Public information supplied in a batch is visible to that
-batch's tasks before publication. Every target I/O error names the step and
-the path.
+Protocol 4 lets the target leave out a target task whose prerequisite is
+absent on it. One example is a Storage Box `knownHostsFile` that is neither
+installed nor supplied in the same batch. The target removes the task from the
+published `requested_identifiers`, and `Applied.not_deployed` maps its
+identifier to the reason, which names the path. The target publishes
+everything else in the batch. Public information may carry several known_hosts
+lines for any of the leaf's hosts, with Ed25519, ECDSA, or RSA keys. Its
+attestation lists them in `expected_ssh_hosts` and omits the field when it is
+empty. Public information supplied in a batch is visible to that batch's tasks
+before publication. Every target I/O error names the step and the path.
 
 ## Operator-only values
 
 A `kind = "operator"` leaf has recipients but no destination. The Nix module
-removes it from every host manifest and readiness waiter, and the frontend
-refuses any deployment request naming it before connecting. Its stored record
-may carry `public_key`: base64 of the public key its declared generator wrote
+removes it from every host manifest and readiness waiter. The frontend refuses
+any deployment request that names it before connecting. Its stored record may
+carry `public_key`, the base64 of the public key its declared generator wrote
 to file descriptor 3. The generator runs on the operator's machine as
-`nix run INSTALLABLE -- ARGS…` with stdin from `/dev/null`, the private key on
-stdout (at most 1 MiB) and the public key on fd 3 (at most 64 KiB). The private
-key is encrypted before it is stored; neither half is written to disk.
+`nix run INSTALLABLE -- ARGS…` with stdin from `/dev/null`. It writes the
+private key to stdout (at most 1 MiB) and the public key to fd 3 (at most
+64 KiB). The frontend encrypts the private key before storing it. Neither half
+is written to disk.
 
 `nix-secrets pipe-secret ID [-- COMMAND…]` writes one stored value to the
-command's stdin, or to a stdout that is not a terminal. Where the value comes
-from is described under Secret requests.
+command's stdin, or to stdout when stdout is not a terminal. The section Secret
+requests describes where the value comes from.
 
 ## Secret requests
 
 A process on the backend host obtains plaintext only through the operator's
 TUI, which decrypts and returns it after the operator approves.
 
-1. The TUI opens a dedicated connection and sends `AttachOperator`; the
-   backend answers `OperatorAttached` and afterwards sends only `Heartbeat`
-   and `SecretRequested { request }` frames on it. The TUI sends nothing
-   unasked, so any readable byte or a hang-up detaches it.
+1. The TUI opens a dedicated connection and sends `AttachOperator`. The
+   backend answers `OperatorAttached`. After that it sends only `Heartbeat`
+   and `SecretRequested { request }` frames on this connection. The TUI sends
+   nothing unasked, so any readable byte or a hang-up detaches it.
 2. `nix-secrets with-secrets ID… -- CMD…` connects to the repository's
-   backend socket (never starting a backend) and sends
-   `RequestSecrets { identifiers }` (1 to 256 distinct canonical
-   identifiers). Only same-UID peers are accepted, as for every connection.
+   backend socket and never starts a backend. It sends
+   `RequestSecrets { identifiers }` with 1 to 256 distinct canonical
+   identifiers. As on every connection, only same-UID peers are accepted.
 3. The backend fills `request.requester` and `request.parent` from
-   `/proc/<peer pid>` (PID from `SO_PEERCRED`; executable, argv, cwd), never
-   from the request, and forwards the request to the most recently attached
-   TUI. At most one request waits for the operator; another is refused
-   immediately. Without an attached TUI the request fails with "open the
-   nix-secrets TUI and retry".
-4. The TUI rejects undeclared, public-info and unset identifiers without
-   asking. Otherwise it shows a modal above every other dialog: each value's
-   identifier, kind and description, its recipient names and SSH key
-   fingerprints, the decryption identity (1Password or an identity file),
+   `/proc/<peer pid>` (PID from `SO_PEERCRED`; executable, argv, cwd), and
+   never from the request. It forwards the request to the most recently
+   attached TUI. At most one request waits for the operator, and the backend
+   refuses another one immediately. Without an attached TUI the request fails
+   with "open the nix-secrets TUI and retry".
+4. The TUI rejects undeclared, public-info, and unset identifiers without
+   asking. Otherwise it shows a modal above every other dialog. The modal shows
+   each value's identifier, kind, and description, its recipient names and SSH
+   key fingerprints, the decryption identity (1Password or an identity file),
    the requester and its parent, and a 120-second countdown. Only
-   Ctrl+Shift+Y or the Yes button approves; n, Enter, Esc and the timeout
+   Ctrl+Shift+Y or the Yes button approves. n, Enter, Esc, and the timeout
    deny.
-5. On approval, the TUI decrypts every value with one provider batch: the
+5. On approval, the TUI decrypts every value in one provider batch. The
    `nix-secrets-1password --batch` launcher authorizes once and runs age once
-   per ciphertext inside that authorization. It answers
+   per ciphertext inside that authorization. The TUI answers
    `AnswerSecretRequest { request_id, answer: approved { values } }`, or
    `denied { reason }`. The values travel only on this connection, which is
-   the authenticated TUI-backend channel (through the TUI's SSH tunnel for a
-   remote backend).
-6. The backend checks that exactly the requested identifiers came back,
+   the authenticated channel between the TUI and the backend. For a remote
+   backend it runs through the TUI's SSH tunnel.
+6. The backend checks that exactly the requested identifiers came back. It
    binds `session.sock` (0600) in a new 0700 directory under
-   `$XDG_RUNTIME_DIR`, and answers `SecretSession { socket }`. It keeps the
+   `$XDG_RUNTIME_DIR` and answers `SecretSession { socket }`. It keeps the
    values only in memory.
-7. `with-secrets` runs `CMD` with `NIX_SECRETS_SESSION=<socket>`. Each
-   connection to the session socket is answered only for a same-UID peer
-   whose process descends from the requester. It sends
+7. `with-secrets` runs `CMD` with `NIX_SECRETS_SESSION=<socket>`. The backend
+   answers a connection to the session socket only for a same-UID peer whose
+   process descends from the requester. The peer sends
    `{"operation":"get","identifier":…}` and receives
-   `{"status":"value","value_base64":…}` or an error. An identifier outside
-   the approved batch is refused; the session never asks again.
-8. When `CMD` exits, `with-secrets` sends `EndSecretSession`; a disconnect
-   has the same effect. The backend removes the socket and directory,
-   erases the values, and answers `SecretSessionEnded`. `with-secrets` exits
-   with `CMD`'s status. On denial, timeout or failure `CMD` never runs.
+   `{"status":"value","value_base64":…}` or an error. The backend refuses an
+   identifier outside the approved batch. The session never asks the operator
+   again.
+8. When `CMD` exits, `with-secrets` sends `EndSecretSession`. A disconnect has
+   the same effect. The backend removes the socket and directory, erases the
+   values, and answers `SecretSessionEnded`. `with-secrets` exits with `CMD`'s
+   status. On denial, timeout, or failure, `CMD` never runs.
 
 `pipe-secret ID` reads from `NIX_SECRETS_SESSION` when it is set. Otherwise it
-sends a one-identifier `RequestSecrets`, reads the value from the session and
-ends it. `--local` keeps the earlier behaviour of decrypting in the calling
-process, and `with-secrets --local` serves such a batch from its own process
-with the same session protocol. Adding these requests raised the backend
-compatibility version to 10.
+sends a `RequestSecrets` with one identifier, reads the value from the session,
+and ends the session. `--local` keeps the earlier behaviour of decrypting in
+the calling process. `with-secrets --local` serves such a batch from its own
+process with the same session protocol. Adding these requests raised the
+backend compatibility version to 10.
 
 ## Generated-secret tasks
 
 A generated leaf has `kind = "generated"` and a `generatedSecret` declaration
-instead of a direct destination. Storage Box tasks store an encrypted bootstrap
-password at their canonical identifier; that input is never interpreted as
-the generated output. Local SSH key tasks need no stored input and are absent
-from the editable TUI tree. They are generated on the target during deployment.
+in place of a direct destination. A Storage Box task stores an encrypted
+bootstrap password at its canonical identifier. That input is never
+interpreted as the generated output. Local SSH key tasks need no stored input
+and do not appear in the editable TUI tree. The target generates them during
+deployment.
 
 The `storage-box-ssh-key` task declares its output destination and public
-bootstrap parameters: Storage Box host, port, user and one or more complete
+bootstrap parameters: Storage Box host, port, user, and one or more complete
 pinned OpenSSH host public-key lines. Selection and target-state messages keep
-ordinary secrets and tasks in distinct arrays. This prevents a receiver from
-silently treating a task password as file contents.
+ordinary secrets and tasks in separate arrays. A receiver therefore cannot
+silently treat a task password as file contents.
 
 After target-state comparison and approval, a Storage Box task entry contains
-the stable identifier, ciphertext version, password and exactly 32 frontend
-CSPRNG bytes. A local SSH key task uses no password. Sensitive inputs are
-zeroized and carried only inside the
-authenticated SSH stream. The receiver rejects an entry if its task type,
-identifier, version, recipients, output or bootstrap metadata differs from the
+the stable identifier, the ciphertext version, the password, and exactly 32
+bytes from the frontend CSPRNG. A local SSH key task uses no password. Both
+sides zeroize sensitive inputs and carry them only inside the authenticated
+SSH stream. The receiver rejects an entry if its task type, identifier,
+version, recipients, output, or bootstrap metadata differs from the
 Nix-generated manifest.
 
 The receiver writes the full frontend contribution to `/dev/urandom` with an
-ordinary write before requesting target-local randomness for key generation.
-It neither uses `RNDADDENTROPY` nor claims entropy credit. Tests replace both
-operations with injected implementations and assert the ordering without
-changing the host random pool.
+ordinary write before it requests target-local randomness for key generation.
+It does not use `RNDADDENTROPY` and does not claim entropy credit. Tests
+replace both operations with injected implementations and assert the ordering
+without changing the host random pool.
 
 The receiver connects in-process to the Storage Box, verifies the configured
-host key, password-authenticates, and updates `.ssh/authorized_keys` through
-SFTP. It preserves unrelated entries and allows exactly one entry with the
-stable prefix `nix-secrets:<target-host>:<task-id>:`. A retry reuses an existing
-valid output key; if a crash occurred after the remote update but before local
-publication, retry replaces the marked remote entry before publishing a new
-local key. Malformed or duplicate marker entries fail closed.
+host key, authenticates with the password, and updates `.ssh/authorized_keys`
+over SFTP. It keeps unrelated entries and allows exactly one entry with the
+stable prefix `nix-secrets:<target-host>:<task-id>:`. A retry reuses an
+existing valid output key. If a crash happened after the remote update but
+before local publication, the retry replaces the marked remote entry before it
+publishes a new local key. Malformed or duplicate marker entries fail closed.
 
-The generated private key is published atomically at its declared persistent
-destination only after remote reconciliation succeeds. Task passwords,
-frontend contributions and target seeds never enter a secret generation.
+The receiver publishes the generated private key atomically at its declared
+persistent destination, and only after remote reconciliation succeeds. Task
+passwords, frontend contributions, and target seeds never enter a secret
+generation.
 
 ## Readiness
 
-The NixOS module derives expected files from the same resolved manifest. The
-waiter checks file existence, type, owner, group, and mode once per second by
-metadata operations. Its service account cannot read secret contents.
+The NixOS module derives the expected files from the same resolved manifest.
+Once per second, the waiter checks file existence, type, owner, group, and mode
+with metadata operations. Its service account cannot read secret contents.
 
 Each consuming unit declares `Requires=` and `After=` on the waiter for its own
-secret set. No global dependency is added to `multi-user.target`. SSH starts
-without secrets so initial deployment and repair remain possible. A machine is
-not considered boot-successful while required application units remain
-unhealthy.
+secret set. The module adds no global dependency to `multi-user.target`. SSH
+starts without secrets, so initial deployment and repair stay possible. A
+machine does not count as booted successfully while required application units
+are unhealthy.
 
 ## Client SSH authentication signatures
 
 `with-ssh-agent --public-key FILE --destination USER@HOST [--reason TEXT] -- CMD`
 runs CMD with a private temporary agent. The agent lists only the selected
-public key. A signing request becomes `RequestSshSignature { request, reason }`;
-the backend fills in the requester and parent from kernel peer credentials and
+public key. A signing request becomes `RequestSshSignature { request, reason }`.
+The backend fills in the requester and parent from kernel peer credentials and
 sends a `SecretRequested` with `ssh_signature` set and no secret identifiers.
 
-Both backend and client validate the exact Ed25519 key, zero signing flags,
-SSH user-authentication message, selected username, publickey method, and absence
-of trailing bytes. Git signatures and other agent operations are refused.
-The normal Git relay keeps its independent Git-only policy.
+The backend and the client both validate the exact Ed25519 key, zero signing
+flags, an SSH user-authentication message, the selected username, the
+publickey method, and the absence of trailing bytes. They refuse Git signatures
+and other agent operations. The normal Git relay keeps its own Git-only policy.
 
 Both ordinary publickey and OpenSSH's
 [host-bound publickey](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL#L319)
-authentication messages are accepted; the latter must include a well-formed
-server host key.
+authentication messages are accepted. A host-bound message must include a
+well-formed server host key.
 
-The client shows an SSH authentication approval, key name/fingerprint, caller
-identity and explicitly unvalidated reason. The claimed host cannot be verified
-from an agent challenge; strict SSH host-key verification remains the calling
-SSH process's responsibility. On approval the client requests one signature from
-its local agent and answers `Signed { reply }`. Only a correctly framed Ed25519
-signature becomes `SshSignature { reply }` on the requester connection. No
-decryption provider, secret session, or private-key transfer is used.
+The client shows an SSH authentication approval with the key name and
+fingerprint, the caller identity, and the reason, marked as unvalidated. An
+agent challenge does not let the client verify the claimed host. Strict SSH
+host-key verification is the job of the calling SSH process. On approval the
+client requests one signature from its local agent and answers
+`Signed { reply }`. Only a correctly framed Ed25519 signature becomes
+`SshSignature { reply }` on the requester connection. This path uses no
+decryption provider, no secret session, and no private-key transfer.
 
-The temporary agent socket is removed when the child exits. Refusal or a missing
-client agent fails authentication and never falls back to the backend's agent.
+The temporary agent socket is removed when the child exits. A refusal or a
+missing client agent fails authentication. It never falls back to the
+backend's agent.
 
 ## Detached artifact signing
 
 Backend compatibility version 18 adds `RequestArtifactSignatures` and
 `ReadSigningArtifact`. The backend pins read-only regular Nix store files for
-one opaque request ID; bounded reads name only that ID, role, and offset.
-Registration ends on completion, rejection, timeout, or requester disconnect.
+one opaque request ID. Bounded reads name only that ID, a role, and an offset.
+The registration ends on completion, rejection, timeout, or requester
+disconnect.
 
-The frontend independently hashes the streamed bytes and binds approval to
-host, signing identifier, public-key SHA256, and every role/SHA512/size. Its
-locally configured trusted signer receives the key after approval and returns
-NMBLSIG1 sidecars. Only `ArtifactsSigned` is accepted as a successful answer;
-plaintext answers and other signature types are rejected. A signing-only
-operator leaf refuses `RequestSecrets`, including after schema reload.
+The frontend hashes the streamed bytes itself and binds approval to the host,
+the signing identifier, the public-key SHA256, and the role, SHA512, and size
+of every artifact. Its locally configured trusted signer receives the key after
+approval and returns NMBLSIG1 sidecars. The frontend accepts only
+`ArtifactsSigned` as a successful answer and rejects plaintext answers and
+other signature types. A signing-only operator leaf refuses `RequestSecrets`,
+including after a schema reload.
 
-NMBLSIG1 authenticates the artifact digest and role. Size is checked against
-streamed bytes and response metadata. It is not a separate authenticated
-field in the existing sidecar format.
+NMBLSIG1 authenticates the artifact digest and role. The frontend checks size
+against the streamed bytes and the response metadata. Size is not a separate
+authenticated field in the existing sidecar format.
 
 ## Native Nix closure signing
 
 `request-closure-signatures` carries an opaque host-scoped signing request and a
 version 1 public manifest (`paths`: `path`, canonical `narHash`, `narSize`, sorted
 unique `references`). The client reconstructs each standard Nix fingerprint,
-approves the exact batch, checks requester liveness, and signs locally.
-`closure-signatures` returns only named detached Ed25519 signatures bound to the
-requested paths. Bounds: 4 MiB manifest, 4096 paths, 4096 references per path.
-This metadata is requester supplied; NAR bytes are not independently verified.
-Signing-only operator keys reject plaintext secret requests. The backend
-compatibility socket version is 20.
+approves the exact batch, checks that the requester is still alive, and signs
+locally. `closure-signatures` returns only named detached Ed25519 signatures
+bound to the requested paths. The limits are a 4 MiB manifest, 4096 paths, and
+4096 references per path. The requester supplies this metadata, and nothing
+verifies the NAR bytes independently. Signing-only operator keys reject
+plaintext secret requests. The backend compatibility socket version is 20.

@@ -1,7 +1,7 @@
 # Consumer tests
 
 A NixOS VM test of a configuration that uses nix-secrets should not write
-secret files by hand. Enable the mock in the test configuration instead:
+secret files by hand. Enable the mock in the test configuration:
 
 ```nix
 services.nixSecrets.mock = {
@@ -16,32 +16,32 @@ services.nixSecrets.mock = {
 ```
 
 At boot, `nix-secrets-mock-install.service` installs a value for every
-deployable leaf of the host that is not installed yet. It runs
-`secret-deploy --mock-install`, which validates and publishes the values
-with the same code as a real deployment: owner, group, mode, generations,
-service links and versions are exactly as in production, so the readiness
-waiters release their consumers normally. The unit is ordered before the
-consumer units and works with or without `receiver.enable`.
+deployable leaf of the host that has no installed value yet. It runs
+`secret-deploy --mock-install`, which validates and publishes the values with
+the same code as a real deployment. Owner, group, mode, generations, service
+links and versions match production exactly, so the readiness waiters release
+their consumers as usual. The unit is ordered before the consumer units and
+works with or without `receiver.enable`.
 
-`values` keys must name deployable leaves of this host; operator-only values
-are rejected. For a derived leaf, an explicit value supplies the source before
-framing. With `generateRest = true`, missing values are generated using the
-schema's generators and content requirements. Same-host derived values reuse
-their mock source. Target-local SSH keys are generated locally; Storage Box
-bootstrap never contacts a real Storage Box. With `generateRest = false`,
-missing values fail the installer.
+Keys in `values` must name deployable leaves of this host. The mock rejects
+operator-only values. For a derived leaf, an explicit value is the source
+before framing. With `generateRest = true`, the mock generates missing values
+from the schema's generators and content requirements. Derived values on the
+same host reuse their mock source. Target-local SSH keys are generated locally.
+Storage Box bootstrap never contacts a real Storage Box. With
+`generateRest = false`, the installer fails if any value is missing.
 
-Installed leaves are never replaced, so generated values stay the same across
-reboots, and a fully installed host is left untouched.
+The mock never replaces an installed leaf. Generated values therefore stay the
+same across reboots, and the mock leaves a fully installed host untouched.
 
 The mock never reads or writes `nix-secrets.toml` and never talks to a
-backend. Explicit `values` are written to the world-readable Nix store: use
-only non-secret test data.
+backend. Explicit `values` go into the world-readable Nix store, so use only
+test data that is not secret.
 
-The mock must not run in production: evaluation requires the explicit
-acknowledgement above. Mocked systems carry a `nix-secrets-mock` system tag,
-an evaluation warning and `/etc/nix-secrets/MOCK-SECRETS-TEST-ONLY`.
-The mock supports both NixOS test VMs and custom VM configurations.
+The mock must not run in production. Evaluation requires the explicit
+acknowledgement shown above. Mocked systems carry a `nix-secrets-mock` system
+tag, an evaluation warning and `/etc/nix-secrets/MOCK-SECRETS-TEST-ONLY`.
+The mock works in NixOS test VMs and in custom VM configurations.
 
 Example:
 

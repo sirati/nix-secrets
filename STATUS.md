@@ -1,7 +1,7 @@
 # Development checks
 
-Current behavior is documented in the [README](README.md) and
-[protocol reference](PROTOCOL.md).
+The [README](README.md) and the [protocol reference](PROTOCOL.md) describe the
+current behavior.
 
 Run the Rust workspace tests in the component development shell:
 
@@ -16,5 +16,5 @@ nix flake check
 ```
 
 For configurations that consume the module, see [Consumer tests](TESTING.md).
-Passing results apply to the revision and environment tested; this file is
-not a record of a completed production rollout.
+A passing result applies only to the revision and environment tested. This file
+does not record a completed production rollout.

@@ -17,13 +17,13 @@ are metadata. They are not confidential.
 
 The local TUI is the only component that decrypts stored values. During an
 approved deployment, the final target also receives the values it requires.
-The repository backend and deployment relays are not trusted with plaintext,
-except for values the operator explicitly sends to a program on the backend
-host through a secret request (see below).
+The repository backend and deployment relays are not trusted with plaintext.
+The one exception is values the operator explicitly sends to a program on the
+backend host through a secret request, described below.
 
 Nix evaluation is trusted to describe the intended hosts, services, secret
-paths, recipients, and permissions. It receives no secret plaintext. The Nix
-store can therefore be world-readable without disclosing a secret.
+paths, recipients, and permissions. It receives no secret plaintext, so the Nix
+store can be world-readable without disclosing a secret.
 
 The target receiver installs each secret at its declared path with the
 configured owner, group, and mode. Root on that target can read installed
@@ -33,91 +33,93 @@ secrets.
 
 ### Repository disclosure
 
-Copying Git history, `nix-secrets.toml`, or the Nix store reveals ciphertext
-and public metadata only. Age encrypts and authenticates each complete secret
-to the configured ordinary SSH recipients. SSH recipient encryption is
-classical. Claims about timing or side-channel resistance are limited to age,
-its dependencies, the 1Password provider, and the operating system.
+A copy of Git history, `nix-secrets.toml`, or the Nix store reveals only
+ciphertext and public metadata. Age encrypts and authenticates each complete
+secret to the configured ordinary SSH recipients. SSH recipient encryption is
+classical. Any claim about timing or side-channel resistance is limited to
+what age, its dependencies, the 1Password provider, and the operating system
+provide.
 
 ### Backend compromise
 
 A compromised backend can delete, withhold, replay, or reorder stored
-ciphertexts and can deny service. It cannot decrypt values without a recipient
-private key. Age detects modification of its ciphertext. Age does not
-directly authenticate the outer TOML metadata, so the encrypted inner payload
-duplicates the canonical identifier and opaque version. Decryption requires
-the requested identifier, map key, outer metadata, and authenticated inner
-values to agree. This rejects cross-identifier substitution and outer-version
-tampering. Replaying an older complete record for the same identifier remains
-possible unless repository history or a separately trusted monotonic revision
-detects it.
+ciphertexts, and it can deny service. It cannot decrypt values without a
+recipient private key. Age detects modification of its ciphertext. Age does
+not authenticate the outer TOML metadata, so the encrypted inner payload
+repeats the canonical identifier and opaque version. Decryption requires the
+requested identifier, the map key, the outer metadata, and the authenticated
+inner values to agree. This rejects substitution of one identifier's record for
+another and tampering with the outer version. An attacker can still replay an
+older complete record for the same identifier, unless repository history or a
+separately trusted monotonic revision detects it.
 
-The backend may serve several frontend processes. Each Unix-socket connection
-is accepted only after checking kernel peer credentials and confirming the
-peer effective UID equals the backend UID. Socket permissions alone are not
-the authentication check.
+The backend may serve several frontend processes. It accepts each Unix-socket
+connection only after it reads the kernel peer credentials and confirms that
+the peer's effective UID equals the backend UID. Socket permissions alone do
+not authenticate the peer.
 
-Compromise of another process running as the same Unix user is outside this
-local isolation boundary. Separate Unix accounts are required where that risk
-must be isolated.
+A compromised process running as the same Unix user is outside this local
+isolation boundary. Where that risk must be isolated, use separate Unix
+accounts.
 
 ### Relay compromise
 
-The backend, deployer, and forwarding socket transport the target SSH stream
-without terminating it. The TUI authenticates the final target using its local
-OpenSSH configuration and `known_hosts`. A relay can observe timing and byte
-counts or deny service, but cannot read or alter accepted deployment plaintext
-without breaking SSH authentication or transport integrity.
+The backend, the deployer, and the forwarding socket carry the target SSH
+stream without terminating it. The TUI authenticates the final target with its
+local OpenSSH configuration and `known_hosts`. A relay can observe timing and
+byte counts or deny service. To read or alter accepted deployment plaintext it
+would have to break SSH authentication or transport integrity.
 
-Changed host keys fail closed. An unknown host is never silently accepted; the
-UI shows the presented key and any existing known-host aliases with that key.
+Changed host keys fail closed. The UI never accepts an unknown host silently.
+It shows the presented key and any existing known-host aliases with that key.
 
 ### SSH keys
 
 SSH keys have two explicit roles. OpenSSH uses host and user keys to
-authenticate the remote backend and final target. Separately, age encrypts
-stored secrets to configured SSH public keys.
-These roles use established protocol-specific implementations and must not be
-mixed by ad-hoc conversion.
+authenticate the remote backend and the final target. Age encrypts stored
+secrets to configured SSH public keys. Each role uses its established
+protocol-specific implementation, and the code must not convert keys between
+the roles ad hoc.
 
 Recipient decryption uses `age-plugin-1p`, which asks the 1Password CLI for the
 matching SSH private key in memory. No private key file is required. This is
-not an SSH-agent operation: the agent remains available for authenticating SSH
-connections, while 1Password policy controls access to stored key material.
+not an SSH-agent operation. The agent stays available to authenticate SSH
+connections, and 1Password policy controls access to stored key material.
 An unlocked 1Password session may not prompt for every request, so the UI must
-not claim that every decryption necessarily caused a new approval prompt.
+not claim that every decryption caused a new approval prompt.
 
 ### Target compromise
 
 Root compromise of a target exposes all secrets currently installed there.
-Persistent storage is required for unattended reboot, so reboot does not erase
-that exposure. The receiver accepts only the target's declared leaves and
-applies their configured filesystem ownership and permissions.
+Unattended reboot requires persistent storage, so a reboot does not end that
+exposure. The receiver accepts only the target's declared leaves and applies
+their configured filesystem ownership and permissions.
 
-A target cannot request arbitrary repository values. Both the TUI and target
-validate its request against the independently evaluated declaration, and the
-user approves the displayed set before decryption.
+A target cannot request arbitrary repository values. The TUI and the target
+both validate its request against the declaration each evaluated on its own,
+and the user approves the displayed set before decryption.
 
 ### Generated Storage Box credentials
 
 The encrypted Storage Box password is a bootstrap task input. The frontend and
-target see it only during an approved task, and it is never published into the
-target's persistent secret generation. The target-generated Ed25519 private
-key never leaves the target and is installed only at the declared output path.
+the target see it only during an approved task, and the target never publishes
+it into its persistent secret generation. The target-generated Ed25519 private
+key never leaves the target, and the target installs it only at the declared
+output path.
 
 The frontend contributes fresh operating-system randomness to each approved
-attempt. The target writes it to `/dev/urandom` before drawing its own OS
-randomness. Linux mixes writes into the random pool without crediting entropy;
-the contribution is therefore defense in depth and is not trusted. Target key
-security still depends on the target OS CSPRNG. The frontend contribution and
-target seed are zeroized after use.
+attempt. The target writes it to `/dev/urandom` before it draws its own OS
+randomness. Linux mixes writes into the random pool without crediting entropy.
+The contribution is therefore an extra layer of defense, and the design does
+not trust it. Target key security still depends on the target OS CSPRNG. The
+frontend contribution and the target seed are zeroized after use.
 
 Storage Box host keys are complete pinned public keys from the Nix manifest.
 Changed or unlisted keys fail closed. The authorized-keys update replaces one
-stable task marker and rejects duplicate or malformed marker entries, limiting
-crash recovery to one active task key while preserving unrelated entries.
-A malicious Storage Box can reject access or discard updates. It learns the
-generated public key and necessarily receives the password authentication, but
+stable task marker and rejects duplicate or malformed marker entries. Crash
+recovery can therefore leave at most one active task key, and unrelated entries
+stay in place. A malicious Storage Box can reject access or discard updates. It
+learns the generated public key and receives the password authentication, but
 it never receives the generated private key.
 
 ### Frontend compromise
@@ -127,52 +129,52 @@ secrets and can authorize deployment. The design cannot protect plaintext from
 the process that must display or transmit it. Clipboard use also inherits the
 security properties of the user's desktop clipboard.
 
-1Password rejection and unlock failures do not cause fallback to weaker
-encryption or partial deployment.
+A 1Password rejection or unlock failure does not cause a fallback to weaker
+encryption or a partial deployment.
 
 ### Secret requests from the backend host
 
 `with-secrets` and `pipe-secret` let a program on the backend host obtain
-values. Decryption stays in the TUI; approval in its modal is the only way
-plaintext reaches the backend host. The modal shows every value, its
-recipient keys, and the requester's PID, executable, command line and
-working directory as the backend read them from `/proc` for the kernel-
-reported peer PID, so a requester cannot misreport itself. At most one
-request waits at a time, which prevents a flood of stacked prompts;
-approval needs the same deliberate key as the loss warning, and a request
-denies itself after 120 seconds.
+values. Decryption stays in the TUI. Plaintext reaches the backend host only
+when the operator approves in the TUI's modal. The modal shows every value, its
+recipient keys, and the requester's PID, executable, command line, and working
+directory. The backend reads these from `/proc` for the peer PID the kernel
+reports, so a requester cannot misreport itself. At most one request waits at a
+time, so requests cannot pile up as stacked prompts. Approval needs the same
+deliberate key as the loss warning, and a request denies itself after 120
+seconds.
 
-Approved values then live in backend memory for the lifetime of the command
-and are served on a 0600 socket in a 0700 directory, only to same-UID
+Approved values then stay in backend memory for the lifetime of the command.
+The backend serves them on a 0600 socket in a 0700 directory, only to same-UID
 processes that descend from the requester, and only for the approved
-identifiers. A value outside the batch is refused and never re-prompts. The
-socket and values are removed when the command exits or the requester
+identifiers. It refuses a value outside the batch and does not prompt again.
+The socket and values are removed when the command exits or the requester
 disconnects.
 
-This does not isolate the values from other processes of the same user on
-the backend host: such a process can read the requester's memory or ptrace
-it. The descendant check only prevents accidental use by unrelated programs.
-Approve only requests whose program, command and directory you expect, on a
+Other processes of the same user on the backend host can still reach the
+values, because such a process can read the requester's memory or ptrace it.
+The descendant check only prevents accidental use by unrelated programs.
+Approve only requests whose program, command, and directory you expect, on a
 backend host whose user account you trust with the values.
 
 ## Availability and recovery
 
-The receiver detects incomplete deployments and retains a bounded history of
-previous secret generations for local rollback. A deleted ciphertext store
-requires restoration from a copy made by the operator.
+The receiver detects incomplete deployments and keeps a bounded history of
+previous secret generations for local rollback. If the ciphertext store is
+deleted, the operator must restore it from a copy they made.
 
 The receiver stages and validates an entire requested generation on the
 persistent filesystem before one crash-atomic `.current` pointer switch.
-Unrequested secrets are copied into distinct inodes, preserving rollback
-generations even when a consumer can modify its current file. A consuming unit
-waits for its declared secrets; `multi-user.target` does not depend on a global
-secret-ready service. SSH starts independently to permit repair and initial
-deployment.
+It copies unrequested secrets into distinct inodes, so rollback generations
+stay intact even when a consumer can modify its current file. A consuming unit
+waits for its declared secrets. `multi-user.target` does not depend on a global
+secret-ready service. SSH starts independently, so repair and initial
+deployment stay possible.
 
 ## Standards and implementation references
 
 - [The age manual](https://github.com/FiloSottile/age/blob/main/doc/age.1.html)
   documents SSH recipients and the private-key identity requirements.
 - [RFC 9987](https://www.rfc-editor.org/info/rfc9987/) specifies the OpenSSH
-  agent protocol around signing requests; it does not expose general KEM
-  decapsulation for age SSH recipients.
+  agent protocol around signing requests. The protocol has no general KEM
+  decapsulation operation for age SSH recipients.

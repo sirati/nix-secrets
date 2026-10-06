@@ -1,34 +1,35 @@
 # 1Password integration
 
-Install `nix-secrets-1password` on the operator machine and enable the
-1Password desktop app's CLI integration. On NixOS, `programs._1password`
-provides the required setgid `/run/wrappers/bin/op`; the bundled CLI does not
+Install `nix-secrets-1password` on the operator machine and enable CLI
+integration in the 1Password desktop app. On NixOS, `programs._1password`
+provides the required setgid `/run/wrappers/bin/op`. The bundled CLI does not
 replace that wrapper.
 
 Encryption needs only an ordinary `ssh-ed25519` or `ssh-rsa` public key.
-Decryption needs the matching private key from 1Password. SSH-agent signing
-cannot decrypt an age SSH-recipient ciphertext.
+Decryption needs the matching private key from 1Password. Signing through the
+SSH agent cannot decrypt a ciphertext encrypted to an age SSH recipient.
 
 ## What decryption authorizes
 
-The provider validates a batch of ciphertexts, lists SSH-key fingerprints,
-selects one key shared by the batch, then reads only that private key through
-`op read`. It passes the key to age on an inherited pipe. Keys and plaintext
-are not passed in arguments, environment variables or temporary files; the
-provider zeroizes its secret buffers after use.
+The provider validates a batch of ciphertexts, lists the SSH key fingerprints,
+and selects one key that the whole batch shares. It then reads only that
+private key through `op read` and passes it to age on an inherited pipe. Keys
+and plaintext never appear in arguments, environment variables or temporary
+files. The provider zeroizes its secret buffers after use.
 
-1Password desktop CLI approval is scoped to an account and session, not to an
-individual vault or item. Authorizing nix-secrets therefore grants broader CLI
-access than the single key the provider chooses to read. By default the
-provider starts a separate session for the operation.
-`--1password-shared-session` instead reuses the terminal's authorization;
-see [Command reference](COMMANDS.md#local-decryption). An existing authorization
-may mean no new prompt appears.
+The 1Password desktop app approves CLI access for an account and session. It
+cannot limit the approval to one vault or item. Authorizing nix-secrets
+therefore gives CLI access to more than the single key the provider reads. By
+default the provider starts a separate session for the operation.
+`--1password-shared-session` reuses the terminal's authorization instead.
+See [Command reference](COMMANDS.md#local-decryption). If an authorization
+already exists, no new prompt may appear.
 
-The TUI uses its one-key launcher, not `age -j 1p`, whose default plugin path
-reads every SSH private key in the account. The package still bundles
-`age-plugin-1p` for direct use outside the TUI. Dependency revisions are pinned
-by [flake.lock](flake.lock) and the selected nixpkgs package definitions.
+The TUI uses its own launcher, which reads one key. It does not use
+`age -j 1p`, because that plugin's default path reads every SSH private key in
+the account. The package still bundles `age-plugin-1p` for direct use outside
+the TUI. [flake.lock](flake.lock) and the selected nixpkgs package definitions
+pin the dependency revisions.
 
 ## References
 
