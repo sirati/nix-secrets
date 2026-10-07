@@ -1,5 +1,6 @@
 # Consumers of a defaulted public-info leaf require and start after its
-# installer; a leaf without a default adds no edge.
+# installer, which stays active so repeated consumer starts do not rerun it;
+# a leaf without a default adds no edge.
 { nixpkgs, module, system }:
 let
   key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f pin";
@@ -47,5 +48,6 @@ in
 assert config.systemd.services ? ${installer};
 assert builtins.elem "${installer}.service" config.systemd.services.reader.requires;
 assert builtins.elem "${installer}.service" config.systemd.services.reader.after;
+assert config.systemd.services.${installer}.serviceConfig.RemainAfterExit;
 assert !(builtins.any (nixpkgs.lib.hasPrefix "nix-secrets-public-default-") (edges "other"));
 true

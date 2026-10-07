@@ -153,6 +153,9 @@ let
       unitConfig.RequiresMountsFor = [ "/persistent/public-info" ];
       serviceConfig = {
         Type = "oneshot";
+        # Consumers require this unit. Without this, each separate consumer
+        # start reruns it until the start rate limit fails them all.
+        RemainAfterExit = true;
         ExecStart = lib.escapeShellArgs [
           "${cfg.receiver.package}/bin/secret-deploy"
           "--install-public-default"
