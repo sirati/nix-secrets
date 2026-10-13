@@ -61,6 +61,51 @@ impl Connection {
     }
 }
 
+impl Connection {
+    /// What the login offers, and for a key in the client agent the
+    /// detached signer ssh asks instead of that agent. The signer asks the
+    /// agent once before it returns, so 1Password asks the operator before
+    /// ssh connects, and asks about the signer, not about the TUI's
+    /// terminal. Called only after the operator approved the login.
+    pub fn login_signer(
+        &self,
+    ) -> Result<(Vec<Offer>, Option<crate::login_signer::LoginSigner>), String> {
+        let identities = self.identities()?;
+        let Some(line) = identities.iter().find_map(|offer| match offer {
+            Offer::Agent(line) => Some(line.clone()),
+            Offer::File(_) => None,
+        }) else {
+            return Ok((identities, None));
+        };
+        let config = nix_secrets_transport::client_config(
+            &OsString::from("ssh"),
+            &OsString::from(&self.destination),
+            self.port,
+        );
+        let agent = config
+            .identity_agent
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from))
+            .ok_or_else(|| format!("Cannot deploy {}: no ssh-agent is configured", self.name))?;
+        let login = nix_secrets_core::ssh_auth::LoginGrantRequest {
+            public_key: line.clone(),
+            destination: self.destination.clone(),
+        };
+        let signer = crate::login_signer::LoginSigner::spawn(
+            &agent,
+            &login,
+            &format!("the deployment to {}", self.name),
+        )
+        .map_err(|error| format!("Cannot deploy {}: {error}", self.name))?;
+        // Only the signer's key; the files of the ssh config stay offered.
+        let identities = identities
+            .into_iter()
+            .filter(|offer| matches!(offer, Offer::File(_)) || offer == &Offer::Agent(line.clone()))
+            .collect();
+        Ok((identities, Some(signer)))
+    }
+}
+
 /// A host-key failure, naming the host and what to do.
 pub fn host_key_error(connection: &Connection, error: HostKeyError) -> String {
     let host = format!(
@@ -173,6 +218,7 @@ pub fn prepare(
     expected: &ExpectedTarget,
     approved_identity: &HostIdentity,
 ) -> Result<PreparedDeployment, String> {
+    let (identities, signer) = connection.login_signer()?;
     let open = OpenSsh {
         program: OsString::from("ssh"),
         destination: OsString::from(&connection.destination),
@@ -181,7 +227,8 @@ pub fn prepare(
         verifier: HostKeyVerifier::new(connection.known_hosts.clone())
             .with_route(connection.backend_route.clone()),
         backend_route: connection.backend_route.clone(),
-        identities: connection.identities()?,
+        identities,
+        identity_agent: signer.as_ref().map(|signer| signer.socket().to_owned()),
     };
     let current = open
         .verifier
@@ -202,8 +249,11 @@ pub fn prepare(
     let session = open
         .connect_preflight(current, decision)
         .map_err(|error| format!("Cannot deploy {}: {error}", connection.name))?;
-    PreparedDeployment::open(session, expected)
-        .map_err(|error| format!("Cannot deploy {}: {error}", connection.name))
+    let prepared = PreparedDeployment::open(session, expected)
+        .map_err(|error| format!("Cannot deploy {}: {error}", connection.name));
+    // The one login is done; the signer stops.
+    drop(signer);
+    prepared
 }
 pub fn deploy(
     prepared: PreparedDeployment,

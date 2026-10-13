@@ -24,6 +24,7 @@ fn prompt(id: &str, deadline: Option<Instant>, step: Option<(u32, &str)>) -> Sec
     SecretPrompt {
         id: id.into(),
         ssh_signature: false,
+        ssh_login: false,
         artifact_signature: false,
         closure_signature: step.is_some(),
         reason: None,

@@ -389,7 +389,7 @@ fn apply_completion(model: &mut Model, completion: Completion) {
         } => super::secret_request::finished(model, &id, requester, result),
         Completion::SshSignatureFinished { id, requester, result } => {
             match result {
-                Ok(()) => model.inform(format!("Returned one SSH authentication signature to {requester}; the private key stayed on this client.")),
+                Ok(()) => model.inform(format!("Approved SSH authentication for {requester}; the private key stayed on this client.")),
                 Err(error) => { model.remove_prompt(&id); model.fail(format!("SSH authentication for {requester} failed: {error}")); }
             }
         }

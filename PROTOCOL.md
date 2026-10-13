@@ -193,8 +193,8 @@ ends with `EndProcedure` or when that connection closes.
 A request joins a procedure by carrying the token in `procedure`. The backend
 compares the secret in constant time and requires the requester to be the
 owner or its descendant. Each accepted request becomes the next step,
-`ProcedureStep { id, title, step, steps, label, deployment }`. An SSH signature
-request with the same label as the SSH signature step before it keeps that
+`ProcedureStep { id, title, step, steps, label, deployment }`. An SSH login
+grant with the same label as the SSH login step before it keeps that
 step number. `SubmitApproval` requests never carry a step. `EndProcedure {
 exit_code }` may report how the command exited (128 + signal when a signal
 ended it). The operator channel receives it in `ProcedureEnded { id, exit_code
@@ -213,13 +213,43 @@ Passwords and contributions never enter a generation.
 
 ## SSH signatures
 
-`RequestSshSignature { request, reason, procedure, progress }` reaches the TUI
-as a `SecretRequested` with `ssh_signature` set. Backend and TUI both require
-the selected Ed25519 key, zero flags, an SSH user-authentication request for
-the selected user with the `publickey` method, and no trailing bytes.
-OpenSSH host-bound publickey requests are accepted if they contain a valid host
-key. The TUI signs with its own agent and answers `signed { reply }`. The
-requester receives `SshSignature { reply }`.
+Nothing asks the operator while an SSH connection waits to log in, since the
+server would count its LoginGraceTime meanwhile. The operator approves the
+logins first:
+
+1. `RequestSshLoginGrant { request: { public_key, destination }, reason,
+   procedure, progress }` reaches the TUI as a `SecretRequested` with
+   `ssh_login` set. In a procedure it is the step `SSH authentication to
+   DESTINATION`, and a later grant to the same destination keeps that step.
+2. After the operator approves, the TUI starts a detached login signer: it
+   runs `nix-secrets ssh-login-signer`, which starts a second copy in a new
+   session and exits. The second copy waits until it is reparented, so neither
+   the TUI nor its terminal is its ancestor. 1Password authorizes the process
+   that asks and walks up to an ancestor with an app of its own. An
+   authorization of the signer therefore never covers the terminal. The signer
+   signs an SSHSIG blob in the namespace `nix-secrets-login-approval@sirati.me`
+   once, which is when 1Password asks, and only then reports ready.
+3. The TUI answers `login-granted { expires_in_seconds, signatures }`. The
+   requester receives `SshLoginGranted { grant, expires_in_seconds, signatures
+   }` and only then connects. The grant lasts 30 minutes and covers 256
+   signatures.
+4. `RequestSshSignature { request, reason, procedure, progress, grant }` names
+   the grant. The backend accepts only a grant issued on the same connection.
+   The TUI checks that the grant is live and covers the key and destination,
+   and passes the challenge to the signer without asking anyone. The signer
+   checks it again. A signature without a grant is refused.
+5. When the requester's connection closes, the backend sends
+   `SshLoginGrantEnded { grant }` on the operator channel and the TUI stops the
+   signer. The signer also exits when the TUI does, after 30 minutes or after
+   256 signatures.
+
+Backend, TUI and signer all require the selected Ed25519 key, zero flags, an
+SSH user-authentication request for the selected user with the `publickey`
+method, and no trailing bytes. OpenSSH host-bound publickey requests are
+accepted if they contain a valid host key. The signer accepts agent
+connections only from the TUI and its descendants. The TUI's own deployment
+login uses the same signer: its ssh asks the signer, through `IdentityAgent`,
+instead of the client agent.
 
 ## Artifact signing
 

@@ -59,10 +59,10 @@ fn starts_once_then_connects_to_same_user_backend() {
 
 #[test]
 fn the_socket_names_the_backend_compatibility_version() {
-    // 23: procedures report how their command exited. A TUI or requester
-    // of another version never reaches this backend.
-    assert_eq!(BACKEND_COMPATIBILITY_VERSION, 23);
-    assert!(socket_name(&path()).starts_with("backend-v23-"));
+    // 24: SSH logins are approved before the requester connects. A TUI or
+    // requester of another version never reaches this backend.
+    assert_eq!(BACKEND_COMPATIBILITY_VERSION, 24);
+    assert!(socket_name(&path()).starts_with("backend-v24-"));
 }
 
 #[test]

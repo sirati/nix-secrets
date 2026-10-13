@@ -21,6 +21,10 @@
 //! `--host-value-answer y|n` independently accepts or rejects host-provided
 //! nonempty replacements; it defaults to `n`.
 //!
+//! `--prompt-answer y|n` answers secret and SSH login prompts too, each
+//! `--prompt-delay SECONDS` after it appeared, as an operator who takes a
+//! while. Without it prompts stay open.
+//!
 //! `--answer` is the key pressed on each deployment dialog: `y` approves,
 //! `p` then `y` approves a partial deployment, and `n` rejects. It also
 //! trusts an unknown host key with `y`. It exits after `--requests`
@@ -56,6 +60,8 @@ struct Options {
     host_value_answer: char,
     requests: usize,
     set: Vec<(String, String)>,
+    prompt_answer: Option<char>,
+    prompt_delay: Duration,
     /// Decrypts through this nix-secrets-1password launcher, as the TUI
     /// does with 1Password, so a test can count its authorizations.
     launcher: Option<PathBuf>,
@@ -69,6 +75,8 @@ fn parse() -> Result<Options, String> {
     let mut requests = 1;
     let mut set = Vec::new();
     let mut launcher = None;
+    let mut prompt_answer = None;
+    let mut prompt_delay = Duration::ZERO;
     let (mut remote_backend, mut remote_repository, mut remote_socket, mut control_socket) = (None,None,None,None);
     while let Some(argument) = arguments.next() {
         let mut value = || {
@@ -117,6 +125,18 @@ fn parse() -> Result<Options, String> {
                 set.push((identifier.to_owned(), text));
             }
             "--launcher" => launcher = Some(PathBuf::from(value()?)),
+            "--prompt-answer" => {
+                prompt_answer = match value()?.as_str() {
+                    "y" => Some('y'),
+                    "n" => Some('n'),
+                    _ => return Err("--prompt-answer must be y or n".into()),
+                }
+            }
+            "--prompt-delay" => {
+                prompt_delay = Duration::from_secs(
+                    value()?.parse().map_err(|_| "--prompt-delay needs seconds")?,
+                )
+            }
             "--requests" => requests = value()?.parse().map_err(|_| "--requests needs a number")?,
             other => return Err(format!("unexpected argument {other}")),
         }
@@ -139,6 +159,8 @@ fn parse() -> Result<Options, String> {
         host_value_answer,
         requests,
         set,
+        prompt_answer,
+        prompt_delay,
         launcher,
     })
 }
@@ -154,6 +176,10 @@ struct Scripted {
     /// The answered dialog failed and is still open.
     failed: bool,
     busy: bool,
+    prompt_answer: Option<char>,
+    prompt_delay: Duration,
+    /// The prompt on screen, when to answer it, and whether that happened.
+    prompt: Option<(String, std::time::Instant, bool)>,
 }
 
 impl Frontend for Scripted {
@@ -180,6 +206,20 @@ impl Frontend for Scripted {
             }
             self.queued
                 .push_back(if failure { UiEvent::Enter } else { UiEvent::Escape });
+            return Ok(());
+        }
+        if let (Some(prompt), Some(answer)) = (model.shown_prompt(), self.prompt_answer) {
+            if self.prompt.as_ref().is_none_or(|(id, _, _)| id != &prompt.id) {
+                println!(
+                    "prompt: {} ssh-login={} ssh-signature={} answer={answer}",
+                    prompt.id, prompt.ssh_login, prompt.ssh_signature
+                );
+                self.prompt = Some((
+                    prompt.id.clone(),
+                    std::time::Instant::now() + self.prompt_delay,
+                    false,
+                ));
+            }
             return Ok(());
         }
         self.busy = model.activity.is_some();
@@ -249,6 +289,17 @@ impl Frontend for Scripted {
         if let Some(event) = self.queued.pop_front() {
             return Ok(event);
         }
+        if let Some((id, due, answered)) = &mut self.prompt {
+            if !*answered && std::time::Instant::now() >= *due {
+                *answered = true;
+                println!("prompt-answered: {id}");
+                return Ok(if self.prompt_answer == Some('y') {
+                    UiEvent::ConfirmLoss
+                } else {
+                    UiEvent::Character('n')
+                });
+            }
+        }
         if self.remaining == 0 && !self.busy {
             // Esc in the tree quits.
             return Ok(UiEvent::Escape);
@@ -259,6 +310,9 @@ impl Frontend for Scripted {
 }
 
 fn main() {
+    if let Some(code) = nix_secrets_manager::login_signer::main_if_invoked() {
+        std::process::exit(code);
+    }
     if let Err(error) = run() {
         eprintln!("nix-secrets-test-operator: {error}");
         std::process::exit(1);
@@ -313,6 +367,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         answered: None,
         failed: false,
         busy: false,
+        prompt_answer: options.prompt_answer,
+        prompt_delay: options.prompt_delay,
+        prompt: None,
     };
     // Ready: `nix-secrets deploy` can now reach a registered frontend.
     println!("ready");
@@ -334,6 +391,9 @@ mod tests {
             answered: None,
             failed: false,
             busy: false,
+            prompt_answer: None,
+            prompt_delay: Duration::ZERO,
+            prompt: None,
         };
         let mut model = Model::new(vec![]);
         let normal = ApprovalRequest {

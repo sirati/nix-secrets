@@ -104,6 +104,8 @@ pub fn relay(socket: &Path, message: &[u8]) -> io::Result<Vec<u8>> {
 /// the socket and its directory.
 pub struct AgentProxy {
     socket: PrivateSocket,
+    /// When set, only this process and its descendants may connect.
+    owner: Option<u32>,
 }
 
 impl AgentProxy {
@@ -111,7 +113,15 @@ impl AgentProxy {
     pub fn bind(runtime: &Path) -> io::Result<Self> {
         Ok(Self {
             socket: PrivateSocket::bind(runtime, "nix-secrets-agent", "agent.sock")?,
+            owner: None,
         })
+    }
+
+    /// Serves only `owner` and its descendants; other connections are
+    /// closed unanswered.
+    pub fn with_owner(mut self, owner: u32) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -157,6 +167,13 @@ impl AgentProxy {
         permitted: &impl Fn(&[u8]) -> bool,
         forward: &mut impl FnMut(&[u8]) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
+        if let Some(owner) = self.owner {
+            let peer = rustix::net::sockopt::socket_peercred(&stream).map_err(io::Error::from)?;
+            let pid = peer.pid.as_raw_nonzero().get() as u32;
+            if !crate::secret_request::is_same_or_descendant(pid, owner) {
+                return Ok(());
+            }
+        }
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         // A broken client connection only ends that connection.
         while let Ok(Some(message)) = read_message(&mut stream) {

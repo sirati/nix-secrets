@@ -41,6 +41,7 @@ fn prompt(id: &str, deadline: Instant) -> SecretPrompt {
     SecretPrompt {
         id: id.into(),
         ssh_signature: false,
+        ssh_login: false,
         artifact_signature: false,
         closure_signature: false,
         reason: Some("Sign and deploy the ns1 boot generation, then reboot the server.".into()),

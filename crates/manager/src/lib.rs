@@ -15,6 +15,7 @@ pub mod generator;
 pub mod key_names;
 pub mod keypair;
 pub mod model;
+pub mod login_signer;
 pub mod operator_channel;
 pub mod pipe_secret;
 pub mod procedure_command;

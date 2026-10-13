@@ -81,7 +81,7 @@ Approved plaintext is then in backend memory and in COMMAND. See the
 terminal's 1Password authorization. `--schema-file PATH` reads the schema from
 a file and requires `--backend-socket`.
 
-## with-ssh-agent
+## with-ssh-agent and approve-ssh-login
 
 ```sh
 nix-secrets with-ssh-agent --public-key ./login.pub \
@@ -91,9 +91,29 @@ nix-secrets with-ssh-agent --public-key ./login.pub \
 ```
 
 Runs COMMAND with a temporary agent that offers only the given Ed25519 key.
-Each signature request goes to the TUI, and the operator's own agent signs it.
-The agent signs only SSH user authentication for that key and user. Nothing
-checks the host name, so the SSH client must verify the host key.
+The operator approves the SSH logins to the destination before COMMAND
+starts. The TUI then starts a signer detached from its terminal, and the
+signer asks the client agent once, so 1Password asks right away. Only after
+that does COMMAND start, and its logins are signed without asking anyone.
+Nothing waits for a person while a server counts its LoginGraceTime.
+
+The approval lasts 30 minutes and 256 signatures, and ends when COMMAND
+exits. A login without a live approval is refused. The agent signs only SSH
+user authentication for that key and user, and only for COMMAND and its
+descendants. Nothing checks the host name, so the SSH client must verify the
+host key.
+
+With `--approve-on-request`, COMMAND starts at once and asks for the approval
+itself, right before it connects:
+
+```text
+nix-secrets approve-ssh-login
+```
+
+It exits zero once the operator approved, or at once while an earlier
+approval has more than two minutes and one signature left. Run it before
+every connection that needs a signature; it asks again only when the
+approval ran out.
 
 ## sign-artifacts
 

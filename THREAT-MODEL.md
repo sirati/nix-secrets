@@ -55,6 +55,16 @@ Approved values stay in backend memory until the command exits. Any process of
 the same user can read them through ptrace or `/proc`. The check that a session
 client descends from the requester prevents accidental use only.
 
+## SSH login approvals
+
+One approval lets `with-ssh-agent` log in to its destination with its key for
+30 minutes or 256 signatures, until its command exits. Any process that
+descends from `with-ssh-agent` can use those logins without a prompt, and the
+destination's host name is the requester's claim. The detached signer that
+signs them holds 1Password's authorization for the key while it runs. It signs
+only user authentication for the approved user and key, and serves only the
+TUI and its descendants. The authorization never covers the TUI's terminal.
+
 ## Storage Box keys
 
 The password reaches only the TUI and the target. The generated private key

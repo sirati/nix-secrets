@@ -511,9 +511,10 @@ pkgs.testers.runNixOSTest {
         print(machine.succeed("journalctl -u 'nix-secrets-deployer@*' --no-pager | tail -20"))
         raise AssertionError(output)
     stop_operator("first")
-    # One authenticated connection for the whole deployment: one agent
-    # signature, so 1Password asks once.
-    assert signatures() - signed == 1, (signed, signatures())
+    # One authenticated connection for the whole deployment. Its detached
+    # login signer has the agent sign its confirmation, which is when
+    # 1Password asks, then the one login: two agent signatures.
+    assert signatures() - signed == 2, (signed, signatures())
     # And at most one 1Password authorization for every value it decrypts.
     assert authorizations() - authorized <= 1, (authorized, authorizations())
     print(operator.succeed("cat /home/op/op.log 2>/dev/null || true"))
@@ -575,7 +576,7 @@ pkgs.testers.runNixOSTest {
     output = operator.succeed(deploy("--wait", "mail"))
     stop_operator("mail")
     assert "deployed mail" in output, output
-    assert signatures() - signed == 1, (signed, signatures())
+    assert signatures() - signed == 2, (signed, signatures())
     assert authorizations() - authorized <= 1, (authorized, authorizations())
     # ns1's case: the Storage Box task's known_hosts has no value and no
     # default. It is listed with the path before connecting; the rest of mail
@@ -609,10 +610,11 @@ pkgs.testers.runNixOSTest {
     # Storing the token and credentials encrypts only. The two deployments
     # (mail's inventory, then machine) decrypt the token, the credentials
     # the Knot key is framed from, and the inventory: one authorization
-    # and one SSH signature each.
+    # and one login (two agent signatures with its signer's confirmation)
+    # each.
     authorized_log = operator.succeed("cat /home/op/op.log")
     assert authorizations() - authorized == 2, authorized_log
-    assert signatures() - signed == 2, (signed, signatures())
+    assert signatures() - signed == 4, (signed, signatures())
     assert authorized_log.count("read op://vault1/operatoritem/private key") == authorizations(), authorized_log
     assert "not deployed yet" not in output, output
     machine.wait_for_unit("alpha-consumer.service")

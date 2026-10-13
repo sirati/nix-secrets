@@ -30,6 +30,7 @@ const DEADLINE_SLACK: Duration = Duration::from_secs(2);
 pub enum StepKind {
     Values,
     SshLogin,
+    SshLoginApproval,
     Artifacts,
     Closure,
     Deployment,
@@ -41,6 +42,8 @@ impl StepKind {
             Self::Closure
         } else if prompt.artifact_signature {
             Self::Artifacts
+        } else if prompt.ssh_login {
+            Self::SshLoginApproval
         } else if prompt.ssh_signature {
             Self::SshLogin
         } else {
@@ -53,6 +56,7 @@ impl StepKind {
         match self {
             Self::Values => "secret values sent",
             Self::SshLogin => "SSH login signed",
+            Self::SshLoginApproval => "SSH logins approved",
             Self::Artifacts => "artifacts signed",
             Self::Closure => "closure signed",
             Self::Deployment => "secrets deployed",

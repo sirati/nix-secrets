@@ -44,25 +44,86 @@ pub fn key_blob(public_key: &str) -> Result<Vec<u8>, String> {
     Ok(blob)
 }
 
+/// Checks a `user@host` destination and returns its user.
+fn destination_user(destination: &str) -> Result<&str, String> {
+    let (user, host) = destination
+        .split_once('@')
+        .ok_or("destination must be user@host")?;
+    if user.is_empty()
+        || user.len() > 64
+        || host.is_empty()
+        || host.len() > 253
+        || !user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+    {
+        return Err("invalid SSH destination".into());
+    }
+    Ok(user)
+}
+
+/// How long an approval of SSH logins lasts after the operator gave it.
+pub const LOGIN_GRANT_WINDOW: Duration = Duration::from_secs(30 * 60);
+/// How many signatures one approval of SSH logins covers.
+pub const LOGIN_GRANT_SIGNATURES: u32 = 256;
+/// The SSHSIG namespace of the agent confirmation after an approval.
+pub const LOGIN_APPROVAL_NAMESPACE: &[u8] = b"nix-secrets-login-approval@sirati.me";
+
+/// Asks the operator to approve SSH logins with one key to one destination
+/// before the requester connects. While the approval lasts, a signer the
+/// TUI detached for it signs the logins of the requester's backend
+/// connection without asking again, so no login waits for a person while
+/// the server counts down.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginGrantRequest {
+    pub public_key: String,
+    /// Caller-declared, like [`SignatureRequest::destination`].
+    pub destination: String,
+}
+
+impl LoginGrantRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        destination_user(&self.destination)?;
+        key_blob(&self.public_key)?;
+        Ok(())
+    }
+
+    /// Whether `signature` asks for a login this approval covers. The
+    /// signature must still pass [`SignatureRequest::validate`].
+    pub fn covers(&self, signature: &SignatureRequest) -> bool {
+        signature.destination == self.destination
+            && key_blob(&signature.public_key).ok() == key_blob(&self.public_key).ok()
+    }
+
+    /// An agent request that signs an SSHSIG blob in
+    /// [`LOGIN_APPROVAL_NAMESPACE`]. The signer sends it right after the
+    /// approval, so an agent that confirms each requester itself, such as
+    /// 1Password, asks then and not during a later login. The namespace
+    /// makes the signature useless as a login or a Git signature.
+    pub fn agent_confirmation(&self, grant: &str) -> Result<Vec<u8>, String> {
+        use sha2::{Digest, Sha512};
+        let key = key_blob(&self.public_key)?;
+        let statement = format!("approve SSH logins to {} for {grant}", self.destination);
+        let mut data = b"SSHSIG".to_vec();
+        put_string(&mut data, LOGIN_APPROVAL_NAMESPACE);
+        put_string(&mut data, b"");
+        put_string(&mut data, b"sha512");
+        put_string(&mut data, &Sha512::digest(statement.as_bytes()));
+        let mut message = vec![13];
+        put_string(&mut message, &key);
+        put_string(&mut message, &data);
+        message.extend_from_slice(&[0; 4]);
+        Ok(message)
+    }
+}
+
 impl SignatureRequest {
     pub fn validate(&self) -> Result<(), String> {
-        let (user, host) = self
-            .destination
-            .split_once('@')
-            .ok_or("destination must be user@host")?;
-        if user.is_empty()
-            || user.len() > 64
-            || host.is_empty()
-            || host.len() > 253
-            || !user
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-            || !host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
-        {
-            return Err("invalid SSH destination".into());
-        }
+        let user = destination_user(&self.destination)?;
         if self.message.len() > crate::git::agent::MAX_MESSAGE {
             return Err("SSH agent request is too large".into());
         }
@@ -124,12 +185,32 @@ pub fn identities(public_key: &str) -> Result<Vec<u8>, String> {
 /// Called on the TUI machine after approval, with validation repeated there.
 pub fn sign(socket: &Path, request: &SignatureRequest) -> Result<Vec<u8>, String> {
     request.validate()?;
+    agent_sign(socket, &request.message, Some(Duration::from_secs(120)))
+}
+
+/// Has the client agent sign [`LoginGrantRequest::agent_confirmation`].
+/// Called on the TUI machine right after the operator approved `grant`.
+/// It waits for the agent without a limit: 1Password may ask the operator
+/// first, and nothing has connected yet.
+pub fn confirm_login_grant(
+    socket: &Path,
+    request: &LoginGrantRequest,
+    grant: &str,
+) -> Result<(), String> {
+    agent_sign(socket, &request.agent_confirmation(grant)?, None).map(drop)
+}
+
+fn agent_sign(
+    socket: &Path,
+    message: &[u8],
+    timeout: Option<Duration>,
+) -> Result<Vec<u8>, String> {
     let mut stream =
         UnixStream::connect(socket).map_err(|e| format!("client SSH agent unavailable: {e}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(120)))
+        .set_read_timeout(timeout)
         .map_err(|e| e.to_string())?;
-    crate::git::agent::write_message(&mut stream, &request.message).map_err(|e| e.to_string())?;
+    crate::git::agent::write_message(&mut stream, message).map_err(|e| e.to_string())?;
     let reply = crate::git::agent::read_message(&mut stream)
         .map_err(|e| e.to_string())?
         .ok_or("client SSH agent closed the connection")?;

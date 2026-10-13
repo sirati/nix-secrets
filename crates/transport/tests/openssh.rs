@@ -129,6 +129,7 @@ fn launch_approved_rsa_in_fixture_process() {
     assert_eq!(checked.identity, approved);
     let ssh = OpenSsh {
         backend_route: None,
+        identity_agent: None,
         program: root.join("ssh").into_os_string(),
         destination: "forward@host".into(),
         host: "host".into(),

@@ -321,6 +321,8 @@ pub(crate) fn body(prompt: &SecretPrompt, details: bool, width: usize) -> String
             format!("Approve to decrypt this signing key once with {source} and sign requester-supplied public Nix closure metadata on this client. This client has not verified NAR contents. Only signatures are returned.")
         } else if prompt.artifact_signature {
             format!("Approve to decrypt this signing key once with {source} and sign the verified artifacts on this client. Only detached signatures are returned.")
+        } else if prompt.ssh_login {
+            format!("Approve SSH logins to this destination with this key for up to {} minutes, before the requester connects. A signer detached from this terminal then asks your SSH agent once (1Password asks now) and signs only these logins.", nix_secrets_core::ssh_auth::LOGIN_GRANT_WINDOW.as_secs() / 60)
         } else if prompt.ssh_signature {
             "Approve one SSH authentication signature using this client's agent. The private SSH key stays on this client.".into()
         } else {
@@ -415,6 +417,8 @@ fn details_body(prompt: &SecretPrompt, mut lines: Vec<String>) -> String {
             "Only detached signatures are returned. The private signing key stays on this client."
                 .into(),
         );
+    } else if prompt.ssh_login {
+        lines.push(format!("Only login signatures for this user and key are returned, at most {} of them, until the requester exits. The private SSH key stays on this client.", nix_secrets_core::ssh_auth::LOGIN_GRANT_SIGNATURES));
     } else if prompt.ssh_signature {
         lines.push("Only this SSH authentication signature is returned. The private SSH key stays on this client.".into());
     } else {

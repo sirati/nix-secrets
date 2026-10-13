@@ -76,6 +76,8 @@ pub(super) enum Inbox {
     Withdraw(String),
     Step(ProcedureStep),
     Ended(String, Option<i32>),
+    /// The requester of this login approval disconnected.
+    GrantEnded(String),
     /// From the TUI.
     Answer {
         request_id: String,
@@ -214,6 +216,14 @@ impl Operators {
         self.broadcast(|| Inbox::Ended(id.to_owned(), exit_code));
     }
 
+    /// Tells the TUIs that the requester of these login approvals is gone,
+    /// so their signers stop.
+    pub(super) fn end_grants(&self, grants: &Grants) {
+        for grant in grants {
+            self.broadcast(|| Inbox::GrantEnded(grant.clone()));
+        }
+    }
+
     /// Verifies a procedure token for `peer`, numbers the next step and
     /// tells the TUIs.
     pub(super) fn advance(
@@ -304,6 +314,9 @@ pub(super) fn attach(
                 }
                 Ok(Inbox::Ended(id, exit_code)) => {
                     write_json(stream, &Response::ProcedureEnded { id, exit_code })?
+                }
+                Ok(Inbox::GrantEnded(grant)) => {
+                    write_json(stream, &Response::SshLoginGrantEnded { grant })?
                 }
                 // An answer counts once, for a request still waiting. A late
                 // answer to a withdrawn request, a replay or a made-up id
@@ -451,7 +464,7 @@ fn approved_values(
         peer,
         identifiers,
         reason,
-        None,
+        Ssh::default(),
         None,
         None,
         requester,
@@ -460,6 +473,7 @@ fn approved_values(
         SecretAnswer::Denied { reason } => return Err(reason.clone()),
         SecretAnswer::Approved { values } => values,
         SecretAnswer::Signed { .. }
+        | SecretAnswer::LoginGranted { .. }
         | SecretAnswer::ArtifactsSigned { .. }
         | SecretAnswer::ClosureSigned { .. } => {
             return Err("the TUI returned an unasked signature".into());
@@ -489,10 +503,19 @@ fn approved_values(
     Ok(decoded)
 }
 
+/// What a request asks of the client's SSH agent.
+#[derive(Default)]
+pub(super) struct Ssh {
+    signature: Option<crate::ssh_auth::SignatureRequest>,
+    login: Option<crate::ssh_auth::LoginGrantRequest>,
+    /// The login approval that covers [`Self::signature`].
+    grant: Option<String>,
+}
+
 /// What a request asks for, as a procedure step label.
 fn step_label(
     identifiers: &[String],
-    ssh_signature: Option<&crate::ssh_auth::SignatureRequest>,
+    ssh_destination: Option<&str>,
     artifact_signature: Option<&crate::artifact_signing::SigningRequest>,
     closure_signature: Option<&crate::closure_signing::SigningRequest>,
 ) -> String {
@@ -500,8 +523,8 @@ fn step_label(
         format!("sign closure for {}", signing.host)
     } else if let Some(signing) = artifact_signature {
         format!("sign artifacts for {}", signing.host)
-    } else if let Some(signature) = ssh_signature {
-        format!("SSH authentication to {}", signature.destination)
+    } else if let Some(destination) = ssh_destination {
+        format!("SSH authentication to {destination}")
     } else {
         format!(
             "release {} secret value{}",
@@ -516,11 +539,41 @@ fn request_operator(
     peer: u32,
     identifiers: Vec<String>,
     reason: Option<String>,
-    ssh_signature: Option<crate::ssh_auth::SignatureRequest>,
+    ssh: Ssh,
     artifact_signature: Option<crate::artifact_signing::SigningRequest>,
     closure_signature: Option<crate::closure_signing::SigningRequest>,
     requester: Requester<'_>,
 ) -> Result<SecretAnswer, String> {
+    request_operator_with_id(
+        operators,
+        peer,
+        identifiers,
+        reason,
+        ssh,
+        artifact_signature,
+        closure_signature,
+        requester,
+        &mut None,
+    )
+}
+
+/// [`request_operator`], which also reports the id of the request it made.
+fn request_operator_with_id(
+    operators: &Operators,
+    peer: u32,
+    identifiers: Vec<String>,
+    reason: Option<String>,
+    ssh: Ssh,
+    artifact_signature: Option<crate::artifact_signing::SigningRequest>,
+    closure_signature: Option<crate::closure_signing::SigningRequest>,
+    requester: Requester<'_>,
+    id: &mut Option<String>,
+) -> Result<SecretAnswer, String> {
+    let Ssh {
+        signature: ssh_signature,
+        login: ssh_login,
+        grant: ssh_grant,
+    } = ssh;
     if reason
         .as_ref()
         .is_some_and(|r| r.len() > crate::secret_request::MAX_REQUEST_REASON_BYTES)
@@ -532,18 +585,26 @@ fn request_operator(
     // down meanwhile.
     let (operator_session, operator) = wait_for_operator(operators, requester, &mut true)?;
     // Checked and numbered only once a TUI can be asked, so a refusal never
-    // uses up a step.
+    // uses up a step. A login an approval covers asks nobody: no step.
+    let ssh_destination = ssh_login
+        .as_ref()
+        .map(|login| login.destination.as_str())
+        .or(ssh_signature
+            .as_ref()
+            .map(|signature| signature.destination.as_str()));
     let procedure = requester
         .procedure
+        .filter(|_| ssh_grant.is_none())
         .map(|token| {
             let label = step_label(
                 &identifiers,
-                ssh_signature.as_ref(),
+                ssh_destination,
                 artifact_signature.as_ref(),
                 closure_signature.as_ref(),
             );
-            // An SSH login may reconnect; it stays one step.
-            operators.advance(token, peer, &label, false, ssh_signature.is_some())
+            // An SSH login may reconnect, or ask for a new approval after
+            // the last one ran out; it stays one step.
+            operators.advance(token, peer, &label, false, ssh_destination.is_some())
         })
         .transpose()?;
     let mut random = [0_u8; 8];
@@ -562,6 +623,8 @@ fn request_operator(
         ssh_signature,
         artifact_signature,
         closure_signature,
+        ssh_login,
+        ssh_grant,
         requester: ProcessInfo::read(peer),
         parent: parent_pid(peer).map(ProcessInfo::read),
         procedure,
@@ -592,6 +655,7 @@ fn request_operator(
         }
     }
     let _registered = Registered(operators, request.id.clone());
+    *id = Some(request.id.clone());
     let id = request.id.clone();
     let (reply, answer) = mpsc::channel();
     let mut operator = operator;
@@ -729,24 +793,43 @@ fn wait_for_answer(
     }
 }
 
+/// Login approvals the operator gave on one requester connection, by id.
+/// Only that connection may name them.
+pub(super) type Grants = BTreeSet<String>;
+
 pub(super) fn request_signature(
     stream: &mut UnixStream,
     operators: &Operators,
     peer: u32,
-    request: crate::ssh_auth::SignatureRequest,
-    reason: Option<String>,
-    procedure: Option<String>,
-    progress: bool,
+    signature: SshSignatureAsk,
+    grants: &Grants,
 ) -> io::Result<()> {
+    let SshSignatureAsk {
+        request,
+        reason,
+        procedure,
+        progress,
+        grant,
+    } = signature;
     let result = request
         .validate()
+        .and_then(|()| match &grant {
+            Some(grant) if !grants.contains(grant) => {
+                Err("this connection has no such SSH login approval".into())
+            }
+            _ => Ok(()),
+        })
         .and_then(|()| {
             request_operator(
                 operators,
                 peer,
                 Vec::new(),
                 reason,
-                Some(request),
+                Ssh {
+                    signature: Some(request),
+                    login: None,
+                    grant,
+                },
                 None,
                 None,
                 Requester::new(stream, procedure.as_deref(), progress),
@@ -759,6 +842,7 @@ pub(super) fn request_signature(
             }
             SecretAnswer::Denied { reason } => Err(reason),
             SecretAnswer::Approved { .. }
+            | SecretAnswer::LoginGranted { .. }
             | SecretAnswer::ArtifactsSigned { .. }
             | SecretAnswer::ClosureSigned { .. } => {
                 Err("the TUI returned an unasked answer".into())
@@ -770,6 +854,70 @@ pub(super) fn request_signature(
             Ok(reply) => Response::SshSignature { reply },
             Err(message) => Response::Error { message },
         },
+    )
+}
+
+/// The fields of [`Request::RequestSshSignature`].
+pub(super) struct SshSignatureAsk {
+    pub(super) request: crate::ssh_auth::SignatureRequest,
+    pub(super) reason: Option<String>,
+    pub(super) procedure: Option<String>,
+    pub(super) progress: bool,
+    pub(super) grant: Option<String>,
+}
+
+/// Handles [`Request::RequestSshLoginGrant`]: asks the operator to approve
+/// SSH logins before the requester connects, and remembers an approval for
+/// this connection.
+pub(super) fn request_login_grant(
+    stream: &mut UnixStream,
+    operators: &Operators,
+    peer: u32,
+    request: crate::ssh_auth::LoginGrantRequest,
+    reason: Option<String>,
+    procedure: Option<String>,
+    progress: bool,
+    grants: &mut Grants,
+) -> io::Result<()> {
+    let result = request.validate().and_then(|()| {
+        // The id becomes the grant's name; the TUI keeps it under the same.
+        let mut granted = None;
+        let answer = request_operator_with_id(
+            operators,
+            peer,
+            Vec::new(),
+            reason,
+            Ssh {
+                signature: None,
+                login: Some(request),
+                grant: None,
+            },
+            None,
+            None,
+            Requester::new(stream, procedure.as_deref(), progress),
+            &mut granted,
+        )?;
+        match answer {
+            SecretAnswer::LoginGranted {
+                expires_in_seconds,
+                signatures,
+            } => {
+                let grant = granted.ok_or("the login approval has no id")?;
+                grants.insert(grant.clone());
+                Ok(Response::SshLoginGranted {
+                    grant,
+                    expires_in_seconds: expires_in_seconds
+                        .min(crate::ssh_auth::LOGIN_GRANT_WINDOW.as_secs()),
+                    signatures: signatures.min(crate::ssh_auth::LOGIN_GRANT_SIGNATURES),
+                })
+            }
+            SecretAnswer::Denied { reason } => Err(reason),
+            _ => Err("the TUI returned an unasked answer".into()),
+        }
+    });
+    write_json(
+        stream,
+        &result.unwrap_or_else(|message| Response::Error { message }),
     )
 }
 
@@ -851,7 +999,7 @@ pub(super) fn request_artifacts(
             peer,
             vec![request.identifier.clone()],
             reason,
-            None,
+            Ssh::default(),
             Some(request.clone()),
             None,
             Requester::new(stream, procedure.as_deref(), progress),
@@ -919,7 +1067,7 @@ pub(super) fn request_closure(
             peer,
             vec![request.identifier.clone()],
             reason,
-            None,
+            Ssh::default(),
             None,
             Some(request.clone()),
             Requester::new(stream, procedure.as_deref(), progress),

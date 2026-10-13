@@ -13,8 +13,18 @@ use std::process::Output;
 use std::time::Duration;
 
 fn main() {
+    if let Some(code) = nix_secrets_manager::login_signer::main_if_invoked() {
+        std::process::exit(code);
+    }
     let mut arguments = env::args_os().skip(1).peekable();
     let result = if arguments
+        .next_if(|argument| argument == "approve-ssh-login")
+        .is_some()
+    {
+        nix_secrets_manager::with_ssh_agent::approve(arguments.collect())
+            .map(|()| 0)
+            .map_err(Into::into)
+    } else if arguments
         .next_if(|argument| argument == "sign-artifacts")
         .is_some()
     {

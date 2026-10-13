@@ -41,6 +41,9 @@ pub struct SecretPrompt {
     pub parent: Option<ProcessInfo>,
     pub reason: Option<String>,
     pub ssh_signature: bool,
+    /// With `ssh_signature`: approves SSH logins before the requester
+    /// connects, not one signature.
+    pub ssh_login: bool,
     pub artifact_signature: bool,
     pub closure_signature: bool,
     /// When the request denies itself; `None` when it waits for the
@@ -275,21 +278,33 @@ pub fn run_with_agent(
                             (events.clone(), Arc::clone(&writer), internal.clone());
                         scope.spawn(move || {
                             let decisions = Decisions { inputs };
-                            let (answer, done) = match connect_verified(socket) {
-                                Ok(stream) => handle(
-                                    &request,
-                                    &mut BackendClient::new(stream),
-                                    schema,
-                                    provider,
-                                    identity,
-                                    &events,
-                                    &decisions,
-                                    agent,
-                                ),
-                                Err(error) => refuse(
-                                    &request,
-                                    format!("cannot reach the backend: {error}"),
-                                ),
+                            let granted = request
+                                .ssh_signature
+                                .as_ref()
+                                .filter(|_| request.ssh_login.is_none());
+                            let (answer, done) = match granted.map_or_else(|| Err(connect_verified(socket)), Ok) {
+                                // A login an approval covers asks nobody.
+                                Ok(signature) => handle_signature(&request, signature),
+                                Err(Ok(stream)) => {
+                                    let (answer, done) = handle(
+                                        &request,
+                                        &mut BackendClient::new(stream),
+                                        schema,
+                                        provider,
+                                        identity,
+                                        &events,
+                                        &decisions,
+                                        agent,
+                                    );
+                                    (answer, Some(done))
+                                }
+                                Err(Err(error)) => {
+                                    let (answer, done) = refuse(
+                                        &request,
+                                        format!("cannot reach the backend: {error}"),
+                                    );
+                                    (answer, Some(done))
+                                }
                             };
                             let written = writer.lock().map_err(|_| ()).and_then(|mut stream| {
                                 write_json_sensitive(
@@ -301,7 +316,7 @@ pub fn run_with_agent(
                                 )
                                 .map_err(|_| ())
                             });
-                            if written.is_ok() {
+                            if let Some(done) = done.filter(|_| written.is_ok()) {
                                 let _ = events.send(done);
                             }
                             let _ = internal.send(Internal::Done(request.id.clone()));
@@ -319,6 +334,9 @@ pub fn run_with_agent(
                         if events.send(ChannelEvent::Procedure(procedure)).is_err() {
                             finished = Some(Ok(()));
                         }
+                    }
+                    Internal::Frame(Response::SshLoginGrantEnded { grant }) => {
+                        end_grant(&grant);
                     }
                     Internal::Frame(Response::ProcedureEnded { id, exit_code }) => {
                         if events.send(ChannelEvent::ProcedureEnded(id, exit_code)).is_err() {
@@ -441,8 +459,8 @@ fn handle(
             request, signature, client, schema, provider, identity, events, decisions,
         );
     }
-    if let Some(signature) = &request.ssh_signature {
-        return handle_signature(request, signature, schema, events, decisions, agent);
+    if let Some(login) = &request.ssh_login {
+        return handle_login_grant(request, login, schema, events, decisions, agent);
     }
     let prompt_for = |values| SecretPrompt {
         id: request.id.clone(),
@@ -452,6 +470,7 @@ fn handle(
         parent: request.parent.clone(),
         reason: request.reason.clone(),
         ssh_signature: false,
+        ssh_login: false,
         artifact_signature: false,
         closure_signature: false,
         deadline: deadline_for(request),
@@ -514,30 +533,76 @@ fn handle(
     }
 }
 
-fn handle_signature(
+/// A login approval: its signer and what is left of it.
+struct Grant {
+    login: nix_secrets_core::ssh_auth::LoginGrantRequest,
+    signer: crate::login_signer::LoginSigner,
+    expires: Instant,
+    remaining: u32,
+}
+
+/// The login approvals of this TUI, by the id of the request that asked.
+/// They outlive a reconnect of the operator channel; dropping one stops its
+/// signer.
+fn grants() -> std::sync::MutexGuard<'static, BTreeMap<String, Grant>> {
+    static GRANTS: Mutex<BTreeMap<String, Grant>> = Mutex::new(BTreeMap::new());
+    GRANTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Stops the signer of a login approval whose requester is gone.
+fn end_grant(grant: &str) {
+    let ended = grants().remove(grant);
+    drop(ended);
+}
+
+/// Whether a login approval with this id is live, for tests.
+pub fn grant_signer_pid(grant: &str) -> Option<u32> {
+    grants().get(grant).map(|grant| grant.signer.pid())
+}
+
+fn ssh_prompt(
     request: &SecretRequest,
-    signature: &nix_secrets_core::ssh_auth::SignatureRequest,
+    destination: &str,
+    public_key: &str,
+    schema: &Schema,
+    agent: Option<&Path>,
+) -> SecretPrompt {
+    let agent_names = crate::key_names::AgentKeys::from_agent(agent.and_then(|path| path.to_str()));
+    let key_name = crate::key_names::describe(schema, &agent_names, public_key);
+    SecretPrompt {
+        id: request.id.clone(),
+        values: vec![RequestedValue {
+            identifier: destination.to_owned(),
+            kind: "SSH authentication".into(),
+            description: Some(format!("Signing key: {key_name}. The destination is declared by the requester and cannot be verified from an agent challenge.")),
+            recipients: vec![],
+        }],
+        identity: "client SSH agent".into(),
+        requester: request.requester.clone(),
+        parent: request.parent.clone(),
+        reason: request.reason.clone(),
+        ssh_signature: true,
+        ssh_login: request.ssh_login.is_some(),
+        artifact_signature: false,
+        closure_signature: false,
+        deadline: deadline_for(request),
+        procedure: request.procedure.clone(),
+    }
+}
+
+/// Asks the operator to approve SSH logins before the requester connects.
+/// On approval a detached signer asks the client agent once, which is when
+/// 1Password asks, and the requester learns of the approval only after
+/// that, so it connects with nobody left to ask.
+fn handle_login_grant(
+    request: &SecretRequest,
+    login: &nix_secrets_core::ssh_auth::LoginGrantRequest,
     schema: &Schema,
     events: &Sender<ChannelEvent>,
     decisions: &Decisions,
     agent: Option<&Path>,
 ) -> (SecretAnswer, ChannelEvent) {
-    let agent_names = crate::key_names::AgentKeys::from_agent(agent.and_then(|path| path.to_str()));
-    let key_name = crate::key_names::describe(schema, &agent_names, &signature.public_key);
-    let mut prompt = SecretPrompt {
-        id: request.id.clone(),
-        values: vec![RequestedValue {
-            identifier: signature.destination.clone(), kind: "SSH authentication".into(),
-            description: Some(format!("Signing key: {key_name}. The destination is declared by the requester and cannot be verified from an agent challenge.")),
-            recipients: vec![],
-        }],
-        identity: "client SSH agent".into(), requester: request.requester.clone(),
-        parent: request.parent.clone(), reason: request.reason.clone(), ssh_signature: true,
-        artifact_signature: false,
-        closure_signature: false,
-        deadline: deadline_for(request),
-        procedure: request.procedure.clone(),
-    };
+    let mut prompt = ssh_prompt(request, &login.destination, &login.public_key, schema, agent);
     let label = prompt.requester_label();
     let deny = |reason: String| {
         (
@@ -551,43 +616,114 @@ fn handle_signature(
             },
         )
     };
-    if !request.identifiers.is_empty() {
-        return deny("SSH signatures cannot request secret values".into());
+    if !request.identifiers.is_empty() || request.ssh_signature.is_some() {
+        return deny("an SSH login approval asks for nothing else".into());
     }
-    if let Err(error) = signature.validate() {
+    if let Err(error) = login.validate() {
         return deny(error);
     }
-    let socket = match signature_agent(&signature.public_key, agent) {
+    let socket = match signature_agent(&login.public_key, agent) {
         Ok(socket) => socket,
         Err(error) => return deny(error),
     };
-    prompt.identity = if socket.ends_with(".1password/agent.sock") {
-        "1Password SSH agent on this client".into()
-    } else {
-        "SSH agent on this client".into()
-    };
+    prompt.identity = agent_identity(&socket);
     let deadline = prompt.deadline;
     if events.send(ChannelEvent::Prompt(prompt)).is_err() {
         return deny("the TUI closed".into());
     }
     match decisions.wait(deadline) {
         Waited::Approved => {}
-        Waited::Denied => return deny("the operator denied SSH authentication".into()),
+        Waited::Denied => return deny("the operator denied the SSH logins".into()),
         Waited::TimedOut => {
-            return deny("the operator did not approve SSH authentication in time".into())
+            return deny("the operator did not approve the SSH logins in time".into())
         }
-        other => return deny(not_approved(other, "SSH authentication")),
+        other => return deny(not_approved(other, "the SSH logins")),
     }
-    match nix_secrets_core::ssh_auth::sign(&socket, signature) {
-        Ok(reply) => (
-            SecretAnswer::Signed { reply },
-            ChannelEvent::SignatureFinished {
+    let signer = match crate::login_signer::LoginSigner::spawn(&socket, login, &request.id) {
+        Ok(signer) => signer,
+        Err(error) => return deny(error),
+    };
+    let window = nix_secrets_core::ssh_auth::LOGIN_GRANT_WINDOW;
+    let signatures = nix_secrets_core::ssh_auth::LOGIN_GRANT_SIGNATURES;
+    grants().insert(
+        request.id.clone(),
+        Grant {
+            login: login.clone(),
+            signer,
+            // The signer started its own clock a little earlier.
+            expires: Instant::now() + window - Duration::from_secs(5),
+            remaining: signatures,
+        },
+    );
+    (
+        SecretAnswer::LoginGranted {
+            expires_in_seconds: window.as_secs() - 5,
+            signatures,
+        },
+        ChannelEvent::SignatureFinished {
+            id: request.id.clone(),
+            requester: label,
+            result: Ok(()),
+        },
+    )
+}
+
+fn agent_identity(socket: &Path) -> String {
+    if socket.ends_with(".1password/agent.sock") {
+        "1Password SSH agent on this client".into()
+    } else {
+        "SSH agent on this client".into()
+    }
+}
+
+/// Signs one SSH login an earlier approval covers, through that approval's
+/// detached signer. This process never asks the client agent itself, and a
+/// login without an approval is refused: nobody is asked while the
+/// requester's connection waits.
+fn handle_signature(
+    request: &SecretRequest,
+    signature: &nix_secrets_core::ssh_auth::SignatureRequest,
+) -> (SecretAnswer, Option<ChannelEvent>) {
+    let process = request.parent.as_ref().unwrap_or(&request.requester);
+    let label = format!("{} (PID {})", process.argv.first().map_or("unknown program", String::as_str), process.pid);
+    let result = (|| {
+        if !request.identifiers.is_empty() {
+            return Err("SSH signatures cannot request secret values".to_owned());
+        }
+        signature.validate()?;
+        let grant = request.ssh_grant.as_deref().ok_or(
+            "SSH logins need an approval before the requester connects; this requester did not ask for one",
+        )?;
+        let socket = {
+            let mut grants = grants();
+            let live = grants
+                .get_mut(grant)
+                .ok_or("the SSH login approval ended; ask for a new one before connecting")?;
+            if Instant::now() >= live.expires || live.remaining == 0 {
+                grants.remove(grant);
+                return Err("the SSH login approval ran out; ask for a new one before connecting".into());
+            }
+            if !live.login.covers(signature) {
+                return Err("the SSH login approval covers another key or destination".into());
+            }
+            live.remaining -= 1;
+            live.signer.socket().to_owned()
+        };
+        nix_secrets_core::ssh_auth::sign(&socket, signature)
+    })();
+    match result {
+        // The operator approved these logins already; no notice each time.
+        Ok(reply) => (SecretAnswer::Signed { reply }, None),
+        Err(reason) => (
+            SecretAnswer::Denied {
+                reason: reason.clone(),
+            },
+            Some(ChannelEvent::SignatureFinished {
                 id: request.id.clone(),
                 requester: label,
-                result: Ok(()),
-            },
+                result: Err(reason),
+            }),
         ),
-        Err(error) => deny(error),
     }
 }
 
@@ -690,6 +826,8 @@ mod tests {
                 ssh_signature: None,
                 artifact_signature: None,
                 closure_signature: None,
+                ssh_login: None,
+                ssh_grant: None,
                 requester: ProcessInfo::read(std::process::id()),
                 parent: None,
                 procedure: None,

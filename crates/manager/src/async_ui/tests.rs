@@ -552,6 +552,7 @@ fn an_outcome_waits_until_the_ui_took_in_its_prompt() {
     let prompt = SecretPrompt {
         id: "closure".into(),
         ssh_signature: false,
+        ssh_login: false,
         artifact_signature: false,
         closure_signature: true,
         reason: None,

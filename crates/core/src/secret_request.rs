@@ -102,6 +102,14 @@ pub struct SecretRequest {
     pub artifact_signature: Option<crate::artifact_signing::SigningRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closure_signature: Option<crate::closure_signing::SigningRequest>,
+    /// Approve SSH logins before the requester connects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_login: Option<crate::ssh_auth::LoginGrantRequest>,
+    /// With [`Self::ssh_signature`]: the login approval, by the id of the
+    /// request that asked for it, that the requester claims covers it.
+    /// The TUI checks it and signs without asking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_grant: Option<String>,
     /// The process that connected to the backend, read from `/proc`.
     pub requester: ProcessInfo,
     /// Its parent, which is usually the program that wants the values.
@@ -115,9 +123,12 @@ pub struct SecretRequest {
 
 impl SecretRequest {
     /// Whether the TUI denies this request on its own after a while: only
-    /// the first step of a procedure counts down.
+    /// the first step of a procedure counts down, and a login an earlier
+    /// approval covers asks nobody.
     pub fn countdown(&self) -> bool {
-        self.procedure
+        self.ssh_grant.is_none()
+            && self
+                .procedure
             .as_ref()
             .is_none_or(crate::procedure::ProcedureStep::countdown)
     }
@@ -155,6 +166,11 @@ pub enum SecretAnswer {
     },
     Signed {
         reply: Vec<u8>,
+    },
+    /// The operator approved [`SecretRequest::ssh_login`].
+    LoginGranted {
+        expires_in_seconds: u64,
+        signatures: u32,
     },
     ArtifactsSigned {
         signatures: crate::artifact_signing::Signatures,

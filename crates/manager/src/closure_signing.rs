@@ -167,6 +167,7 @@ pub(crate) fn handle(
         parent: request.parent.clone(),
         reason: request.reason.clone(),
         ssh_signature: false,
+        ssh_login: false,
         artifact_signature: false,
         closure_signature: true,
         deadline: deadline_for(request),

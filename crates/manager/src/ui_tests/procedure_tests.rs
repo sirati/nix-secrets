@@ -85,6 +85,7 @@ fn prompt(id: &str, procedure: Option<ProcedureStep>) -> SecretPrompt {
         parent: None,
         reason: None,
         ssh_signature: true,
+        ssh_login: false,
         artifact_signature: false,
         closure_signature: false,
         deadline: countdown.then(|| Instant::now() + Duration::from_secs(120)),
@@ -766,7 +767,7 @@ fn a_request_of_its_own_still_reports_with_a_notice() {
             result: Ok(()),
         },
     );
-    assert!(model.message_text().unwrap().contains("Returned one SSH authentication signature"));
+    assert!(model.message_text().unwrap().contains("Approved SSH authentication"));
 }
 
 #[test]

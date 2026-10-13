@@ -153,7 +153,19 @@ struct Context<'a> {
     peer_pid: u32,
 }
 
-fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()> {
+fn handle_client(stream: UnixStream, context: &Context<'_>) -> io::Result<()> {
+    // Login approvals given to this connection end with it.
+    let mut grants = secrets::Grants::new();
+    let result = handle_requests(stream, context, &mut grants);
+    context.operators.end_grants(&grants);
+    result
+}
+
+fn handle_requests(
+    mut stream: UnixStream,
+    context: &Context<'_>,
+    grants: &mut secrets::Grants,
+) -> io::Result<()> {
     let Context {
         schema,
         schema_loader,
@@ -208,8 +220,13 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
                 secrets::request(&mut stream, operators, peer_pid, identifiers, reason, procedure, progress, fresh.as_ref().unwrap_or(schema))?;
                 continue;
             }
-            Request::RequestSshSignature { request, reason, procedure, progress } => {
-                secrets::request_signature(&mut stream, operators, peer_pid, request, reason, procedure, progress)?;
+            Request::RequestSshSignature { request, reason, procedure, progress, grant } => {
+                let ask = secrets::SshSignatureAsk { request, reason, procedure, progress, grant };
+                secrets::request_signature(&mut stream, operators, peer_pid, ask, grants)?;
+                continue;
+            }
+            Request::RequestSshLoginGrant { request, reason, procedure, progress } => {
+                secrets::request_login_grant(&mut stream, operators, peer_pid, request, reason, procedure, progress, grants)?;
                 continue;
             }
             Request::RequestArtifactSignatures { request, reason, procedure, progress } => {
@@ -457,6 +474,7 @@ fn handle_client(mut stream: UnixStream, context: &Context<'_>) -> io::Result<()
             | Request::RequestArtifactSignatures { .. }
             | Request::RequestClosureSignatures { .. }
             | Request::RequestSshSignature { .. }
+            | Request::RequestSshLoginGrant { .. }
             | Request::BeginProcedure { .. } => unreachable!("handled above"),
         }
         .unwrap_or_else(|error| Response::Error {

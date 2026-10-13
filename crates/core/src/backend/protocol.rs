@@ -144,6 +144,23 @@ pub enum Request {
         procedure: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         progress: bool,
+        /// A login approval this connection got with
+        /// [`Request::RequestSshLoginGrant`]. The TUI then signs without
+        /// asking, if the approval still covers the login.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<String>,
+    },
+    /// Asks the operator to approve SSH logins before the requester
+    /// connects. On approval the backend answers
+    /// [`Response::SshLoginGranted`], and [`Request::RequestSshSignature`]
+    /// on the same connection may name the grant.
+    RequestSshLoginGrant {
+        request: crate::ssh_auth::LoginGrantRequest,
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        procedure: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        progress: bool,
     },
     RequestArtifactSignatures {
         request: crate::artifact_signing::SigningRequest,
@@ -301,6 +318,13 @@ pub enum Response {
     SshSignature {
         reply: Vec<u8>,
     },
+    /// The operator approved the SSH logins. The grant lasts
+    /// `expires_in_seconds` and covers `signatures` logins.
+    SshLoginGranted {
+        grant: String,
+        expires_in_seconds: u64,
+        signatures: u32,
+    },
     /// The deployment request is queued for the frontends.
     DeploymentRequested {
         request: ApprovalRequest,
@@ -331,6 +355,11 @@ pub enum Response {
     /// procedure at attach: their ids. A reattaching TUI drops the rest.
     ProceduresListed {
         ids: Vec<String>,
+    },
+    /// On the operator channel: the requester that holds this login
+    /// approval disconnected. Its signer stops.
+    SshLoginGrantEnded {
+        grant: String,
     },
     /// The procedure is over: on the operator channel, and as the answer to
     /// [`Request::EndProcedure`].

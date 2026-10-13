@@ -95,6 +95,9 @@ pub struct OpenSsh {
     /// The only keys offered. Empty: ssh's own defaults.
     pub identities: Vec<Offer>,
     pub backend_route: Option<Arc<crate::BackendRoute>>,
+    /// The agent ssh asks to sign, instead of the one ssh's config names:
+    /// the TUI's detached login signer.
+    pub identity_agent: Option<std::path::PathBuf>,
 }
 
 impl OpenSsh {
@@ -190,11 +193,12 @@ impl OpenSsh {
                 "VerifyHostKeyDNS=no",
                 "-o",
                 "ConnectTimeout=15",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "ServerAliveCountMax=2",
             ])
+            // No ServerAliveInterval: the session stays open while the operator
+            // reviews the values, and nothing may time out that wait.
+            .args(self.identity_agent.iter().flat_map(|agent| {
+                [OsString::from("-o"), format!("IdentityAgent=\"{}\"", agent.display()).into()]
+            }))
             .arg("-o")
             .arg(format!("UserKnownHostsFile={}", pin.file.display()))
             .arg("-o")
