@@ -78,7 +78,10 @@ in
       description = "Atomic nix-secrets deployment transaction";
       serviceConfig = {
         Type = "oneshot";
-        TimeoutStartSec = "20min";
+        # The transaction stays open while the operator reviews the values in
+        # the TUI, and nothing may time out that wait. It ends with its
+        # connection.
+        TimeoutStartSec = "infinity";
         StandardInput = "socket";
         StandardOutput = "socket";
         StandardError = "journal";
