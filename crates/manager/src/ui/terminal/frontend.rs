@@ -15,15 +15,25 @@ pub(super) struct CrosstermFrontend {
     /// presses, so repeats within [`PASTE_REPEAT_GAP`] are dropped and holding
     /// Ctrl+V reads the clipboard once.
     last_paste: Option<std::time::Instant>,
-    /// The bell, notifications and title for a secret request.
+    /// The bell, notifications and title for requests and missed steps.
     attention: crate::ui::attention::Attention,
-    tmux: bool,
+    profile: crate::ui::attention::Profile,
+    /// The session bus, when notifications go there.
+    desktop: Option<crate::ui::desktop_notify::Desktop>,
 }
 
 const PASTE_REPEAT_GAP: std::time::Duration = std::time::Duration::from_millis(400);
 
 impl CrosstermFrontend {
     pub(super) fn setup() -> io::Result<Self> {
+        // Asks tmux, so before the terminal is in raw mode.
+        let (profile, bus) = crate::ui::attention::Profile::current();
+        let desktop = bus.filter(|_| profile.desktop).map(|bus| {
+            crate::ui::desktop_notify::Desktop::spawn(
+                bus,
+                profile.desktop_entry.map(str::to_owned),
+            )
+        });
         enable_raw_mode()?;
         let mut output = io::stdout();
         execute!(
@@ -37,17 +47,26 @@ impl CrosstermFrontend {
             hits: HitMap::default(),
             last_paste: None,
             attention: Default::default(),
-            tmux: crate::ui::attention::in_tmux(),
+            profile,
+            desktop,
         })
     }
 
-    /// Writes what [`crate::ui::attention::Attention`] asks for, if anything.
+    /// Writes and sends what [`crate::ui::attention::Attention`] asks for,
+    /// if anything.
     pub(super) fn signal(&mut self, model: Option<&Model>) -> io::Result<()> {
         use std::io::Write;
-        let bytes = self.attention.update_model(model, self.tmux);
-        if let Some(bytes) = bytes {
+        let signals = self
+            .attention
+            .update(model, &self.profile, std::time::Instant::now());
+        if let Some(desktop) = &self.desktop {
+            for call in signals.desktop {
+                desktop.send(call);
+            }
+        }
+        if !signals.terminal.is_empty() {
             let output = self.terminal.backend_mut();
-            output.write_all(&bytes)?;
+            output.write_all(signals.terminal.as_bytes())?;
             output.flush()?;
         }
         Ok(())

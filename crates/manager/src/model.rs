@@ -10,7 +10,7 @@ mod procedures;
 mod profiles;
 mod visibility;
 pub use procedures::{
-    approval_procedure, prompt_procedure, Between, FinishedStep, Procedure, StepKind,
+    approval_procedure, prompt_procedure, Between, FinishedStep, Procedure, StepKind, StepOutcome,
     FLASH_PERIOD, SPINNER_PERIOD,
 };
 pub use attributes::{Attribute, Facet, FacetMode};

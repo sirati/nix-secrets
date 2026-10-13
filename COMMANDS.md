@@ -10,6 +10,17 @@ request for values or signatures is denied 120 seconds after the TUI shows it,
 unless the operator cancels that countdown. Inside a procedure only the first
 step has a countdown. Deployment requests have none.
 
+The TUI rings the bell and raises a desktop notification for each new request,
+when a countdown starts, 30 seconds before it denies and when a procedure step
+times out or fails. kitty gets OSC 99; foot, WezTerm, Ghostty and Konsole get
+OSC 777; iTerm2 gets OSC 9. Inside tmux these pass only with
+`allow-passthrough on`. GNOME Console and GNOME Terminal show none of these,
+so there, in tmux without passthrough and in unknown terminals, the TUI calls
+`org.freedesktop.Notifications` on the session bus itself, but only in a local
+graphical session and never over SSH. Set
+`NIX_SECRETS_DESKTOP_NOTIFICATIONS=off` to turn that off, or `=always` to use
+it in addition to the terminal's notification.
+
 ## deploy
 
 ```text

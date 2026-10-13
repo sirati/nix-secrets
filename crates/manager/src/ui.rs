@@ -32,6 +32,7 @@ mod reducer;
 pub use reducer::reduce;
 mod approval;
 mod attention;
+mod desktop_notify;
 mod deploy_host;
 mod provider_failure;
 pub(crate) mod secret_request;

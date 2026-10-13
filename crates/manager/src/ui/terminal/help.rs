@@ -82,9 +82,14 @@ A program on the backend host (nix-secrets with-secrets or pipe-secret)
 asks for values. A modal opens with a table of the values and their
 kinds, the recipient, the key source, the requesting command, its
 directory and parent, and a countdown. The dialog underneath is kept.
-The terminal bell rings, a desktop notification is sent where the
-terminal supports one, and the window title shows the request; the bell
-rings again 30 s before the request expires.
+The terminal bell rings, a desktop notification is raised and the window
+title reads (!) nix-secrets: approval needed. kitty, foot, WezTerm,
+Ghostty, Konsole and iTerm2 show the notification themselves; for GNOME
+Console, GNOME Terminal and others the TUI sends it over the session bus
+when it runs in a local graphical session, never over SSH
+(NIX_SECRETS_DESKTOP_NOTIFICATIONS=off turns that off). It notifies again
+when a countdown starts, 30 s before it denies, and when a procedure step
+times out or fails.
 Ctrl+Shift+Y or Yes  Decrypt all of them with one 1Password authorization
                      and send them to that program
 d or Details         Show full descriptions, fingerprints and commands

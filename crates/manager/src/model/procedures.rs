@@ -217,10 +217,15 @@ impl Procedure {
     /// For a failed result, the step it missed: `timed out at step 1/3:
     /// sign closure for ns1`, `denied at …` or `failed at …`.
     pub fn missed(&self) -> Option<String> {
+        self.missed_step().and_then(FinishedStep::missed)
+    }
+
+    /// For a failed result, the last step that did not succeed.
+    pub fn missed_step(&self) -> Option<&FinishedStep> {
         if !self.failed() {
             return None;
         }
-        self.finished.iter().rev().find_map(FinishedStep::missed)
+        self.finished.iter().rev().find(|step| !step.succeeded())
     }
 
     /// The step after the last finished one: `step 3/3`, or `step 3`.

@@ -7,6 +7,7 @@
   util-linux,
   perl,
   acl,
+  dbus,
   runCommand,
 }:
 
@@ -41,6 +42,8 @@ rustPlatform.buildRustPackage {
     perl
     # Readiness regressions inspect real POSIX ACL metadata.
     acl
+    # Desktop notifications go through a private session bus in a test.
+    dbus
   ];
 
   cargoBuildFlags = [
