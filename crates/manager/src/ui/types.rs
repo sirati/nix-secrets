@@ -173,6 +173,18 @@ pub enum Completion {
     CommitFailed(String),
 }
 
+impl Completion {
+    /// The operator-channel request this is the outcome of, if any.
+    pub fn secret_request(&self) -> Option<&str> {
+        match self {
+            Self::SecretRequestFinished { id, .. }
+            | Self::SshSignatureFinished { id, .. }
+            | Self::ArtifactSignatureFinished { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GenerateKind {
     Password,

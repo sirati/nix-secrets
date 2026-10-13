@@ -520,3 +520,66 @@ fn a_lost_channel_reports_the_outage_and_reattaching_lists_the_live_procedures()
     );
     assert_eq!(writer.connection_problem(), None);
 }
+
+#[test]
+fn an_outcome_waits_until_the_ui_took_in_its_prompt() {
+    use crate::operator_channel::{ChannelEvent, SecretPrompt};
+    let (commands, _incoming) = mpsc::channel();
+    let (_outgoing, events) = mpsc::channel();
+    let (channel_events, channel) = mpsc::channel();
+    let mut writer = AsyncWriter {
+        commands,
+        events,
+        rows: None,
+        profiles: None,
+        approvals: vec![],
+        completions: vec![],
+        busy: false,
+        pending: Default::default(),
+        drafts: Default::default(),
+        activity: None,
+        one_password: false,
+        socket: None,
+        channel: Some(channel),
+        decisions: None,
+        secret_prompts: vec![],
+        secret_activity: Default::default(),
+        procedure_events: vec![],
+        worker_lost: None,
+        channel_lost: None,
+        attach_snapshot: vec![],
+    };
+    let prompt = SecretPrompt {
+        id: "closure".into(),
+        ssh_signature: false,
+        artifact_signature: false,
+        closure_signature: true,
+        reason: None,
+        values: vec![],
+        identity: "1Password".into(),
+        requester: nix_secrets_core::secret_request::ProcessInfo {
+            pid: 1,
+            executable: None,
+            argv: vec![],
+            cwd: None,
+        },
+        parent: None,
+        deadline: None,
+        procedure: None,
+    };
+    // A prompt and its denial arrive in the same batch.
+    channel_events.send(ChannelEvent::Prompt(prompt)).unwrap();
+    channel_events
+        .send(ChannelEvent::ArtifactSignatureFinished {
+            id: "closure".into(),
+            requester: "x".into(),
+            result: Err("operator did not approve closure signing in time".into()),
+        })
+        .unwrap();
+    assert!(writer.poll_completion().is_none(), "the prompt is not taken in yet");
+    assert_eq!(writer.poll_secret_prompt().unwrap().id, "closure");
+    assert_eq!(
+        writer.poll_completion().unwrap().secret_request(),
+        Some("closure")
+    );
+}

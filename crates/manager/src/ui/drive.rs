@@ -19,6 +19,11 @@ pub fn drive(
             .min(Duration::from_millis(50));
         let event = frontend.read(timeout)?;
         if event == UiEvent::Tick {
+            // Prompts first: the channel sends a prompt before its outcome,
+            // and the outcome must find the step it closes.
+            if super::secret_request::tick(model, writer) {
+                schedule(&mut redraw_at);
+            }
             while let Some(completion) = writer.poll_completion() {
                 apply_completion(model, completion);
                 schedule(&mut redraw_at);
@@ -32,9 +37,6 @@ pub fn drive(
             let problem = writer.connection_problem();
             if problem != model.backend_problem {
                 model.backend_problem = problem;
-                schedule(&mut redraw_at);
-            }
-            if super::secret_request::tick(model, writer) {
                 schedule(&mut redraw_at);
             }
             match writer.refresh_profiles() {

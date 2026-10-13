@@ -98,7 +98,7 @@ pub(super) fn intercept(
     } else {
         prompt.values.len()
     };
-    let prompt = model.take_shown_prompt().expect("a prompt is shown");
+    let prompt = model.take_shown_prompt(decision).expect("a prompt is shown");
     // An approval shows the progress strip; the outcome arrives in the
     // procedure's dialog, or as a notice for a request of its own.
     if let Err(error) = writer.answer_secret(&prompt.id, decision, count) {
@@ -166,7 +166,7 @@ pub(super) fn tick(model: &mut Model, writer: &mut impl SecretWriter) -> bool {
             ProcedureEvent::Step(step) => model.procedure_step(step),
             ProcedureEvent::Ended(id, exit_code) => model.procedure_ended(&id, exit_code),
             ProcedureEvent::Withdrawn(id) => {
-                model.remove_prompt(&id);
+                model.withdraw_prompt(&id);
             }
             ProcedureEvent::Disconnected => model.connection_lost(),
             ProcedureEvent::Reconnected => {

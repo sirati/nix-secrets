@@ -723,7 +723,11 @@ fn a_failed_or_denied_step_shows_in_the_dialog_and_a_minimised_one_flashes() {
     );
     assert!(model.message.is_none(), "{:?}", model.message);
     let screen = render(&model);
-    assert!(screen.contains("┌Update ns1 · failed"), "{screen}");
+    assert!(
+        screen.contains("┌Update ns1 · denied at step 1/3: sign closure for ns1"),
+        "{screen}"
+    );
+    assert!(screen.contains("You denied the step."), "{screen}");
     assert!(
         screen.contains("✗ step 1/3: sign closure for ns1: the operator denied closure signing"),
         "{screen}"
@@ -739,6 +743,11 @@ fn a_failed_or_denied_step_shows_in_the_dialog_and_a_minimised_one_flashes() {
     signed(&mut model, "second", Err("signing failed".into()));
     let procedure = model.procedure(UPDATE).unwrap();
     assert!(procedure.minimised && procedure.flashing && procedure.failed());
+    let screen = render(&model);
+    assert!(
+        screen.contains("▪ Update ns1 · failed at step 2/3: sign closure for ns1 · waiting for you"),
+        "{screen}"
+    );
 }
 
 #[test]
@@ -792,4 +801,155 @@ fn an_end_that_overtakes_the_deployment_outcome_still_shows_both() {
     let screen = render(&model);
     assert!(screen.contains("┌Update ns1 · done"), "{screen}");
     assert!(screen.contains("✓ step 1/1: secrets deployed"), "{screen}");
+}
+
+/// The bug: a step whose countdown ran out left its procedure "working",
+/// with nothing for M to restore.
+#[test]
+fn a_timed_out_step_shows_as_missed_flashes_and_m_restores_it() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel
+        .events
+        .push(ProcedureEvent::Step(step(UPDATE, "Update ns1", 0, "starting")));
+    tick(&mut model, &mut channel);
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    assert!(model.procedure(UPDATE).unwrap().minimised);
+    // The countdown runs out while the dialog sits in the task bar.
+    model.procedures[0].prompts[0].deadline = Some(Instant::now());
+    tick(&mut model, &mut channel);
+    let procedure = model.procedure(UPDATE).unwrap();
+    assert!(procedure.prompts.is_empty());
+    assert!(procedure.failed() && procedure.flashing, "{procedure:?}");
+    let screen = render(&model);
+    assert!(
+        screen.contains("▪ Update ns1 · timed out at step 1/3: sign closure for ns1 · waiting for you"),
+        "{screen}"
+    );
+    assert!(!screen.contains("working"), "{screen}");
+    // The channel's denial at the same deadline adds nothing, not even a notice.
+    signed(
+        &mut model,
+        "closure",
+        Err("operator did not approve closure signing in time".into()),
+    );
+    assert!(model.message.is_none(), "{:?}", model.message);
+    assert_eq!(model.procedure(UPDATE).unwrap().finished.len(), 1);
+    // M brings it up.
+    reduce(&mut model, UiEvent::Character('M'), &mut channel);
+    let screen = render(&model);
+    assert!(
+        screen.contains("┌Update ns1 · timed out at step 1/3: sign closure for ns1"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("✗ step 1/3: sign closure for ns1: no answer within 120 s"),
+        "{screen}"
+    );
+    assert!(screen.contains("Nobody answered the step in time."), "{screen}");
+    // The requester exits after the denial: the result says so and stays.
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(1)));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("The command failed with exit status 1."), "{screen}");
+    assert!(
+        screen.contains("┌Update ns1 · timed out at step 1/3: sign closure for ns1"),
+        "{screen}"
+    );
+    reduce(&mut model, UiEvent::Enter, &mut channel);
+    assert!(model.procedures.is_empty(), "acknowledged, it goes");
+}
+
+#[test]
+fn a_denial_at_the_deadline_counts_as_timed_out_even_before_the_tui_expires_it() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    let mut closure = closure_step("closure", 1, 3);
+    closure.deadline = Some(Instant::now() + Duration::from_millis(500));
+    channel.prompts.push(closure);
+    tick(&mut model, &mut channel);
+    // The channel's countdown fires a moment before the TUI's tick.
+    signed(
+        &mut model,
+        "closure",
+        Err("operator did not approve closure signing in time".into()),
+    );
+    let screen = render(&model);
+    assert!(
+        screen.contains("┌Update ns1 · timed out at step 1/3: sign closure for ns1"),
+        "{screen}"
+    );
+}
+
+#[test]
+fn a_requester_that_exits_while_its_step_waits_ends_the_procedure_visibly() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    // The command exits first, then the backend withdraws its request.
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(130)));
+    channel.events.push(ProcedureEvent::Withdrawn("closure".into()));
+    tick(&mut model, &mut channel);
+    let procedure = model.procedure(UPDATE).expect("the procedure stays to be seen");
+    assert!(procedure.failed() && procedure.flashing, "{procedure:?}");
+    let screen = render(&model);
+    assert!(
+        screen.contains("▪ Update ns1 · failed at step 1/3: sign closure for ns1 · waiting for you"),
+        "{screen}"
+    );
+    // The handler's denial for the withdrawn request is absorbed.
+    signed(
+        &mut model,
+        "closure",
+        Err("closure signing was withdrawn by the backend".into()),
+    );
+    assert!(model.message.is_none(), "{:?}", model.message);
+    reduce(&mut model, UiEvent::Character('M'), &mut channel);
+    let screen = render(&model);
+    assert!(
+        screen.contains("✗ step 1/3: sign closure for ns1: withdrawn: its requester left"),
+        "{screen}"
+    );
+    assert!(screen.contains("Ended after step 1 of 3. The command failed with exit status 130."), "{screen}");
+}
+
+#[test]
+fn a_step_on_screen_that_times_out_shows_its_result_in_place() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    let mut closure = closure_step("closure", 1, 3);
+    closure.deadline = Some(Instant::now());
+    channel.prompts.push(closure);
+    tick(&mut model, &mut channel);
+    let procedure = model.procedure(UPDATE).unwrap();
+    assert!(!procedure.minimised && !procedure.flashing && procedure.failed());
+    let screen = render(&model);
+    assert!(
+        screen.contains("┌Update ns1 · timed out at step 1/3: sign closure for ns1"),
+        "{screen}"
+    );
+}
+
+#[test]
+fn a_deployment_asked_again_gets_its_new_outcome_recorded() {
+    let mut model = model(true);
+    model.procedure_step(step(UPDATE, "Update ns1", 3, "deploy secrets to ns1"));
+    let request = ApprovalRequest {
+        id: "deploy".into(),
+        target: "ns1".into(),
+        procedure: Some(step(UPDATE, "Update ns1", 3, "deploy secrets to ns1")),
+        ..Default::default()
+    };
+    model.deployment_answered(&request);
+    assert!(model.step_finished("deploy", Ok(None)));
+    // The same request in flight again, for a later phase.
+    model.deployment_answered(&request);
+    assert!(model.step_finished("deploy", Err("you rejected the host-provided changes".into())));
+    let procedure = model.procedure(UPDATE).unwrap();
+    assert_eq!(procedure.finished.len(), 2);
+    assert!(model.deployment_in_flight().is_none());
 }

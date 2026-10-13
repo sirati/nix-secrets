@@ -439,11 +439,14 @@ impl SecretWriter for AsyncWriter {
     }
     fn poll_completion(&mut self) -> Option<Completion> {
         self.pump();
-        if self.completions.is_empty() {
-            None
-        } else {
-            Some(self.completions.remove(0))
-        }
+        // The outcome of a request whose prompt the UI has not taken in yet
+        // waits for it, so that it closes the step the prompt opens.
+        let position = self.completions.iter().position(|completion| {
+            completion
+                .secret_request()
+                .is_none_or(|id| !self.secret_prompts.iter().any(|prompt| prompt.id == id))
+        })?;
+        Some(self.completions.remove(position))
     }
 
     fn refresh_rows(&mut self) -> Result<Option<Vec<Row>>, String> {

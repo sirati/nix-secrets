@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 pub const FLASH_PERIOD: Duration = Duration::from_millis(500);
 /// How often the spinner of a waiting procedure dialog moves.
 pub const SPINNER_PERIOD: Duration = Duration::from_millis(120);
+/// A denial this close to a step's deadline is its countdown running out.
+const DEADLINE_SLACK: Duration = Duration::from_secs(2);
 
 /// What a step asked the operator for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,27 +67,72 @@ struct InFlight {
     request: String,
     step: ProcedureStep,
     kind: StepKind,
+    /// The operator denied it.
+    denied: bool,
+    /// When its countdown denies it, while it counts down.
+    deadline: Option<Instant>,
+}
+
+/// How a finished step ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StepOutcome {
+    Done,
+    Failed,
+    Denied,
+    /// Its countdown ran out before the operator answered.
+    TimedOut,
+}
+
+impl StepOutcome {
+    /// `timed out`, as in "timed out at step 1/3".
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Denied => "denied",
+            Self::TimedOut => "timed out",
+        }
+    }
 }
 
 /// A step whose outcome arrived, as its dialog lists it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FinishedStep {
+    /// The prompt id, or the deployment request id.
+    request: String,
     pub step: ProcedureStep,
     pub kind: StepKind,
     /// What it did, or why it failed.
     pub text: String,
-    pub succeeded: bool,
+    pub outcome: StepOutcome,
 }
 
 impl FinishedStep {
+    pub fn succeeded(&self) -> bool {
+        self.outcome == StepOutcome::Done
+    }
+
     /// `✓ step 1/3: closure signed` or `✗ step 2/3: SSH authentication to
     /// update@ns1: the operator denied SSH authentication`.
     pub fn line(&self) -> String {
-        if self.succeeded {
+        if self.succeeded() {
             format!("✓ {}: {}", self.step.position(), self.text)
         } else {
             format!("✗ {}: {}: {}", self.step.position(), self.step.label, self.text)
         }
+    }
+
+    /// `timed out at step 1/3: sign closure for ns1`, for a step that did
+    /// not succeed.
+    pub fn missed(&self) -> Option<String> {
+        (!self.succeeded()).then(|| {
+            format!(
+                "{} at {}: {}",
+                self.outcome.verb(),
+                self.step.position(),
+                self.step.label
+            )
+        })
     }
 }
 
@@ -167,6 +214,15 @@ impl Procedure {
         matches!(self.between, Some(Between::Result { succeeded: false, .. }))
     }
 
+    /// For a failed result, the step it missed: `timed out at step 1/3:
+    /// sign closure for ns1`, `denied at …` or `failed at …`.
+    pub fn missed(&self) -> Option<String> {
+        if !self.failed() {
+            return None;
+        }
+        self.finished.iter().rev().find_map(FinishedStep::missed)
+    }
+
     /// The step after the last finished one: `step 3/3`, or `step 3`.
     fn next_position(&self) -> String {
         let mut next = self
@@ -198,7 +254,7 @@ impl Procedure {
             Between::Result { .. } if self.ended_early() && self.exit_code == Some(0) => {
                 "ended early".into()
             }
-            Between::Result { .. } => "failed".into(),
+            Between::Result { .. } => self.missed().unwrap_or_else(|| "failed".into()),
         };
         Some(format!("{} · {state}", self.title))
     }
@@ -265,7 +321,7 @@ impl Procedure {
     /// Whether its last declared step is done.
     fn last_step_done(&self) -> bool {
         self.finished.last().is_some_and(|finished| {
-            finished.succeeded
+            finished.succeeded()
                 && finished
                     .step
                     .steps
@@ -431,6 +487,8 @@ impl Model {
                 request: prompt.id.clone(),
                 step,
                 kind: StepKind::of(&prompt),
+                denied: false,
+                deadline: prompt.deadline,
             });
             procedure.between = None;
         }
@@ -452,7 +510,10 @@ impl Model {
     /// The backend reported the end of a procedure and, if known, how its
     /// command exited. Its dialog shows the result.
     pub fn procedure_ended(&mut self, id: &str, exit_code: Option<i32>) {
-        let shown = self.between_shown().is_some_and(|procedure| procedure.id == id);
+        // Its dialog on screen shows the result in place.
+        let shown = matches!(self.mode, Mode::Browse)
+            && self.foreground.as_deref() == Some(id)
+            && self.procedure(id).is_some_and(|procedure| !procedure.minimised);
         if let Some(procedure) = self.procedure_mut(id) {
             procedure.ended = true;
             procedure.exit_code = exit_code;
@@ -476,7 +537,7 @@ impl Model {
                     _ => {
                         // The exit status speaks for steps whose outcome has not
                         // arrived yet: `deploy --wait` exits only once deployed.
-                        let all_done = procedure.finished.iter().all(|step| step.succeeded);
+                        let all_done = procedure.finished.iter().all(FinishedStep::succeeded);
                         let early = procedure.ended_early();
                         let summary = if early {
                             let reached = procedure.reached();
@@ -552,6 +613,8 @@ impl Model {
                 request: request.id.clone(),
                 step,
                 kind: StepKind::Deployment,
+                denied: false,
+                deadline: None,
             });
         }
         if procedure.prompts.is_empty() {
@@ -577,44 +640,84 @@ impl Model {
     /// says, or `Err` with why it failed. Returns whether `request` was a
     /// step of a procedure; if not, the caller reports it as a notice.
     pub fn step_finished(&mut self, request: &str, outcome: Result<Option<String>, String>) -> bool {
-        let Some(index) = self.procedures.iter().position(|procedure| {
-            procedure.in_flight.iter().any(|flight| flight.request == request)
-        }) else {
-            return false;
+        let Some((index, flight)) = self.take_in_flight(request) else {
+            // A step closed here already, when its countdown ran out or its
+            // requester left, lists why; the channel's denial that follows
+            // adds nothing.
+            return self
+                .procedures
+                .iter()
+                .any(|procedure| procedure.finished.iter().any(|step| step.request == request));
         };
+        let (outcome, text) = match outcome {
+            Ok(text) => (
+                StepOutcome::Done,
+                text.unwrap_or_else(|| flight.kind.done().into()),
+            ),
+            Err(error) if flight.denied => (StepOutcome::Denied, error),
+            // The channel denies at the same deadline as the countdown here.
+            Err(error)
+                if flight
+                    .deadline
+                    .is_some_and(|deadline| Instant::now() + DEADLINE_SLACK >= deadline) =>
+            {
+                (StepOutcome::TimedOut, error)
+            }
+            Err(error) => (StepOutcome::Failed, error),
+        };
+        self.record_step(index, flight, outcome, text);
+        self.tidy_procedures();
+        true
+    }
+
+    /// Removes the step asked by `request` from what is in flight.
+    fn take_in_flight(&mut self, request: &str) -> Option<(usize, InFlight)> {
+        self.procedures.iter_mut().enumerate().find_map(|(index, procedure)| {
+            let position = procedure
+                .in_flight
+                .iter()
+                .position(|flight| flight.request == request)?;
+            Some((index, procedure.in_flight.remove(position)))
+        })
+    }
+
+    /// Lists a finished step in its procedure's dialog and, once nothing of
+    /// the procedure is open or in flight, shows what comes next. A step
+    /// that did not succeed fails the procedure; unless its dialog is on
+    /// screen, its task bar entry flashes.
+    fn record_step(&mut self, index: usize, flight: InFlight, outcome: StepOutcome, text: String) {
+        let succeeded = outcome == StepOutcome::Done;
         let procedure = &mut self.procedures[index];
-        let position = procedure
-            .in_flight
-            .iter()
-            .position(|flight| flight.request == request)
-            .expect("found above");
-        let flight = procedure.in_flight.remove(position);
-        let succeeded = outcome.is_ok();
-        let text = match outcome {
-            Ok(text) => text.unwrap_or_else(|| flight.kind.done().into()),
-            Err(error) => error,
-        };
         procedure.finished.push(FinishedStep {
+            request: flight.request,
             step: flight.step,
             kind: flight.kind,
             text,
-            succeeded,
+            outcome,
         });
         let open = !procedure.prompts.is_empty()
             || matches!(&self.mode, Mode::Approval(open) if approval_procedure(open) == procedure.id);
         let procedure = &mut self.procedures[index];
         if procedure.ended {
-            // Its result is shown already; a late outcome joins its list.
-            if let (false, Some(Between::Result { succeeded, .. })) =
-                (succeeded, procedure.between.as_mut())
-            {
-                *succeeded = false;
+            match procedure.between.as_mut() {
+                // Its result is shown already; a late outcome joins its list.
+                Some(Between::Result { succeeded: shown, .. }) => *shown &= succeeded,
+                // It ended while this step was open: its result shows now.
+                _ if !open => {
+                    let (id, exit_code) = (procedure.id.clone(), procedure.exit_code);
+                    self.procedure_ended(&id, exit_code);
+                }
+                _ => {}
             }
         } else if !open && procedure.in_flight.is_empty() && !procedure.failed() {
             procedure.between = Some(if !succeeded {
                 Between::Result {
                     succeeded: false,
-                    text: "The step failed.".into(),
+                    text: match outcome {
+                        StepOutcome::Denied => "You denied the step.".into(),
+                        StepOutcome::TimedOut => "Nobody answered the step in time.".into(),
+                        _ => "The step failed.".into(),
+                    },
                 }
             } else if procedure.last_step_done() {
                 Between::Result {
@@ -635,8 +738,6 @@ impl Model {
                 }
             }
         }
-        self.tidy_procedures();
-        true
     }
 
     /// Closes the result in the procedure dialog on screen.
@@ -667,8 +768,14 @@ impl Model {
         true
     }
 
-    /// Removes a prompt the backend withdrew or that finished elsewhere.
+    /// Removes a prompt that finished elsewhere or whose answer failed.
     pub fn remove_prompt(&mut self, prompt_id: &str) -> bool {
+        let removed = self.drop_prompt(prompt_id);
+        self.tidy_procedures();
+        removed
+    }
+
+    fn drop_prompt(&mut self, prompt_id: &str) -> bool {
         let shown = self.shown_prompt().is_some_and(|prompt| prompt.id == prompt_id);
         let mut removed = false;
         for procedure in &mut self.procedures {
@@ -680,18 +787,44 @@ impl Model {
             self.secret_scroll = 0;
             self.secret_details = false;
         }
+        removed
+    }
+
+    /// Closes a prompt nobody answered. A step of a procedure is listed as
+    /// missed in its dialog right away, so it never looks busy; the
+    /// channel's denial that follows is absorbed by [`Self::step_finished`].
+    fn prompt_missed(&mut self, prompt_id: &str, outcome: StepOutcome, text: String) -> bool {
+        let removed = self.drop_prompt(prompt_id);
+        if let Some((index, flight)) = self.take_in_flight(prompt_id) {
+            self.record_step(index, flight, outcome, text);
+        }
         self.tidy_procedures();
         removed
     }
 
+    /// The backend withdrew a prompt: its requester left, or it gave up.
+    pub fn withdraw_prompt(&mut self, prompt_id: &str) -> bool {
+        self.prompt_missed(
+            prompt_id,
+            StepOutcome::Failed,
+            "withdrawn: its requester left".into(),
+        )
+    }
+
     /// Takes the prompt on screen, which the operator just answered.
-    pub fn take_shown_prompt(&mut self) -> Option<SecretPrompt> {
+    pub fn take_shown_prompt(&mut self, approved: bool) -> Option<SecretPrompt> {
         let id = self.foreground.clone()?;
-        let prompt = self
+        let procedure = self
             .procedure_mut(&id)
-            .filter(|procedure| !procedure.minimised)?
-            .prompts
-            .pop_front()?;
+            .filter(|procedure| !procedure.minimised)?;
+        let prompt = procedure.prompts.pop_front()?;
+        if let Some(flight) = procedure
+            .in_flight
+            .iter_mut()
+            .find(|flight| flight.request == prompt.id)
+        {
+            flight.denied = !approved;
+        }
         self.secret_scroll = 0;
         self.secret_details = false;
         self.step_answered(&id);
@@ -710,7 +843,14 @@ impl Model {
             .map(|prompt| prompt.id.clone())
             .collect::<Vec<_>>();
         for id in &expired {
-            self.remove_prompt(id);
+            self.prompt_missed(
+                id,
+                StepOutcome::TimedOut,
+                format!(
+                    "no answer within {} s",
+                    crate::operator_channel::DECISION_TIMEOUT.as_secs()
+                ),
+            );
         }
         !expired.is_empty()
     }
@@ -719,12 +859,17 @@ impl Model {
     /// channel, or `None` if it had none.
     pub fn cancel_countdown(&mut self) -> Option<String> {
         let id = self.foreground.clone()?;
-        let prompt = self
+        let procedure = self
             .procedure_mut(&id)
-            .filter(|procedure| !procedure.minimised)?
-            .prompts
-            .front_mut()?;
-        prompt.deadline.take().map(|_| prompt.id.clone())
+            .filter(|procedure| !procedure.minimised)?;
+        let prompt = procedure.prompts.front_mut()?;
+        let request = prompt.deadline.take().map(|_| prompt.id.clone())?;
+        for flight in &mut procedure.in_flight {
+            if flight.request == request {
+                flight.deadline = None;
+            }
+        }
+        Some(request)
     }
 
     /// `m`: moves the foreground procedure's dialog to the task bar.

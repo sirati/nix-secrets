@@ -14,7 +14,8 @@ pub(super) fn state(model: &Model, procedure: &Procedure) -> String {
         };
     }
     if procedure.failed() {
-        "failed · waiting for you".into()
+        let missed = procedure.missed().unwrap_or_else(|| "failed".into());
+        format!("{missed} · waiting for you")
     } else if model.procedure_waiting(procedure) {
         "waiting for you".into()
     } else if matches!(
@@ -38,7 +39,13 @@ pub(super) fn entry(model: &Model, procedure: &Procedure) -> String {
     } else {
         "▪"
     };
-    format!("{marker} {} · {}", procedure.heading(), state(model, procedure))
+    // A failure names the step it missed itself.
+    let heading = if procedure.prompts.is_empty() && procedure.missed().is_some() {
+        procedure.title.clone()
+    } else {
+        procedure.heading()
+    };
+    format!("{marker} {heading} · {}", state(model, procedure))
 }
 
 fn style(model: &Model, procedure: &Procedure) -> Style {
