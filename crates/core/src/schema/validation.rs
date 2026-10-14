@@ -157,7 +157,8 @@ const MAX_KNOWN_HOSTS_LINES: usize = 256;
 /// `host algorithm key` on port 22, or `[host]:port algorithm key`, naming one
 /// of `hosts` on `port`, with an
 /// Ed25519, ECDSA or RSA key, no markers, wildcards, host lists or duplicates.
-pub fn validate_ssh_known_hosts(value: &str, hosts: &[&str], port: u16) -> Result<(), &'static str> {
+/// An error names the line's host.
+pub fn validate_ssh_known_hosts(value: &str, hosts: &[&str], port: u16) -> Result<(), String> {
     known_hosts_lines(value, hosts, port).map(|_| ())
 }
 
@@ -167,7 +168,7 @@ pub fn known_hosts_keys(
     hosts: &[&str],
     port: u16,
     host: &str,
-) -> Result<Vec<String>, &'static str> {
+) -> Result<Vec<String>, String> {
     Ok(known_hosts_lines(value, hosts, port)?
         .into_iter()
         .filter(|(name, _)| *name == host)
@@ -179,44 +180,57 @@ fn known_hosts_lines<'a>(
     value: &'a str,
     hosts: &[&str],
     port: u16,
-) -> Result<Vec<(&'a str, String)>, &'static str> {
+) -> Result<Vec<(&'a str, String)>, String> {
     if value.len() > MAX_KNOWN_HOSTS_BYTES || value.contains('\r') {
-        return Err("known_hosts value is too large or contains carriage return");
+        return Err("known_hosts value is too large or contains carriage return".into());
     }
     let body = value.strip_suffix('\n').unwrap_or(value);
     if body.is_empty() {
-        return Err("known_hosts value is empty");
+        return Err("known_hosts value is empty".into());
     }
     let mut seen = std::collections::BTreeSet::new();
     let mut lines = Vec::new();
-    for line in body.split('\n') {
+    for (number, line) in body.split('\n').enumerate() {
+        let number = number + 1;
         if lines.len() == MAX_KNOWN_HOSTS_LINES {
-            return Err("known_hosts value has too many lines");
+            return Err("known_hosts value has too many lines".into());
         }
         if line.contains(['*', '?', ',', '@', '|', '#']) {
-            return Err("known_hosts markers, wildcards, and host lists are forbidden");
+            return Err(format!(
+                "known_hosts line {number}: markers, wildcards, and host lists are forbidden"
+            ));
         }
         let parts = line.split_ascii_whitespace().collect::<Vec<_>>();
         if parts.len() != 3 || line != format!("{} {} {}", parts[0], parts[1], parts[2]) {
-            return Err("known_hosts must use canonical `[host]:port algorithm key` lines");
+            return Err(format!(
+                "known_hosts line {number} is not a canonical `[host]:port algorithm key` line"
+            ));
         }
+        let name = parts[0];
         let host = hosts
             .iter()
             .copied()
-            .find(|host| parts[0] == format!("[{host}]:{port}") || (port == 22 && parts[0] == *host))
-            .ok_or("known_hosts host or port does not match the schema")?;
-        let host = if parts[0] == host { parts[0] } else { &parts[0][1..1 + host.len()] };
+            .find(|host| name == format!("[{host}]:{port}") || (port == 22 && name == *host))
+            .ok_or_else(|| {
+                format!(
+                    "known_hosts line {number} names {name}, but the schema allows only {} on port {port}",
+                    hosts.join(", ")
+                )
+            })?;
+        let host = if name == host { name } else { &name[1..1 + host.len()] };
         let key = ssh_key::PublicKey::from_openssh(&format!("{} {}", parts[1], parts[2]))
-            .map_err(|_| "invalid known_hosts key")?;
+            .map_err(|_| format!("known_hosts line {number} ({name}) has an invalid key"))?;
         if !matches!(
             key.algorithm(),
             ssh_key::Algorithm::Ed25519 | ssh_key::Algorithm::Ecdsa { .. } | ssh_key::Algorithm::Rsa { .. }
         ) || key.algorithm().as_str() != parts[1]
         {
-            return Err("known_hosts key must be Ed25519, ECDSA or RSA");
+            return Err(format!(
+                "known_hosts line {number} ({name}): the key must be Ed25519, ECDSA or RSA"
+            ));
         }
-        if !seen.insert((parts[0], parts[2])) {
-            return Err("known_hosts value repeats a line");
+        if !seen.insert((name, parts[2])) {
+            return Err(format!("known_hosts line {number} ({name}) repeats an earlier line"));
         }
         lines.push((host, format!("{} {}", parts[1], parts[2])));
     }

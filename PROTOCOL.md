@@ -2,8 +2,8 @@
 
 ## Backend socket
 
-The socket is `$XDG_RUNTIME_DIR/nix-secrets/backend-v23-<hash>.sock`, where
-`<hash>` is 16 hex digits hashed from the canonical repository path and 22 is
+The socket is `$XDG_RUNTIME_DIR/nix-secrets/backend-v25-<hash>.sock`, where
+`<hash>` is 16 hex digits hashed from the canonical repository path and 25 is
 the compatibility version. A `.lock` file next to it belongs to the running
 backend. A starter never removes the socket of a backend that holds the lock.
 A backend whose socket is removed or replaced exits.
@@ -31,6 +31,10 @@ seconds old.
 - `recipient_registry`, mapping references such as `primary#0` to key
   identities.
 - `public_info`, keyed by shared ID, with `version_id` and a plaintext `value`.
+  A value the current schema rejects, such as one published before its host
+  list was narrowed, stays stored and is never deployed. The request lists it
+  with the offending line; the producer's next deployment republishes it after
+  the operator approves the replacement.
 - `generated_public_keys`, keyed by identifier, with `version_id` and
   `public_key`.
 
@@ -77,11 +81,16 @@ Inside the relayed stream each message is a 4-byte big-endian length and JSON
 of at most 64 MiB.
 
 1. The TUI sends `{ identifiers, task_identifiers }`.
-2. The target answers with its state for exactly those leaves, taken from its
-   own manifest: `protocol_version`, `hostname`, and per leaf the identifier,
+2. The target answers with its state for the selected leaves its own manifest
+   declares: `protocol_version`, `hostname`, and per leaf the identifier,
    recipient IDs, destination, current version, generator description and
-   derivation description. The TUI aborts on any field that differs from its
-   own evaluation, and on missing, extra or duplicate leaves.
+   derivation description. Since version 5 it lists selected leaves it does
+   not declare in `absent` and its own unselected leaves in `unselected`
+   instead of refusing. The TUI leaves out every leaf that is absent or
+   differs from its own evaluation, names the field, and lists unselected
+   leaves its schema does not know. The operator sees these in the request
+   before approving. A wrong hostname, duplicate or unannounced leaves end
+   the deployment.
 3. The operator approves. The TUI decrypts and sends the batch: `version`,
    `requested_identifiers`, `entries` (`identifier`, `version_id`,
    `contents_base64`), `requested_tasks`, `tasks`, `generate` and `derive`.
@@ -91,10 +100,10 @@ of at most 64 MiB.
 5. The target answers `{"status": "applied", versions, generated_public_keys,
    generated_records, not_deployed}` or `{"status": "rejected", message}`.
 
-The receiver accepts batch versions 1 to 4. Version 2 adds target generation.
+The receiver accepts batch versions 1 to 5. Version 2 adds target generation.
 Version 3 adds shared sources and `tomlPath`. Version 4 lets the batch request
 a subset of the selection, adds `not_deployed`, and allows public information
-with several hosts or key lines. The TUI lists values that need a newer
+with several hosts or key lines. Version 5 lets the host decide what it asks for, as above. The TUI lists values that need a newer
 receiver as not deployed.
 
 The target rejects absolute path components, `..`, symlinks, hard-link

@@ -273,7 +273,7 @@ let
     port = 22;
     identityPublicKeys = [ forwarderPublic ];
     # As the module reports it from the receiver package.
-    protocolVersion = 4;
+    protocolVersion = 5;
   };
   deployment = deploymentOf "machine";
   normalize =
@@ -675,6 +675,28 @@ pkgs.testers.runNixOSTest {
     assert machine.succeed("readlink /persistent/secrets/.current").strip() != first
     audits = machine.succeed("cat /run/nix-secrets/audit/*.json")
     assert '"action":"replaced"' in audits and "token-two" not in audits
+
+    # 6. ns1, 2026-10-14: a public-info value stored under an older schema,
+    #    whose host list was narrowed since. It stays stored, is listed in
+    #    the request with the offending host, is never sent, and the rest of
+    #    the deployment goes through.
+    installed = machine.succeed("cat /persistent/public-info/storage-box/known-hosts")
+    stale = "[box.example]:23 ${knownKey}\\n[old.example]:23 ${knownKey}\\n"
+    operator.succeed(as_op(
+        "printf '%s\\n' '[public_info.\"storage-box/known-hosts\"]'"
+        + " 'version_id = \"0123456789abcdef0123456789abcdef\"'"
+        + f" 'value = \"{stale}\"' >>{repo}/nix-secrets.toml"
+    ))
+    log = start_operator("stale", "y")
+    status, output = operator.execute(deploy("--wait", "machine") + " 2>&1")
+    stop_operator("stale")
+    assert status == 0, output
+    assert "deployed machine" in output, output
+    assert "invalid under the current schema" in output and "names [old.example]:23" in output, output
+    dialogs = operator.succeed(f"cat {log}")
+    assert "missing-kind: machine.services.backup.known-hosts: Stored value invalid under the current schema" in dialogs, dialogs
+    assert "old.example" in operator.succeed(f"cat {repo}/nix-secrets.toml")
+    assert machine.succeed("cat /persistent/public-info/storage-box/known-hosts") == installed
 
     # The published generation survives a reboot and releases the consumers.
     machine.reboot()

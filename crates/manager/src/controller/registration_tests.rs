@@ -833,7 +833,7 @@ fn initial_missing_identity_is_part_of_the_original_expected_selection() {
     };
     let set = fixture.controller.plan_set(&request.secrets).unwrap();
     let plan =
-        super::unset::plan_unset(&fixture.controller.schema, &request.secrets, &set).unwrap();
+        super::unset::plan_unset(&fixture.controller.schema, &request.secrets, &set, &Default::default()).unwrap();
     assert!(plan.skippable.contains(&request.secrets[0]));
     let producer = fixture.controller.producer_identity_in_scope(&request);
     let mut selected = request.clone();
@@ -1033,4 +1033,65 @@ fn other_deployed_consumers_are_deferred_until_original_selected_send() {
             .unwrap()
             .is_none()
     );
+}
+/// ns1, 2026-10-14: the stored receiver identity was published under a
+/// wider host list. The narrower schema must not deadlock the producer.
+#[test]
+fn a_stored_identity_from_an_older_schema_is_kept_listed_and_republished() {
+    let mut fixture = Fixture::new("ns1", false);
+    let leaf = "ns1.services.reporting-trust.receiver-known-hosts".to_owned();
+    let identity = fixture.trusted_identity(7);
+    let key = format!("ssh-ed25519 {}", identity.keys[0].encoded);
+    // Published while the schema still allowed ns1.lamk.eu.
+    let stale = format!("ns1.lamk.eu {key}\nreceiver.example {key}\n");
+    std::fs::write(
+        &fixture.store,
+        format!(
+            "[public_info.\"reporting/receiver-known-hosts\"]\nversion_id = \"{}\"\nvalue = {:?}\n",
+            "ab".repeat(16),
+            stale
+        ),
+    )
+    .unwrap();
+    let ids = vec![leaf.clone()];
+    let set = fixture.controller.plan_set(&ids).unwrap();
+    let plan = super::unset::plan_unset(
+        &fixture.controller.schema,
+        &ids,
+        &set,
+        &fixture.controller.stale_public,
+    )
+    .unwrap();
+    // Listed before approval, naming the value and the offending host, and
+    // never sent.
+    assert_eq!(plan.reasons[&leaf], super::unset::MissingKind::InvalidUnderSchema);
+    let reason = &plan.missing.iter().find(|(id, _)| id == &leaf).unwrap().1;
+    assert!(reason.contains("reporting/receiver-known-hosts"), "{reason}");
+    assert!(reason.contains("names ns1.lamk.eu"), "{reason}");
+    assert!(reason.contains("deploy ns1 to republish it"), "{reason}");
+    assert!(plan.skippable.contains(&leaf));
+    // The producer's own deployment proposes the replacement instead of
+    // refusing, and the old value stays stored until it is approved.
+    let batch = fixture.staged_identity(7);
+    let reviews = batch.reviews();
+    assert_eq!(reviews.len(), 1);
+    assert!(reviews[0].kind.contains("invalid under the current schema"), "{}", reviews[0].kind);
+    assert_eq!(Fixture::stored_identity(&mut fixture.controller), stale);
+    fixture.controller.apply_host_mutations(batch).unwrap();
+    let republished = Fixture::stored_identity(&mut fixture.controller);
+    assert!(!republished.contains("ns1.lamk.eu"), "{republished}");
+    assert!(republished.contains("receiver.example ssh-ed25519"), "{republished}");
+    fixture.controller.plan_set(&ids).unwrap();
+    assert!(fixture.controller.stale_public.is_empty());
+}
+
+impl Fixture {
+    fn stored_identity(controller: &mut Controller) -> String {
+        controller
+            .client
+            .get_public_info("reporting/receiver-known-hosts")
+            .unwrap()
+            .unwrap()
+            .value
+    }
 }

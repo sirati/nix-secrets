@@ -57,7 +57,7 @@ rustPlatform.buildRustPackage {
   cargoTestFlags = [ "--workspace" ];
 
   # The deployment protocol its receiver speaks; see DEPLOYMENT_PROTOCOL_VERSION.
-  passthru.deploymentProtocolVersion = 4;
+  passthru.deploymentProtocolVersion = 5;
 
   meta = {
     description = "Repository-aware secret management and NixOS deployment";

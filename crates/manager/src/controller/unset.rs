@@ -52,6 +52,15 @@ pub enum MissingKind {
     /// The host cannot receive it yet, found before connecting: a missing
     /// prerequisite on the host or a receiver too old for it.
     CannotDeploy,
+    /// Its stored value was published under an older schema. It stays
+    /// stored and is never deployed as if valid.
+    InvalidUnderSchema,
+    /// Selected, but the host's current activation does not declare it.
+    NotDeclaredByHost,
+    /// The host's current activation declares it differently.
+    DeclaredDifferently,
+    /// The host's activation asks for it, and this schema does not know it.
+    UnknownToSchema,
 }
 
 impl MissingKind {
@@ -62,6 +71,10 @@ impl MissingKind {
             Self::FilledByAnotherHost => "Filled by another host",
             Self::DerivedFromUnset => "Derived from unset source",
             Self::CannotDeploy => "Cannot deploy",
+            Self::InvalidUnderSchema => "Stored value invalid under the current schema",
+            Self::NotDeclaredByHost => "Not declared by the host's activation",
+            Self::DeclaredDifferently => "Declared differently by the host",
+            Self::UnknownToSchema => "Asked for by the host, unknown to this schema",
         }
     }
 }
@@ -75,6 +88,37 @@ impl UnsetPlan {
                 .missing
                 .iter()
                 .all(|(identifier, _)| self.skippable.contains(identifier))
+    }
+
+    /// Leaves out what the host's activation disagrees with, from
+    /// [`super::target_mismatches`], and what depended on it.
+    pub(crate) fn exclude_mismatches(&mut self, mismatches: &[(String, MissingKind, String)]) {
+        for (identifier, kind, reason) in mismatches {
+            self.generate.retain(|(id, _)| id != identifier);
+            self.shared.retain(|(id, _)| id != identifier);
+            self.derived.retain(|(id, _)| id != identifier);
+            self.derived_on_target.retain(|(id, _)| id != identifier);
+            self.host_default.retain(|id| id != identifier);
+            self.missing.retain(|(id, _)| id != identifier);
+            self.skippable.retain(|id| id != identifier);
+            self.miss(identifier, *kind, reason.clone());
+        }
+        let waiting = self
+            .derived_on_target
+            .iter()
+            .filter(|(_, source)| {
+                !self.generate.iter().chain(&self.shared).any(|(id, _)| id == source)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for (identifier, source) in waiting {
+            self.derived_on_target.retain(|(id, _)| id != &identifier);
+            self.miss(
+                &identifier,
+                MissingKind::CannotDeploy,
+                format!("its source {source} is left out of this deployment"),
+            );
+        }
     }
 
     pub(crate) fn miss(&mut self, identifier: &str, kind: MissingKind, reason: String) {
@@ -115,15 +159,21 @@ impl UnsetPlan {
 /// task whose operator input is unset is always missing, and so is public
 /// information whose shared value is unset (`set` names public information
 /// by its identifier when its shared value is stored). Target-local keys need
-/// no stored value.
+/// no stored value. `stale` names stored public information the current
+/// schema rejects, with why: it is left out and listed, never sent.
 pub(crate) fn plan_unset(
     schema: &Schema,
     identifiers: &[String],
     set: &BTreeSet<String>,
+    stale: &BTreeMap<String, String>,
 ) -> Result<UnsetPlan, String> {
     let mut plan = UnsetPlan::default();
     let mut waiting = Vec::new();
     for identifier in identifiers {
+        if let Some(reason) = stale.get(identifier) {
+            plan.miss(identifier, MissingKind::InvalidUnderSchema, reason.clone());
+            continue;
+        }
         let path = SecretPath::parse(identifier).map_err(|error| error.to_string())?;
         let leaf = schema.leaf(&path).map_err(|error| error.to_string())?;
         let optional = match &leaf {
@@ -454,22 +504,43 @@ impl Controller {
     /// Stores target-generated records only where the value is still unset.
     /// A value entered meanwhile is kept; the next deployment then replaces
     /// the target's copy with it.
+    #[cfg(test)]
     pub(super) fn store_generated(
         &mut self,
         records: &BTreeMap<String, GeneratedRecord>,
     ) -> Result<Vec<String>, String> {
+        match self.store_generated_all(records) {
+            (stored, None) => Ok(stored),
+            (_, Some(problem)) => Err(problem),
+        }
+    }
+
+    /// Stores every valid record, and says what was not stored.
+    pub(super) fn store_generated_all(
+        &mut self,
+        records: &BTreeMap<String, GeneratedRecord>,
+    ) -> (Vec<String>, Option<String>) {
+        // One record this schema rejects never costs the others: each valid
+        // record is stored, and each rejected one is named.
         let mut envelopes = Vec::with_capacity(records.len());
+        let mut rejected = Vec::new();
         for (identifier, record) in records {
-            envelopes.push((
-                identifier.clone(),
-                record_envelope(&self.schema, identifier, record)?,
-            ));
+            match record_envelope(&self.schema, identifier, record) {
+                Ok(envelope) => envelopes.push((identifier.clone(), envelope)),
+                Err(error) => rejected.push(error),
+            }
         }
         let mut stored = Vec::new();
         let mut conflicts = Vec::new();
-        let mut failures = Vec::new();
+        let mut failures = rejected;
         for (identifier, envelope) in envelopes {
-            let path = SecretPath::parse(&identifier).map_err(|error| error.to_string())?;
+            let path = match SecretPath::parse(&identifier) {
+                Ok(path) => path,
+                Err(error) => {
+                    failures.push(format!("{identifier}: {error}"));
+                    continue;
+                }
+            };
             match self.client.set_envelope_if_version(&path, envelope, None) {
                 Ok(()) => stored.push(identifier),
                 Err(error) if error.to_string().contains("version changed") => {
@@ -492,11 +563,9 @@ impl Controller {
                 conflicts.join(", ")
             ));
         }
-        if problems.is_empty() {
-            Ok(stored)
-        } else {
-            Err(format!("Deployed, but {}", problems.join(" Also, ")))
-        }
+        let problem = (!problems.is_empty())
+            .then(|| format!("Deployed, but {}", problems.join(" Also, ")));
+        (stored, problem)
     }
 }
 

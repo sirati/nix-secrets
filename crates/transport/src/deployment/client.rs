@@ -1,5 +1,7 @@
 use super::server::encode_json;
-use super::validation::{validate_batch, validate_selection, validate_target, verify_generators};
+use super::validation::{
+    compare_target, validate_batch, validate_selection, validate_target, verify_generators,
+};
 use super::*;
 use crate::{Frame, FrameKind, SshSession, MAX_FRAME_BYTES};
 use serde::{de::DeserializeOwned, Serialize};
@@ -31,6 +33,7 @@ pub struct PreparedDeployment {
     session: SshSession,
     state: TargetState,
     expected: ExpectedTarget,
+    left_out: Vec<LeftOut>,
 }
 
 fn selection(expected: &ExpectedTarget) -> DeploymentSelection {
@@ -86,16 +89,27 @@ impl PreparedDeployment {
         validate_selection(&selected)?;
         send_transport_json(&mut session, &selected)?;
         let state: TargetState = receive_transport_json(&mut session)?;
-        validate_target(&state, expected)?;
+        let left_out = compare_target(&state, expected)?;
+        // Before protocol 4 a batch must name the whole selection.
+        if state.protocol_version < NOT_DEPLOYED_PROTOCOL_VERSION {
+            validate_target(&state, expected)?;
+        }
         Ok(Self {
             session,
             state,
             expected: expected.clone(),
+            left_out,
         })
     }
 
     pub fn state(&self) -> &TargetState {
         &self.state
+    }
+
+    /// Selected values the host's activation does not declare as
+    /// expected; they are not sent.
+    pub fn left_out(&self) -> &[LeftOut] {
+        &self.left_out
     }
 
     pub fn deploy(self, entries: Vec<DeployEntry>) -> Result<DeploymentResult, DeploymentError> {

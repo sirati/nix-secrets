@@ -80,14 +80,39 @@ where
 
 pub fn read_wire_json<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T, DeploymentError> {
     let mut length = [0_u8; 4];
-    reader.read_exact(&mut length)?;
+    read_whole(reader, &mut length, 4)?;
     let length = u32::from_be_bytes(length) as usize;
     if length > MAX_DEPLOYMENT_JSON {
         return Err(DeploymentError::Invalid("deployment message too large"));
     }
     let mut body = Zeroizing::new(vec![0_u8; length]);
-    reader.read_exact(&mut body)?;
+    read_whole(reader, &mut body, length + 4).map_err(|error| match error {
+        DeploymentError::Truncated { received, expected } => DeploymentError::Truncated {
+            received: received + 4,
+            expected,
+        },
+        error => error,
+    })?;
     Ok(serde_json::from_slice(&body)?)
+}
+
+/// Fills `buffer`, or says how much of the `expected` message arrived
+/// before the stream ended.
+fn read_whole(
+    reader: &mut impl Read,
+    buffer: &mut [u8],
+    expected: usize,
+) -> Result<(), DeploymentError> {
+    let mut received = 0;
+    while received < buffer.len() {
+        match reader.read(&mut buffer[received..]) {
+            Ok(0) => return Err(DeploymentError::Truncated { received, expected }),
+            Ok(count) => received += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 pub fn write_wire_json(

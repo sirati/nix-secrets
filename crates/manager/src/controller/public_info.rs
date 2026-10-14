@@ -1,5 +1,6 @@
 use super::*;
 use nix_secrets_core::{PublicInfoRecord, SecretKind};
+use std::collections::BTreeMap;
 
 impl Controller {
     pub(super) fn materialize_host_defaults(
@@ -37,7 +38,7 @@ impl Controller {
         let record = default_record(spec).ok_or("required public info is unset")?;
         nix_secrets_core::schema::validate_ssh_known_hosts(
             &record.value, &spec.ssh_hosts(), spec.expected_ssh_port.ok_or("missing expected SSH port")?,
-        ).map_err(str::to_owned)?;
+        ).map_err(|error| format!("the defaultValue of {path}: {error}"))?;
         let write = self.client.set_public_info_if_version(path, record.clone(), None);
         let stored = self.client.get_public_info(id).map_err(|e| e.to_string())?;
         materialized_result(record, write.map_err(|e| format!("materializing public-info default {path} (shared ID {id}): {e}")), stored)
@@ -69,7 +70,7 @@ impl Controller {
             &spec.ssh_hosts(),
             spec.expected_ssh_port.ok_or("missing expected SSH port")?,
         )
-        .map_err(str::to_owned)?;
+        .map_err(|error| format!("{path}: {error}"))?;
         let expected = self
             .client
             .get_public_info(&id)
@@ -168,6 +169,7 @@ impl Controller {
                 }
             }
         }
+        self.stale_public = stale_public_info(&self.schema, identifiers, &public);
         Ok(set)
     }
 }
@@ -283,4 +285,63 @@ mod tests {
             value
         );
     }
+}
+
+
+/// A stored value published under an older schema stays stored: it is
+/// never deleted, and never deployed as if valid. Only the producer's next
+/// publication, or the operator entering it again, replaces it.
+pub(crate) fn stale_public_info(
+    schema: &Schema,
+    identifiers: &[String],
+    public: &BTreeMap<String, PublicInfoRecord>,
+) -> BTreeMap<String, String> {
+    let mut stale = BTreeMap::new();
+    for identifier in identifiers {
+        let Ok(path) = SecretPath::parse(identifier) else {
+            continue;
+        };
+        let Ok(LeafSpec::Stored(spec)) = schema.leaf(&path) else {
+            continue;
+        };
+        let (SecretKind::PublicInfo, Some(id), Some(port)) =
+            (&spec.kind, spec.shared_public_id.as_deref(), spec.expected_ssh_port)
+        else {
+            continue;
+        };
+        let Some(record) = public.get(id) else {
+            continue;
+        };
+        let Err(error) =
+            nix_secrets_core::schema::validate_ssh_known_hosts(&record.value, &spec.ssh_hosts(), port)
+        else {
+            continue;
+        };
+        let producers = schema
+            .0
+            .iter()
+            .filter(|(_, host)| {
+                host.metadata
+                    .deployment
+                    .publish_host_identity_to
+                    .as_deref()
+                    .and_then(|leaf| SecretPath::parse(leaf).ok())
+                    .and_then(|leaf| schema.secret(&leaf).ok())
+                    .is_some_and(|leaf| leaf.shared_public_id.as_deref() == Some(id))
+            })
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        let repair = if producers.is_empty() {
+            "enter it again".to_owned()
+        } else {
+            format!("deploy {} to republish it", producers.join(", "))
+        };
+        stale.insert(
+            identifier.clone(),
+            format!(
+                "the stored value of {id} is invalid under the current schema: {error}. It stays stored and is not deployed; {repair}"
+            ),
+        );
+    }
+    stale
 }

@@ -136,6 +136,8 @@ fn refreshed_details_error_clears_active_and_terminally_rejects_exact_claim() {
         hostname: "ns1".into(),
         secrets: vec![],
         tasks: vec![],
+        absent: vec![],
+        unselected: vec![],
     };
     let set = claimed.secrets.iter().cloned().collect();
     let details = controller.approval_details(&claimed, Some(&state), &set);
@@ -260,4 +262,81 @@ fn a_reconnection_discards_the_open_dialog_and_the_request_opens_again_from_step
     assert!(again.host_key.is_some(), "it starts again at step 1");
     assert_ne!(controller.active.as_ref().unwrap().lease_id, first_lease);
     controller.approval_inner(false).unwrap();
+}
+
+/// The host's activation decides what it asks for. What it does not declare,
+/// declares otherwise, or asks for unknown to this schema is shown in the
+/// request before approval, and the rest still deploys.
+#[test]
+fn host_mismatches_are_listed_before_approval_and_never_fail_the_request() {
+    let fixture = Fixture::new();
+    let mut controller = fixture.controller();
+    let mut cli = fixture.client();
+    let mut submitted = request("host-decides");
+    submitted.secrets.push("ns1.services.report.password".into());
+    cli.submit_approval(submitted).unwrap();
+    let (claimed, lease_id) = controller.client.poll_and_claim().unwrap().unwrap();
+    let expected = expected_target(&fixture.schema, &claimed).unwrap();
+    let declared = expected
+        .secrets
+        .iter()
+        .find(|secret| secret.identifier == "ns1.services.report.authorized")
+        .unwrap();
+    let state = TargetState {
+        protocol_version: nix_secrets_transport::DEPLOYMENT_PROTOCOL_VERSION,
+        hostname: "ns1".into(),
+        secrets: vec![nix_secrets_transport::TargetSecret {
+            identifier: declared.identifier.clone(),
+            recipient_ids: declared.recipient_ids.clone(),
+            destination: declared.destination.clone(),
+            public_info: None,
+            current_version_id: Some("v".into()),
+            generator: None,
+            derived: None,
+        }],
+        tasks: vec![],
+        absent: vec!["ns1.services.report.password".into()],
+        unselected: vec!["ns1.services.future.token".into()],
+    };
+    controller.active = Some(ActiveApproval {
+        request: claimed.clone(),
+        lease_id,
+        connection: Connection {
+            name: "ns1".into(),
+            destination: "forward@unused".into(),
+            host: "unused".into(),
+            port: 22,
+            known_hosts: vec![],
+            backend_route: None,
+            identity_public_keys: vec![],
+        },
+        expected,
+        identity: HostIdentity {
+            host: "unused".into(),
+            port: 22,
+            keys: vec![],
+            other_names_with_keys: vec![],
+        },
+        prepared: None,
+        target_approved: true,
+        host_key_known: true,
+        renewed_at: Instant::now(),
+        procedure: None,
+        last_error: None,
+        unchecked: BTreeSet::new(),
+    });
+    let set = claimed.secrets.iter().cloned().collect();
+    let details = controller
+        .approval_details(&claimed, Some(&state), &set)
+        .unwrap();
+    assert_eq!(details.replace, ["ns1.services.report.authorized"]);
+    assert_eq!(
+        details.missing_kinds["ns1.services.report.password"],
+        "Not declared by the host's activation"
+    );
+    assert_eq!(
+        details.missing_kinds["ns1.services.future.token"],
+        "Asked for by the host, unknown to this schema"
+    );
+    assert!(details.deployable());
 }

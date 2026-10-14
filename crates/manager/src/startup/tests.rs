@@ -62,7 +62,7 @@ fn the_socket_names_the_backend_compatibility_version() {
     // 24: SSH logins are approved before the requester connects. A TUI or
     // requester of another version never reaches this backend.
     assert_eq!(BACKEND_COMPATIBILITY_VERSION, 24);
-    assert!(socket_name(&path()).starts_with("backend-v24-"));
+    assert!(socket_name(&path()).starts_with("backend-v25-"));
 }
 
 #[test]

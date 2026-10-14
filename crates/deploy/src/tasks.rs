@@ -250,6 +250,7 @@ fn read_attested_known_hosts(
     if let Some(value) = pending.get(file) {
         return keys_of(value);
     }
+    let shared = leaf.shared_public_id.as_deref().unwrap_or(file);
     let mut handle = match OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
@@ -280,7 +281,50 @@ fn read_attested_known_hosts(
     handle
         .read_to_string(&mut value)
         .map_err(|error| DeployError::context(&what, error))?;
-    keys_of(&value)
+    installed_known_hosts_keys(&value, &hosts, port, shared, file).and_then(|_| keys_of(&value))
+}
+
+/// The installed file may predate the schema this host runs now. It stays
+/// installed, but is never trusted: the task waits until it is republished.
+fn installed_known_hosts_keys(
+    value: &str,
+    hosts: &[&str],
+    port: u16,
+    shared: &str,
+    file: &str,
+) -> Result<(), DeployError> {
+    nix_secrets_core::schema::validate_ssh_known_hosts(value, hosts, port).map_err(|error| {
+        DeployError::Missing(format!(
+            "the installed public information {shared} ({file}) is invalid under this host's schema and must be republished: {error}"
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+
+    #[test]
+    fn an_installed_value_from_an_older_schema_leaves_the_task_out() {
+        let stale = format!("127.0.0.1 {KEY}\nreport.example {KEY}\n");
+        let error = installed_known_hosts_keys(
+            &stale,
+            &["report.example"],
+            22,
+            "reporting/receiver-known-hosts",
+            "/persistent/public-info/reporting/receiver-known-hosts",
+        )
+        .unwrap_err();
+        let DeployError::Missing(reason) = error else {
+            panic!("a stale installed value must leave the task out, not fail: {error}");
+        };
+        assert!(reason.contains("reporting/receiver-known-hosts"), "{reason}");
+        assert!(reason.contains("names 127.0.0.1"), "{reason}");
+        installed_known_hosts_keys(&format!("report.example {KEY}\n"), &["report.example"], 22, "x/y", "/f")
+            .unwrap();
+    }
 }
 
 fn decode_password(value: &str) -> Result<Zeroizing<Vec<u8>>, DeployError> {

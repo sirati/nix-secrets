@@ -62,12 +62,31 @@ pub(super) enum HostMutation {
         path: SecretPath,
         shared_id: String,
         previous: Option<PublicInfoRecord>,
+        /// Why `previous` is invalid under the current schema.
+        previous_problem: Option<String>,
         proposed: PublicInfoRecord,
         consumers: BTreeSet<String>,
     },
 }
 impl HostMutation {
     fn review(&self) -> Option<crate::model::HostMutationReview> {
+        if let Self::Identity {
+            path,
+            previous: Some(previous),
+            previous_problem: Some(problem),
+            proposed,
+            ..
+        } = self
+        {
+            return Some(crate::model::HostMutationReview {
+                identifier: path.to_string(),
+                kind: format!(
+                    "report receiver SSH host identity; the stored value is invalid under the current schema ({problem}) and is replaced"
+                ),
+                previous: known_host_fingerprints(&previous.value),
+                proposed: known_host_fingerprints(&proposed.value),
+            });
+        }
         let (path, kind, previous, proposed) = match self {
             Self::Generated {
                 path,
@@ -359,17 +378,27 @@ impl Controller {
             .client
             .get_public_info(&shared_id)
             .map_err(|e| e.to_string())?;
-        if let Some(previous) = &previous {
-            nix_secrets_core::schema::validate_ssh_known_hosts(
+        // A previous value published under an older schema is kept until
+        // the operator approves its replacement, but it never blocks the
+        // producer from republishing: that is the only way to repair it.
+        let previous_problem = match &previous {
+            Some(previous) => match nix_secrets_core::schema::validate_ssh_known_hosts(
                 &previous.value,
                 &spec.ssh_hosts(),
                 port,
-            )
-            .map_err(str::to_owned)?;
-            if identity_keys(&previous.value, &spec, port)? == identity_keys(&value, &spec, port)? {
-                return Ok(());
-            }
-        }
+            ) {
+                Ok(()) => {
+                    if identity_keys(&previous.value, &spec, port)?
+                        == identity_keys(&value, &spec, port)?
+                    {
+                        return Ok(());
+                    }
+                    None
+                }
+                Err(error) => Some(error),
+            },
+            None => None,
+        };
         let proposed = PublicInfoRecord {
             version_id: content_version(&value),
             value,
@@ -402,6 +431,7 @@ impl Controller {
             path,
             shared_id,
             previous,
+            previous_problem,
             proposed,
             consumers,
         });
@@ -573,6 +603,7 @@ impl Controller {
                         previous,
                         proposed,
                         consumers,
+                        ..
                     } => {
                         self.client
                             .set_public_info_if_version(
@@ -756,7 +787,7 @@ fn render_identity(identity: &HostIdentity, spec: &SecretSpec) -> Result<String,
         .map(|line| format!("{line}\n"))
         .collect::<String>();
     nix_secrets_core::schema::validate_ssh_known_hosts(&value, &spec.ssh_hosts(), port)
-        .map_err(str::to_owned)?;
+        .map_err(|error| format!("the host identity rendered for {}: {error}", spec.shared_public_id.as_deref().unwrap_or("public information")))?;
     Ok(value)
 }
 fn identity_keys(
@@ -767,7 +798,7 @@ fn identity_keys(
     let mut keys = BTreeSet::new();
     for host in spec.ssh_hosts() {
         for key in nix_secrets_core::schema::known_hosts_keys(value, &spec.ssh_hosts(), port, host)
-            .map_err(str::to_owned)?
+            .map_err(|error| format!("{}: {error}", spec.shared_public_id.as_deref().unwrap_or("public information")))?
         {
             keys.insert((host.to_owned(), key));
         }

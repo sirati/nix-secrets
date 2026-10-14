@@ -83,6 +83,8 @@ pub fn load_target_state(
         hostname: hostname.into(),
         secrets: leaves.secrets,
         tasks: leaves.tasks,
+        absent: Vec::new(),
+        unselected: Vec::new(),
     })
 }
 
@@ -271,13 +273,13 @@ fn validate_manifest(
             .map_err(|_| DeployError::Invalid(format!("invalid base64 for {identifier}")))?;
         if let Some(public) = &manifest_entry.public_info {
             let text = std::str::from_utf8(&contents)
-                .map_err(|_| DeployError::Invalid("public-info value is not UTF-8".into()))?;
+                .map_err(|_| DeployError::Invalid(format!("public-info value of {identifier} is not UTF-8")))?;
             nix_secrets_core::schema::validate_ssh_known_hosts(
                 text,
                 &public.hosts(),
                 public.expected_ssh_port,
             )
-            .map_err(|error| DeployError::Invalid(error.into()))?;
+            .map_err(|error| DeployError::Invalid(format!("{identifier}: {error}")))?;
             if manifest_entry.destination.path
                 != format!("/persistent/public-info/{}", public.shared_id)
             {

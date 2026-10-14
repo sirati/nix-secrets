@@ -67,6 +67,9 @@ pub struct Controller {
     /// deployment that caused them. Kept here, never sent to the backend,
     /// which accepts procedure membership only from requesters it checked.
     followup_procedures: std::collections::BTreeMap<String, nix_secrets_core::procedure::ProcedureStep>,
+    /// Requested public information whose stored value the current schema
+    /// rejects, with why; refreshed with every `plan_set`.
+    stale_public: std::collections::BTreeMap<String, String>,
     /// Where to reconnect when the backend connection breaks.
     socket: Option<PathBuf>,
     /// Starts the backend, or its tunnel, again when the socket is gone.
@@ -289,6 +292,7 @@ impl Controller {
             transport: Transport::default(),
             phase: None,
             followup_procedures: Default::default(),
+            stale_public: Default::default(),
             socket: None,
             restart: None,
             retry: None,
@@ -350,16 +354,20 @@ impl Controller {
         state: Option<&TargetState>,
         set: &BTreeSet<String>,
     ) -> Result<UiApproval, String> {
+        let mut plan = unset::plan_unset(&self.schema, &request.secrets, set, &self.stale_public)?;
+        // What the host's activation disagrees with is shown before
+        // approval, and left out.
+        if let (Some(state), Some(active)) = (state, self.active.as_ref()) {
+            plan.exclude_mismatches(&target_mismatches(&self.schema, state, &active.expected)?);
+        }
         // Values not in the target selection: missing ones and public
         // information the host installs its own default for.
-        let skippable = unset::plan_unset(&self.schema, &request.secrets, set)
-            .map(|plan| {
-                plan.skippable
-                    .into_iter()
-                    .chain(plan.host_default)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let skippable = plan
+            .skippable
+            .iter()
+            .chain(&plan.host_default)
+            .cloned()
+            .collect::<Vec<_>>();
         let mut create = Vec::new();
         let mut replace = Vec::new();
         let mut tasks = Vec::new();
@@ -398,6 +406,12 @@ impl Controller {
                     {
                         keys.extend(spec.recipient_ids);
                     }
+                    if matches!(
+                        plan.reasons.get(identifier),
+                        Some(unset::MissingKind::NotDeclaredByHost | unset::MissingKind::DeclaredDifferently)
+                    ) {
+                        continue;
+                    }
                     let output_is_set = state
                         .filter(|_| !skippable.contains(identifier))
                         .map(|state| target_task_has_version(state, identifier))
@@ -414,7 +428,6 @@ impl Controller {
                 }
             }
         }
-        let plan = unset::plan_unset(&self.schema, &request.secrets, set)?;
         Ok(UiApproval {
             procedure: None,
             skippable: plan.skippable.clone(),
@@ -481,7 +494,17 @@ impl Controller {
         let set = self.plan_set(&identifiers)?;
         let entries = self.client.list().map_err(|error| error.to_string())?;
         // Refuse before connecting, decrypting, generating, or writing.
-        let mut plan = unset::plan_unset(&self.schema, &identifiers, &set)?;
+        let mut plan = unset::plan_unset(&self.schema, &identifiers, &set, &self.stale_public)?;
+        // The operator saw these before approving; they are not sent.
+        let mismatches = match self
+            .active
+            .as_ref()
+            .and_then(|active| Some((active.prepared.as_ref()?, &active.expected)))
+        {
+            Some((prepared, expected)) => target_mismatches(&self.schema, prepared.state(), expected)?,
+            None => Vec::new(),
+        };
+        plan.exclude_mismatches(&mismatches);
         if let Some(refusal) = plan.refusal_for(allow_partial) {
             return Err(refusal);
         }
@@ -514,14 +537,20 @@ impl Controller {
                 .iter()
                 .map(|secret| &secret.identifier)
                 .chain(expected.tasks.iter().map(|task| &task.identifier))
+                .filter(|identifier| !mismatches.iter().any(|(id, _, _)| id == *identifier))
                 .cloned()
                 .collect::<BTreeSet<_>>()
         };
-        if opened != identifiers.iter().cloned().collect::<BTreeSet<_>>() {
-            return Err(
-                "values changed in the store since the target was read; request the deployment again"
-                    .into(),
-            );
+        let now = identifiers.iter().cloned().collect::<BTreeSet<_>>();
+        if opened != now {
+            return Err(format!(
+                "values changed in the store since the target was read ({}); request the deployment again",
+                opened
+                    .symmetric_difference(&now)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         // The one connection was opened for this request. It is never
         // reopened: a failure ends the deployment, and a second connection
@@ -707,7 +736,7 @@ impl Controller {
                             .expected_ssh_port
                             .ok_or("missing expected SSH port")?,
                     )
-                    .map_err(str::to_owned)?;
+                    .map_err(|error| format!("public information {identifier} (shared ID {id}): {error}"))?;
                     deploy_entries.push(DeployEntry {
                         identifier: identifier.clone(),
                         version_id: record.version_id,
@@ -773,25 +802,54 @@ impl Controller {
             .collect::<BTreeSet<_>>();
 
         self.phase("Waiting for SSH deployment and target generators");
-        let applied = deployment::deploy(
+        let (mut applied, mut warnings) = deployment::deploy(
             prepared,
             deploy_entries,
             task_entries,
             generate_entries,
             derive_on_target,
         )?;
-        validate_returned_public_key_scope(&allowed_public_keys, &applied.generated_public_keys)?;
+        // The target has applied the deployment. From here on nothing it
+        // returned is dropped silently: what this schema accepts is saved,
+        // and everything else is named in the result.
         self.phase("Saving target results to the backend");
         // Store generated values first: they are the only copy outside the target.
-        let stored = self.store_generated(&applied.generated_records);
-        let stored = stored?;
+        let (stored, problem) = self.store_generated_all(&applied.generated_records);
+        warnings.extend(problem);
+        if validate_returned_public_key_scope(&allowed_public_keys, &applied.generated_public_keys)
+            .is_err()
+        {
+            let unexpected = applied
+                .generated_public_keys
+                .keys()
+                .filter(|identifier| !allowed_public_keys.contains(*identifier))
+                .cloned()
+                .collect::<Vec<_>>();
+            for identifier in unexpected {
+                let key = applied.generated_public_keys.remove(&identifier).unwrap_or_default();
+                warnings.push(format!(
+                    "{identifier} (the target returned the public key `{key}` outside the approved tasks; it was not registered)"
+                ));
+            }
+        }
         let mut batch = host_mutations::HostMutationBatch::default();
-        self.stage_public_keys(
+        if let Err(error) = self.stage_public_keys(
             &source_host,
             &applied.generated_public_keys,
             &prefetched,
             &mut batch,
-        )?;
+        ) {
+            batch = host_mutations::HostMutationBatch::default();
+            warnings.push(format!(
+                "generated public keys ({}) were not registered: {error}",
+                applied
+                    .generated_public_keys
+                    .iter()
+                    .map(|(identifier, key)| format!("{identifier} = `{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         if let Some(publication) = self.identity_publication.take() {
             if publication.was_sent(&identifiers, &applied.not_deployed) {
                 batch.committed_followups = publication.followups;
@@ -816,6 +874,7 @@ impl Controller {
                 format!("{identifier} ({reason})")
             })
             .collect::<Vec<_>>();
+        let skipped = skipped.into_iter().chain(warnings).collect::<Vec<_>>();
         let sent = deploy_entries_count + task_entries_count;
         self.last_summary = Some(crate::model::DeploySummary {
             target: source_host.clone(),
@@ -912,7 +971,7 @@ pub(crate) mod unset;
 mod writer;
 
 mod target;
-use target::{expected_target, target_has_version, target_task_has_version};
+use target::{expected_target, target_has_version, target_mismatches, target_task_has_version};
 
 impl Controller {
     /// The key the deployment's SSH login offers, named.

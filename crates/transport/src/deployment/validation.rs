@@ -18,17 +18,32 @@ pub(super) fn select_state(
     selection: &DeploymentSelection,
 ) -> Result<TargetState, DeploymentError> {
     validate_selection(selection)?;
-    let secrets = select(&state.secrets, &selection.identifiers, |item| {
-        &item.identifier
-    })?;
-    let tasks = select(&state.tasks, &selection.task_identifiers, |item| {
-        &item.identifier
-    })?;
+    // The host's activation decides what it asks for. A selected value it
+    // does not declare is reported back, and everything else still deploys.
+    let mut absent = Vec::new();
+    let secrets = select(&state.secrets, &selection.identifiers, |item| &item.identifier, &mut absent);
+    let tasks = select(&state.tasks, &selection.task_identifiers, |item| &item.identifier, &mut absent);
+    let selected = selection
+        .identifiers
+        .iter()
+        .chain(&selection.task_identifiers)
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let unselected = state
+        .secrets
+        .iter()
+        .map(|item| &item.identifier)
+        .chain(state.tasks.iter().map(|item| &item.identifier))
+        .filter(|identifier| !selected.contains(identifier.as_str()))
+        .cloned()
+        .collect();
     Ok(TargetState {
         protocol_version: state.protocol_version,
         hostname: state.hostname.clone(),
         secrets,
         tasks,
+        absent,
+        unselected,
     })
 }
 
@@ -36,20 +51,21 @@ fn select<T: Clone>(
     available: &[T],
     identifiers: &[String],
     identifier: impl Fn(&T) -> &String,
-) -> Result<Vec<T>, DeploymentError> {
+    absent: &mut Vec<String>,
+) -> Vec<T> {
     let wanted: BTreeSet<&str> = identifiers.iter().map(String::as_str).collect();
     let selected = available
         .iter()
         .filter(|item| wanted.contains(identifier(item).as_str()))
         .cloned()
         .collect::<Vec<_>>();
-    if selected.len() != wanted.len() {
-        Err(DeploymentError::Invalid(
-            "selection is absent from target schema",
-        ))
-    } else {
-        Ok(selected)
-    }
+    absent.extend(
+        identifiers
+            .iter()
+            .filter(|wanted| !selected.iter().any(|item| identifier(item) == *wanted))
+            .cloned(),
+    );
+    selected
 }
 
 pub(super) fn validate_selection(selection: &DeploymentSelection) -> Result<(), DeploymentError> {
@@ -61,10 +77,28 @@ pub(super) fn validate_selection(selection: &DeploymentSelection) -> Result<(), 
     Ok(())
 }
 
+/// Accepts the target only if it declares every expected value exactly as
+/// expected.
 pub(super) fn validate_target(
     state: &TargetState,
     expected: &ExpectedTarget,
 ) -> Result<(), DeploymentError> {
+    match compare_target(state, expected)?.first() {
+        None => Ok(()),
+        Some(left_out) => Err(DeploymentError::Mismatch(format!(
+            "{}: {}",
+            left_out.identifier, left_out.reason
+        ))),
+    }
+}
+
+/// The expected values the target does not declare, or declares otherwise:
+/// they are left out, and the rest deploys. Only a target that is not the
+/// expected host, or whose state is malformed, is refused.
+pub fn compare_target(
+    state: &TargetState,
+    expected: &ExpectedTarget,
+) -> Result<Vec<LeftOut>, DeploymentError> {
     if !matches!(
         state.protocol_version,
         LEGACY_DEPLOYMENT_PROTOCOL_VERSION..=DEPLOYMENT_PROTOCOL_VERSION
@@ -76,13 +110,115 @@ pub(super) fn validate_target(
     }
     // Generator descriptions are compared only for values being generated,
     // see `verify_generators`, so an older target still receives set values.
-    if map_target_secrets(&state.secrets)? != map_expected_secrets(&expected.secrets)? {
-        return Err(DeploymentError::Invalid("target secret schema mismatch"));
+    let mut left_out = Vec::new();
+    compare(
+        &map_target_secrets(&state.secrets)?,
+        &state.absent,
+        &map_expected_secrets(&expected.secrets)?,
+        secret_difference,
+        &mut left_out,
+    )?;
+    compare(
+        &map_target_tasks(&state.tasks)?,
+        &state.absent,
+        &map_expected_tasks(&expected.tasks)?,
+        task_difference,
+        &mut left_out,
+    )?;
+    let wanted = expected
+        .secrets
+        .iter()
+        .map(|item| &item.identifier)
+        .chain(expected.tasks.iter().map(|item| &item.identifier))
+        .collect::<BTreeSet<_>>();
+    if let Some(extra) = state
+        .secrets
+        .iter()
+        .map(|item| &item.identifier)
+        .chain(state.tasks.iter().map(|item| &item.identifier))
+        .chain(&state.absent)
+        .find(|identifier| !wanted.contains(identifier))
+    {
+        return Err(DeploymentError::Mismatch(format!(
+            "the target answered for {extra}, which was not selected"
+        )));
     }
-    if map_target_tasks(&state.tasks)? != map_expected_tasks(&expected.tasks)? {
-        return Err(DeploymentError::Invalid("target task schema mismatch"));
+    Ok(left_out)
+}
+
+fn compare<V>(
+    target: &BTreeMap<String, V>,
+    absent: &[String],
+    expected: &BTreeMap<String, V>,
+    difference: fn(&V, &V) -> String,
+    left_out: &mut Vec<LeftOut>,
+) -> Result<(), DeploymentError> {
+    for (identifier, want) in expected {
+        match target.get(identifier) {
+            // Only a target that says so leaves a selected value out.
+            None if !absent.contains(identifier) => {
+                return Err(DeploymentError::Mismatch(format!(
+                    "target omitted {identifier} without listing it as absent"
+                )))
+            }
+            None => left_out.push(LeftOut {
+                identifier: identifier.clone(),
+                absent: true,
+                reason: "the host's current activation does not declare it".into(),
+            }),
+            Some(have) => {
+                let difference = difference(have, want);
+                if !difference.is_empty() {
+                    left_out.push(LeftOut {
+                        identifier: identifier.clone(),
+                        absent: false,
+                        reason: format!(
+                            "the host's current activation declares it differently: {difference}"
+                        ),
+                    });
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn differs<T: PartialEq + std::fmt::Debug>(
+    out: &mut Vec<String>,
+    what: &str,
+    have: &T,
+    want: &T,
+) {
+    if have != want {
+        out.push(format!("{what} {have:?} on the host, {want:?} here"));
+    }
+}
+
+fn destination_difference(out: &mut Vec<String>, have: &Destination, want: &Destination) {
+    differs(out, "path", &have.path, &want.path);
+    differs(out, "category", &have.category, &want.category);
+    differs(out, "owner", &have.owner, &want.owner);
+    differs(out, "group", &have.group, &want.group);
+    differs(out, "mode", &have.mode, &want.mode);
+    differs(out, "consumer units", &have.consumer_units, &want.consumer_units);
+}
+
+fn secret_difference(have: &SecretSpec, want: &SecretSpec) -> String {
+    let mut out = Vec::new();
+    differs(&mut out, "recipients", &have.0, &want.0);
+    destination_difference(&mut out, &have.1, &want.1);
+    differs(&mut out, "public-info attestation", &have.2, &want.2);
+    differs(&mut out, "derivation", &have.3, &want.3);
+    out.join("; ")
+}
+
+fn task_difference(have: &TaskSpec, want: &TaskSpec) -> String {
+    let mut out = Vec::new();
+    differs(&mut out, "task type", &have.0, &want.0);
+    differs(&mut out, "recipients", &have.1, &want.1);
+    destination_difference(&mut out, &have.2, &want.2);
+    differs(&mut out, "Storage Box bootstrap", &have.3, &want.3);
+    out.join("; ")
 }
 type SecretSpec = (
     Vec<String>,

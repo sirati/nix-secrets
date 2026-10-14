@@ -57,6 +57,14 @@ pub(crate) fn check(
         return;
     };
     let protocol = host.metadata.deployment.protocol_version;
+    // Stored public information the current schema rejects is not sent; the
+    // host decides from what it has installed.
+    let stale = plan
+        .reasons
+        .iter()
+        .filter(|(_, kind)| **kind == MissingKind::InvalidUnderSchema)
+        .map(|(identifier, _)| identifier.clone())
+        .collect::<BTreeSet<_>>();
     let already = |plan: &UnsetPlan, identifier: &str| {
         plan.missing.iter().any(|(id, _)| id == identifier)
     };
@@ -71,7 +79,7 @@ pub(crate) fn check(
             continue;
         };
         let reason = match &leaf {
-            LeafSpec::Generated(task) => task_problem(host, identifiers, set, task),
+            LeafSpec::Generated(task) => task_problem(host, identifiers, set, &stale, task),
             LeafSpec::Stored(spec) => stored_problem(spec, plan, identifier, protocol),
             LeafSpec::Operator(_) => None,
         };
@@ -176,6 +184,7 @@ fn task_problem(
     host: &nix_secrets_core::schema::HostSchema,
     identifiers: &[String],
     set: &BTreeSet<String>,
+    stale: &BTreeSet<String>,
     task: &nix_secrets_core::GeneratedSecretSpec,
 ) -> Option<String> {
     let bootstrap = task.generated_secret.bootstrap.as_ref()?;
@@ -188,6 +197,9 @@ fn task_problem(
             bootstrap.host, bootstrap.port
         ));
     };
+    if stale.contains(&identifier) {
+        return None;
+    }
     let value = leaf.default_value.as_deref();
     let provided = set.contains(&identifier) && identifiers.contains(&identifier);
     let installed_by_host = leaf.install_default_if_missing && value.is_some();

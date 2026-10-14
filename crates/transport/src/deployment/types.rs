@@ -68,6 +68,24 @@ pub struct TargetState {
     pub secrets: Vec<TargetSecret>,
     #[serde(default)]
     pub tasks: Vec<TargetTask>,
+    /// Protocol 5: selected identifiers the host's activation does not
+    /// declare. They are left out, not an error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absent: Vec<String>,
+    /// Protocol 5: identifiers the host's activation declares that the
+    /// selection does not name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unselected: Vec<String>,
+}
+
+/// A selected value the deployment leaves out because the host's
+/// activation does not declare it as the operator's schema does.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeftOut {
+    pub identifier: String,
+    /// The host does not declare it at all.
+    pub absent: bool,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,6 +247,10 @@ pub enum DeploymentError {
     Invalid(&'static str),
     /// The target refused the batch; carries its reason.
     Rejected(String),
+    /// The target does not match the operator's schema; names the value.
+    Mismatch(String),
+    /// The peer closed the stream inside a message.
+    Truncated { received: usize, expected: usize },
 }
 
 impl fmt::Display for DeploymentError {
@@ -240,6 +262,14 @@ impl fmt::Display for DeploymentError {
             Self::Invalid(message) => f.write_str(message),
             Self::Io(error) => error.fmt(f),
             Self::Rejected(message) => write!(f, "the target rejected the deployment: {message}"),
+            Self::Mismatch(message) => f.write_str(message),
+            Self::Truncated { received: 0, .. } => f.write_str(
+                "the operator closed the connection before sending the next deployment message; nothing was changed",
+            ),
+            Self::Truncated { received, expected } => write!(
+                f,
+                "the connection closed after {received} of {expected} bytes of a deployment message; nothing from it was applied"
+            ),
         }
     }
 }

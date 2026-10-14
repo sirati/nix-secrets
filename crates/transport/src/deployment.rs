@@ -4,7 +4,11 @@
 /// the target leave out a value whose prerequisite is absent on it and
 /// report it (`not_deployed`), and accepts public information with several
 /// known_hosts lines, hosts and key types.
-pub const DEPLOYMENT_PROTOCOL_VERSION: u16 = 4;
+pub const DEPLOYMENT_PROTOCOL_VERSION: u16 = 5;
+/// Version 5: the target answers for the selected values its activation
+/// declares, lists the others as `absent` and its own unselected values as
+/// `unselected`, instead of refusing the selection.
+pub const HOST_DECIDES_PROTOCOL_VERSION: u16 = 5;
 pub const NOT_DEPLOYED_PROTOCOL_VERSION: u16 = 4;
 pub const GENERATION_PROTOCOL_VERSION: u16 = 2;
 pub const SHARED_SOURCE_PROTOCOL_VERSION: u16 = 3;
@@ -18,6 +22,7 @@ mod validation;
 
 pub use client::{DeploymentClient, PreparedDeployment};
 pub use server::{read_wire_json, serve_deployment, write_wire_json};
+pub use validation::compare_target;
 pub use types::PublicInfoAttestation;
 pub use types::*;
 #[cfg(test)]

@@ -261,7 +261,7 @@ pub fn deploy(
     tasks: Vec<TaskEntry>,
     generate: Vec<GenerateEntry>,
     derive: Vec<String>,
-) -> Result<AppliedOutput, String> {
+) -> Result<(AppliedOutput, Vec<String>), String> {
     let requested = generate
         .iter()
         .map(|item| item.identifier.clone())
@@ -276,20 +276,33 @@ pub fn deploy(
             generated_records,
             not_deployed,
         } => {
-            if generated_records
-                .keys()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>()
-                != requested
-            {
-                return Err("target returned records for other values than requested".into());
+            // The deployment is applied: never drop what the target made.
+            // Records nobody asked for are not stored as values, but named.
+            let mut warnings = Vec::new();
+            let mut generated_records = generated_records;
+            generated_records.retain(|identifier, _| {
+                let asked = requested.contains(identifier);
+                if !asked {
+                    warnings.push(format!(
+                        "{identifier} (the target returned a generated record nobody requested; it was not stored)"
+                    ));
+                }
+                asked
+            });
+            for identifier in requested.iter().filter(|id| !generated_records.contains_key(*id)) {
+                warnings.push(format!(
+                    "{identifier} (the target returned no record for it; deploy again and the target adopts its installed value)"
+                ));
             }
-            Ok(AppliedOutput {
-                versions,
-                generated_public_keys,
-                generated_records,
-                not_deployed,
-            })
+            Ok((
+                AppliedOutput {
+                    versions,
+                    generated_public_keys,
+                    generated_records,
+                    not_deployed,
+                },
+                warnings,
+            ))
         }
         DeploymentResult::Rejected { message } => {
             Err(format!("the target rejected the deployment: {message}"))

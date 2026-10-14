@@ -99,6 +99,43 @@ pub(super) fn target_task_has_version(
         .ok_or_else(|| format!("target omitted task {identifier}"))
 }
 
+/// Where the host's current activation disagrees with this schema, as
+/// `(identifier, kind, reason)`: selected values it does not declare or
+/// declares otherwise, which are not sent, and values it asks for that this
+/// schema does not know. None of them stops the rest of the deployment.
+pub(super) fn target_mismatches(
+    schema: &Schema,
+    state: &TargetState,
+    expected: &ExpectedTarget,
+) -> Result<Vec<(String, super::unset::MissingKind, String)>, String> {
+    use super::unset::MissingKind;
+    let mut found = nix_secrets_transport::compare_target(state, expected)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|left| {
+            let kind = if left.absent {
+                MissingKind::NotDeclaredByHost
+            } else {
+                MissingKind::DeclaredDifferently
+            };
+            (left.identifier, kind, left.reason)
+        })
+        .collect::<Vec<_>>();
+    for identifier in &state.unselected {
+        let known = SecretPath::parse(identifier)
+            .ok()
+            .is_some_and(|path| schema.leaf(&path).is_ok());
+        if !known {
+            found.push((
+                identifier.clone(),
+                MissingKind::UnknownToSchema,
+                "the host's current activation asks for it, but this schema does not declare it; nothing is sent for it".into(),
+            ));
+        }
+    }
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +168,8 @@ mod tests {
                 secret("host.services.s.old", Some("version")),
             ],
             tasks: vec![],
+            absent: vec![],
+            unselected: vec![],
         };
         assert!(!target_has_version(&state, "host.services.s.new").unwrap());
         assert!(target_has_version(&state, "host.services.s.old").unwrap());

@@ -14,7 +14,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// The groups of values that cannot be deployed, in display order.
-const MISSING: [&str; 5] = [
+/// The first four disagree with the schema and are shown in red.
+const MISSING: [&str; 9] = [
+    "Stored value invalid under the current schema",
+    "Not declared by the host's activation",
+    "Declared differently by the host",
+    "Asked for by the host, unknown to this schema",
     "Optional; not provided",
     "Cannot deploy",
     "Needs input",
@@ -317,9 +322,10 @@ pub(crate) fn approval_lines(
             bold(Color::Yellow),
         ));
         for (title, group) in missing_groups(request) {
+            let color = if MISSING[..4].contains(&title) { Color::Red } else { Color::Yellow };
             lines.push(Line::styled(
                 format!("  {title} ({})", group.len()),
-                bold(Color::Yellow),
+                bold(color),
             ));
             for (identifier, reason) in group {
                 row_line(
@@ -327,7 +333,7 @@ pub(crate) fn approval_lines(
                     "    ".into(),
                     name(&identifier),
                     &reason,
-                    Color::Yellow,
+                    color,
                 );
             }
         }

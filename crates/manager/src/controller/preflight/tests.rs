@@ -48,7 +48,7 @@ const COOKIE: &str = "ns1.services.app.cookie";
 fn plan(schema: &Schema, set: &[&str]) -> UnsetPlan {
     let identifiers = [PUBLIC, TASK, COOKIE].map(str::to_owned);
     let set = set.iter().map(|id| id.to_string()).collect();
-    super::super::unset::plan_unset(schema, &identifiers, &set).unwrap()
+    super::super::unset::plan_unset(schema, &identifiers, &set, &Default::default()).unwrap()
 }
 
 fn reason<'a>(plan: &'a UnsetPlan, identifier: &str) -> Option<&'a str> {

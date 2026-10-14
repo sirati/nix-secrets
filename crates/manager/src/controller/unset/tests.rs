@@ -218,7 +218,7 @@ fn unset_values_are_generated_on_the_target_stored_and_deployed() {
         .unwrap()
         .version_id;
     let identifiers = Fixture::ids(&["db-password", "cookie", "entered"]);
-    let plan = plan_unset(&fixture.schema, &identifiers, &set).unwrap();
+    let plan = plan_unset(&fixture.schema, &identifiers, &set, &Default::default()).unwrap();
     assert!(plan.missing.is_empty());
     assert_eq!(
         plan.generate,
@@ -276,7 +276,7 @@ fn unset_values_are_generated_on_the_target_stored_and_deployed() {
         .into_keys()
         .collect::<BTreeSet<_>>();
     assert_eq!(
-        plan_unset(&fixture.schema, &identifiers, &set).unwrap(),
+        plan_unset(&fixture.schema, &identifiers, &set, &Default::default()).unwrap(),
         UnsetPlan::default()
     );
 }
@@ -286,7 +286,7 @@ fn values_that_cannot_be_generated_are_all_listed_and_nothing_is_written() {
     let fixture = fixture();
     let mut controller = fixture.controller();
     let identifiers = Fixture::ids(&["db-password", "provider", "cookie", "opaque", "shared"]);
-    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new()).unwrap();
+    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new(), &Default::default()).unwrap();
     let refusal = plan.refusal().unwrap();
     assert!(refusal.starts_with("Missing values that must be entered: "));
     for expected in [
@@ -318,7 +318,7 @@ fn a_retry_after_a_lost_store_write_returns_the_installed_value() {
     let fixture = fixture();
     let mut controller = fixture.controller();
     let identifiers = Fixture::ids(&["db-password"]);
-    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new()).unwrap();
+    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new(), &Default::default()).unwrap();
     let mut target = Target::default();
     // The first deployment's records are lost before they reach the store.
     let _lost = target.deploy(&fixture, &plan);
@@ -338,7 +338,7 @@ fn a_value_entered_during_deployment_is_kept() {
     let fixture = fixture();
     let mut controller = fixture.controller();
     let identifiers = Fixture::ids(&["db-password"]);
-    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new()).unwrap();
+    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new(), &Default::default()).unwrap();
     let records = Target::default().deploy(&fixture, &plan);
     SecretWriter::write(
         &mut controller,
@@ -358,7 +358,7 @@ fn a_value_entered_during_deployment_is_kept() {
 fn records_for_other_recipients_are_rejected_without_decrypting() {
     let fixture = fixture();
     let identifiers = Fixture::ids(&["db-password"]);
-    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new()).unwrap();
+    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new(), &Default::default()).unwrap();
     let mut records = Target::default().deploy(&fixture, &plan);
     let record = records.get_mut("host.services.app.db-password").unwrap();
     assert!(record_envelope(&fixture.schema, "host.services.app.db-password", record).is_ok());
@@ -387,6 +387,28 @@ fn records_for_other_recipients_are_rejected_without_decrypting() {
     record.recipient_ids = vec!["someone-else".into()];
     assert!(record_envelope(&fixture.schema, "host.services.app.db-password", record).is_err());
     let _ = fixture.public_key;
+}
+
+/// The target already installed what it generated: one record this schema
+/// rejects must not cost the others.
+#[test]
+fn one_rejected_record_never_costs_the_others() {
+    let fixture = fixture();
+    let mut controller = fixture.controller();
+    let identifiers = Fixture::ids(&["db-password", "cookie"]);
+    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new(), &Default::default()).unwrap();
+    let mut target = Target::default();
+    let mut records = target.deploy(&fixture, &plan);
+    assert_eq!(records.len(), 2);
+    records.get_mut("host.services.app.cookie").unwrap().recipient_ids = vec!["someone-else".into()];
+    let (stored, problem) = controller.store_generated_all(&records);
+    assert_eq!(stored, ["host.services.app.db-password"]);
+    let problem = problem.unwrap();
+    assert!(problem.contains("host.services.app.cookie"), "{problem}");
+    assert_eq!(
+        fixture.decrypt(&mut controller, "db-password").as_slice(),
+        target.value("db-password")
+    );
 }
 
 mod derived {
@@ -455,7 +477,7 @@ mod derived {
     #[test]
     fn an_unset_shared_source_is_generated_on_the_host_deployed_first() {
         let (_temp, schema, _controller) = pair();
-        let plan = plan_unset(&schema, &[DERIVED.to_string()], &BTreeSet::new()).unwrap();
+        let plan = plan_unset(&schema, &[DERIVED.to_string()], &BTreeSet::new(), &Default::default()).unwrap();
         assert!(plan.missing.is_empty(), "{:?}", plan.missing);
         assert_eq!(plan.shared.len(), 1);
         assert_eq!(plan.shared[0].0, SOURCE);
@@ -479,7 +501,7 @@ mod derived {
         let (_temp, schema, _controller) = pair();
         let all = schema.deployable_identifiers("dns").unwrap();
         assert_eq!(all.len(), 3, "{all:?}");
-        let plan = plan_unset(&schema, &all, &BTreeSet::new()).unwrap();
+        let plan = plan_unset(&schema, &all, &BTreeSet::new(), &Default::default()).unwrap();
         assert_eq!(plan.missing.len(), 1);
         assert_eq!(plan.reasons["dns.services.app.api-token"], MissingKind::NeedsInput);
         assert!(plan.refusal_for(true).is_none());
@@ -521,7 +543,7 @@ mod derived {
             &schema,
             &[DERIVED.to_string()],
             &set.keys().cloned().collect(),
-        )
+        &Default::default())
         .unwrap();
         assert_eq!(plan.refusal(), None);
         assert_eq!(
@@ -577,7 +599,7 @@ fn a_derived_value_and_its_unset_source_on_one_host_deploy_together() {
     let fixture = fixture();
     let mut controller = fixture.controller();
     let identifiers = Fixture::ids(&["cookie", "knot"]);
-    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new()).unwrap();
+    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new(), &Default::default()).unwrap();
     assert_eq!(plan.refusal(), None);
     assert_eq!(
         plan.derived_on_target,
@@ -609,7 +631,7 @@ fn a_derived_value_and_its_unset_source_on_one_host_deploy_together() {
         &fixture.schema,
         &identifiers,
         &set.keys().cloned().collect(),
-    )
+    &Default::default())
     .unwrap();
     assert!(plan.derived_on_target.is_empty());
     let entry = derive(&controller, "host.services.app.knot", "host.services.app.cookie", &set)
@@ -620,7 +642,7 @@ fn a_derived_value_and_its_unset_source_on_one_host_deploy_together() {
     );
     assert_eq!(entry.version_id, target.versions["host.services.app.knot"]);
     // Without its source in the request, it still waits for the source.
-    let plan = plan_unset(&fixture.schema, &Fixture::ids(&["knot"]), &BTreeSet::new()).unwrap();
+    let plan = plan_unset(&fixture.schema, &Fixture::ids(&["knot"]), &BTreeSet::new(), &Default::default()).unwrap();
     assert!(plan.refusal().unwrap().contains("deploy host first"));
 }
 
@@ -691,7 +713,7 @@ mod ns1 {
     fn classifies_each_unset_value_and_deploys_the_rest_when_partial() {
         let schema = ns1_schema();
         let all = schema.deployable_identifiers("ns1").unwrap();
-        let plan = plan_unset(&schema, &all, &BTreeSet::new()).unwrap();
+        let plan = plan_unset(&schema, &all, &BTreeSet::new(), &Default::default()).unwrap();
         // 1. Public information with a host default is not missing: the
         //    host keeps the default it installs.
         assert_eq!(plan.host_default, ["ns1.services.backup-public-info.storage-box-known-hosts"]);
@@ -830,14 +852,14 @@ fn optional_values_skip_generation_and_inventories_name_missing_producers() {
         "user-alice-services": {}
     }}).to_string()).unwrap();
     let identifiers = schema.deployable_identifiers("host").unwrap();
-    let plan = plan_unset(&schema, &identifiers, &BTreeSet::new()).unwrap();
+    let plan = plan_unset(&schema, &identifiers, &BTreeSet::new(), &Default::default()).unwrap();
     assert!(plan.generate.is_empty());
-    let optional_only = plan_unset(&schema, &["host.services.app.password".into()], &BTreeSet::new()).unwrap();
+    let optional_only = plan_unset(&schema, &["host.services.app.password".into()], &BTreeSet::new(), &Default::default()).unwrap();
     assert!(optional_only.refusal_for(false).is_none());
     assert_eq!(plan.reasons["host.services.app.password"], MissingKind::Optional);
     assert_eq!(plan.reasons["host.services.app.inventory"], MissingKind::FilledByAnotherHost);
     assert!(plan.missing.iter().any(|(_, reason)| reason.contains("no reporting-key producers configured")));
     let set = BTreeSet::from(["host.services.app.password".into()]);
-    let plan = plan_unset(&schema, &identifiers, &set).unwrap();
+    let plan = plan_unset(&schema, &identifiers, &set, &Default::default()).unwrap();
     assert!(!plan.skippable.contains(&"host.services.app.password".into()));
 }

@@ -369,6 +369,9 @@ impl Frontend for Scripted {
             request.missing,
             request.skippable
         );
+        for (identifier, kind) in &request.missing_kinds {
+            println!("missing-kind: {identifier}: {kind}");
+        }
         self.answered = Some(step);
         if !request.host_mutations.is_empty() {
             println!(
@@ -376,6 +379,9 @@ impl Frontend for Scripted {
                 request.target,
                 request.host_mutations.len()
             );
+            for review in &request.host_mutations {
+                println!("host-value-kind: {}: {}", review.identifier, review.kind);
+            }
             self.queued
                 .push_back(UiEvent::Character(self.host_value_answer));
             return Ok(());

@@ -48,6 +48,8 @@ fn state(secret_ids: &[&str], tasks: Vec<TargetTask>) -> TargetState {
         hostname: "host".into(),
         secrets: secret_ids.iter().map(|id| target_secret(id)).collect(),
         tasks,
+        absent: vec![],
+        unselected: vec![],
     }
 }
 fn expected(secret_ids: &[&str], tasks: &[TargetTask]) -> ExpectedTarget {
@@ -257,6 +259,8 @@ fn generation_is_limited_to_values_the_target_declares_generatable() {
         hostname: "host".into(),
         secrets: vec![target_secret(fixed), generatable(generated)],
         tasks: vec![],
+        absent: vec![],
+        unselected: vec![],
     };
     let supplied = DeployEntry {
         identifier: fixed.into(),
@@ -290,6 +294,8 @@ fn generator_descriptions_must_agree_before_generation() {
         hostname: "host".into(),
         secrets: vec![generatable(id)],
         tasks: vec![],
+        absent: vec![],
+        unselected: vec![],
     };
     let ids = [id.to_string()];
     let mut expected = expected(&[id], &[]);
@@ -314,6 +320,8 @@ fn server_rejects_an_apply_that_omits_generated_records() {
         hostname: "host".into(),
         secrets: vec![generatable(id)],
         tasks: vec![],
+        absent: vec![],
+        unselected: vec![],
     };
     let run = |records: BTreeMap<String, GeneratedRecord>| {
         let mut input = Vec::new();
@@ -354,4 +362,106 @@ fn server_rejects_an_apply_that_omits_generated_records() {
         run(BTreeMap::from([(id.to_string(), record)])),
         DeploymentResult::Applied { generated_records, .. } if generated_records.len() == 1
     ));
+}
+
+fn entry(id: &str) -> DeployEntry {
+    DeployEntry {
+        identifier: id.into(),
+        version_id: "v1".into(),
+        contents_base64: STANDARD.encode(b"value"),
+    }
+}
+
+/// The host's activation decides what it asks for: a selected value it does
+/// not declare is reported as absent, and the rest deploys.
+#[test]
+fn a_value_the_host_does_not_declare_is_reported_and_the_rest_deploys() {
+    let (kept, gone, own) = (
+        "host.services.mail.kept",
+        "host.services.mail.gone",
+        "host.services.mail.new-on-host",
+    );
+    let mut input = Vec::new();
+    write_wire_json(
+        &mut input,
+        &DeploymentSelection {
+            identifiers: vec![kept.into(), gone.into()],
+            task_identifiers: vec![],
+        },
+    )
+    .unwrap();
+    write_wire_json(&mut input, &generation_batch(vec![entry(kept)], &[])).unwrap();
+    let mut output = Vec::new();
+    let mut applied = Vec::new();
+    serve_deployment(input.as_slice(), &mut output, state(&[kept, own], vec![]), |batch| {
+        applied = batch.requested_identifiers.clone();
+        Ok(AppliedOutput::default())
+    })
+    .unwrap();
+    assert_eq!(applied, [kept]);
+    let mut cursor = output.as_slice();
+    let answered = read_wire_json::<TargetState>(&mut cursor).unwrap();
+    assert_eq!(answered.absent, [gone]);
+    assert_eq!(answered.unselected, [own]);
+    assert!(matches!(
+        read_wire_json::<DeploymentResult>(&mut cursor).unwrap(),
+        DeploymentResult::Applied { .. }
+    ));
+    // The operator side leaves the absent value out with a reason.
+    let left = compare_target(&answered, &expected(&[kept, gone], &[])).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].identifier, gone);
+    assert!(left[0].absent);
+}
+
+#[test]
+fn a_value_declared_differently_is_left_out_and_named() {
+    let (same, moved) = ("host.services.mail.same", "host.services.mail.moved");
+    let mut target = state(&[same, moved], vec![]);
+    target.secrets[1].destination.owner = "root".into();
+    let left = compare_target(&target, &expected(&[same, moved], &[])).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].identifier, moved);
+    assert!(!left[0].absent);
+    assert!(left[0].reason.contains("owner \"root\" on the host, \"mail\" here"), "{}", left[0].reason);
+    // A target that drops a selected value without saying so is refused.
+    let error = compare_target(&state(&[same], vec![]), &expected(&[same, moved], &[])).unwrap_err();
+    assert!(error.to_string().contains(&format!("target omitted {moved}")), "{error}");
+}
+
+/// ns1: "secret-deploy: failed to fill whole buffer". A dropped stream
+/// applies nothing and says what happened.
+#[test]
+fn a_stream_dropped_mid_batch_applies_nothing_and_says_so() {
+    let id = "host.services.mail.kept";
+    let mut selection = Vec::new();
+    write_wire_json(
+        &mut selection,
+        &DeploymentSelection {
+            identifiers: vec![id.into()],
+            task_identifiers: vec![],
+        },
+    )
+    .unwrap();
+    let mut batch = Vec::new();
+    write_wire_json(&mut batch, &generation_batch(vec![entry(id)], &[])).unwrap();
+    for cut in [0, 2, 4, batch.len() / 2, batch.len() - 1] {
+        let input = [selection.as_slice(), &batch[..cut]].concat();
+        let mut applied = false;
+        let error = serve_deployment(input.as_slice(), Vec::new(), state(&[id], vec![]), |_| {
+            applied = true;
+            Ok(AppliedOutput::default())
+        })
+        .unwrap_err();
+        assert!(!applied, "a truncated batch must never reach the publisher");
+        let text = error.to_string();
+        if cut == 0 {
+            assert!(text.contains("closed the connection before sending"), "{text}");
+        } else {
+            assert!(
+                text.contains(&format!("after {cut} of {} bytes", if cut < 4 { 4 } else { batch.len() })),
+                "{text}"
+            );
+        }
+    }
 }

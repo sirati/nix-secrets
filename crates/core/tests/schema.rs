@@ -264,3 +264,14 @@ fn default_port_known_hosts_uses_real_openssh_lookup() {
     assert!(result.status.success());
     assert!(String::from_utf8(result.stdout).unwrap().contains("receiver.example ssh-ed25519"));
 }
+
+/// The operator must see which line breaks the schema, not only that one does.
+#[test]
+fn known_hosts_errors_name_the_offending_host() {
+    use nix_secrets_core::schema::validate_ssh_known_hosts;
+    let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+    let value = format!("report.example {key}\nns1.lamk.eu {key}\n");
+    let error = validate_ssh_known_hosts(&value, &["report.example", "2001:db8::1"], 22).unwrap_err();
+    assert!(error.contains("line 2 names ns1.lamk.eu"), "{error}");
+    assert!(error.contains("report.example, 2001:db8::1 on port 22"), "{error}");
+}

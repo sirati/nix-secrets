@@ -80,7 +80,7 @@ impl Controller {
         // no second connection, and a full one is refused before sending.
         // Unset public information with a host default is never sent either:
         // the host keeps the default it installs.
-        let skippable = unset::plan_unset(&self.schema, &request.secrets, &set)
+        let skippable = unset::plan_unset(&self.schema, &request.secrets, &set, &self.stale_public)
             .map(|plan| {
                 plan.skippable
                     .into_iter()
