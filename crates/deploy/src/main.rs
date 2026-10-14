@@ -2,9 +2,9 @@
 
 use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_deploy::{
-    install_public_default, load_and_validate_manifest, load_mock_values, load_target_state,
-    mock_install, run_generated_tasks_with, run_value_generation, system_hostname, Deployer,
-    DeploymentBatch, SecretDeployment, SystemHost,
+    deploy_together, install_public_default, load_and_validate_manifest, load_mock_values,
+    load_target_state, mock_install, recover, run_generated_tasks_with, run_value_generation,
+    system_hostname, Deployer, DeploymentBatch, SecretDeployment, SystemHost,
 };
 use nix_secrets_transport::{serve_deployment, AppliedOutput};
 use std::io;
@@ -22,6 +22,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os();
     let _program = args.next();
     let first = args.next();
+    if first.as_deref() == Some(std::ffi::OsStr::new("--recover")) {
+        if args.next().is_some() {
+            return Err("usage: secret-deploy --recover".into());
+        }
+        return recover(&Deployer::persistent(), &Deployer::public_info()).map_err(Into::into);
+    }
     if first.as_deref() == Some(std::ffi::OsStr::new("--install-public-default")) {
         let manifest_flag = args.next();
         let manifest = args.next();
@@ -89,7 +95,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if first.as_deref() != Some(std::ffi::OsStr::new("--manifest")) {
         return Err(
-            "usage: secret-deploy --manifest ABSOLUTE-NIX-STORE-JSON [--age PATH] [--audit-file PATH --audit-group NAME] [--post-deploy STORE-PROGRAM]"
+            "usage: secret-deploy --recover | --manifest ABSOLUTE-NIX-STORE-JSON [--age PATH] [--audit-file PATH --audit-group NAME] [--post-deploy STORE-PROGRAM]"
                 .into(),
         );
     }
@@ -146,6 +152,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let hostname = system_hostname()?;
     let deployer = Deployer::persistent();
     let public_deployer = Deployer::public_info();
+    recover(&deployer, &public_deployer)?;
     let mut current = deployer.current_versions()?;
     current.extend(public_deployer.current_versions()?);
     let state = load_target_state(path, &hostname, &current)?;
@@ -198,21 +205,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|error| format!("validating the batch against {}: {error}", path.display()))?;
         let audit_details = resolved.audit_details();
         let (secrets, public) = resolved.partition();
-        let mut previous = std::collections::BTreeMap::new();
-        if !public.is_empty() {
-            previous.extend(
-                public_deployer
-                    .deploy_with_previous(&public)
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-        if !secrets.is_empty() {
-            previous.extend(
-                deployer
-                    .deploy_with_previous(&secrets)
-                    .map_err(|error| error.to_string())?,
-            );
-        }
+        let previous = if secrets.is_empty() && public.is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            deploy_together(&deployer, &public_deployer, Some(&secrets), Some(&public))
+                .map_err(|error| error.to_string())?
+        };
         let audit = audit::event(
             &hostname,
             &local.requested_identifiers,

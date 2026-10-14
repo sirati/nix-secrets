@@ -40,6 +40,8 @@ pub fn install_public_default(
         ));
     }
     let deployer = Deployer::public_info();
+    // Finish an interrupted joint deployment before reading the versions.
+    deployer.recover_alone()?;
     if deployer.current_versions()?.contains_key(identifier)
         || fs::symlink_metadata(&spec.destination.path).is_ok()
     {

@@ -94,9 +94,12 @@ of at most 64 MiB.
 3. The operator approves. The TUI decrypts and sends the batch: `version`,
    `requested_identifiers`, `entries` (`identifier`, `version_id`,
    `contents_base64`), `requested_tasks`, `tasks`, `generate` and `derive`.
-4. The target validates everything again, stages the whole generation on the
-   destination filesystem, syncs it and switches `.current` atomically. Any
-   failure keeps the previous generation.
+4. The target validates everything again, stages and syncs one generation in
+   each root it writes (`/persistent/secrets`, `/persistent/public-info`),
+   then switches the secret root's `.current`, then the public-info root's.
+   The first switch commits: recovery after a crash finishes the public-info
+   root if it happened and discards the new generations if not. Any failure
+   keeps the previous generation in both roots.
 5. The target answers `{"status": "applied", versions, generated_public_keys,
    generated_records, not_deployed}` or `{"status": "rejected", message}`.
 

@@ -61,7 +61,10 @@ let
       entry:
       lib.nameValuePair (unitName entry.id) {
         description = "Wait for persistent secrets required by ${entry.id}";
-        after = [ "local-fs.target" ];
+        after = [
+          "local-fs.target"
+          "nix-secrets-recover.service"
+        ];
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;

@@ -22,6 +22,38 @@ let
   hasGeneratedSecrets =
     servicesHaveGeneratedSecret secrets.services
     || lib.any servicesHaveGeneratedSecret (builtins.attrValues secrets.userServices);
+  recover = "${cfg.package}/bin/secret-deploy --recover";
+  # Shared by the deployment transaction and boot recovery.
+  sandbox = {
+    UMask = "0077";
+    CapabilityBoundingSet = [
+      "CAP_CHOWN"
+      "CAP_DAC_OVERRIDE"
+      "CAP_FOWNER"
+    ];
+    NoNewPrivileges = true;
+    PrivateDevices = true;
+    PrivateTmp = true;
+    ProtectClock = true;
+    ProtectControlGroups = true;
+    ProtectHome = true;
+    ProtectHostname = true;
+    ProtectKernelLogs = true;
+    ProtectKernelModules = true;
+    ProtectKernelTunables = true;
+    ProtectProc = "invisible";
+    ProtectSystem = "strict";
+    RestrictNamespaces = true;
+    RestrictRealtime = true;
+    RestrictSUIDSGID = true;
+    SystemCallArchitectures = "native";
+    SystemCallFilter = [
+      "@system-service"
+      "~@mount"
+      "~@reboot"
+      "~@swap"
+    ];
+  };
 in
 {
   options.services.nixSecrets.receiver = {
@@ -76,7 +108,7 @@ in
 
     systemd.services."nix-secrets-deployer@" = {
       description = "Atomic nix-secrets deployment transaction";
-      serviceConfig = {
+      serviceConfig = sandbox // {
         Type = "oneshot";
         # The transaction stays open while the operator reviews the values in
         # the TUI, and nothing may time out that wait. It ends with its
@@ -96,24 +128,8 @@ in
           "--audit-group"
           cfg.auditGroup
         ] ++ lib.optionals (cfg.postDeployCommand != null) [ "--post-deploy" cfg.postDeployCommand ]);
-        UMask = "0077";
-        CapabilityBoundingSet = [
-          "CAP_CHOWN"
-          "CAP_DAC_OVERRIDE"
-          "CAP_FOWNER"
-        ];
-        NoNewPrivileges = true;
-        PrivateDevices = true;
-        PrivateTmp = true;
-        ProtectClock = true;
-        ProtectControlGroups = true;
-        ProtectHome = true;
-        ProtectHostname = true;
-        ProtectKernelLogs = true;
-        ProtectKernelModules = true;
-        ProtectKernelTunables = true;
-        ProtectProc = "invisible";
-        ProtectSystem = "strict";
+        # A killed transaction is finished or discarded right away.
+        ExecStopPost = recover;
         ReadWritePaths = [
           "/persistent/secrets"
           "/persistent/public-info"
@@ -126,15 +142,30 @@ in
           "AF_INET"
           "AF_INET6"
         ];
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        SystemCallArchitectures = "native";
-        SystemCallFilter = [
-          "@system-service"
-          "~@mount"
-          "~@reboot"
-          "~@swap"
+      };
+    };
+
+    # Finishes or discards a deployment interrupted by a crash, before any
+    # consumer reads either root. The public default installers and the
+    # readiness waiters order themselves after this unit.
+    systemd.services.nix-secrets-recover = {
+      description = "Finish or discard an interrupted nix-secrets deployment";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "local-fs.target" ];
+      unitConfig.RequiresMountsFor = [
+        "/persistent/secrets"
+        "/persistent/public-info"
+      ];
+      serviceConfig = sandbox // {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = recover;
+        PrivateNetwork = true;
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        # Absent roots have nothing to recover.
+        ReadWritePaths = [
+          "-/persistent/secrets"
+          "-/persistent/public-info"
         ];
       };
     };

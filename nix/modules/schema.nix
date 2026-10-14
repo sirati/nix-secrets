@@ -149,7 +149,11 @@ let
     lib.nameValuePair "nix-secrets-public-default-${hash}" {
       description = "Install declared public information if absent";
       wantedBy = [ "multi-user.target" ];
-      after = [ "local-fs.target" ];
+      # The unit exists with the receiver; ordering after an absent unit is a no-op.
+      after = [
+        "local-fs.target"
+        "nix-secrets-recover.service"
+      ];
       unitConfig.RequiresMountsFor = [ "/persistent/public-info" ];
       serviceConfig = {
         Type = "oneshot";

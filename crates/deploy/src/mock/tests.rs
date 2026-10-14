@@ -87,9 +87,12 @@ fn fixture() -> Fixture {
     let manifest = temp.path().join("manifest.json");
     std::fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
     let secrets_root = temp.path().join("secrets");
+    let secrets = Deployer::at(&secrets_root).unwrap();
     Fixture {
-        secrets: Deployer::at(&secrets_root).unwrap(),
-        public: Deployer::at(temp.path().join("public-info")).unwrap(),
+        public: Deployer::at(temp.path().join("public-info"))
+            .unwrap()
+            .committed_with(&secrets),
+        secrets,
         manifest,
         secrets_root,
 
@@ -289,4 +292,37 @@ fn a_derived_leaf_added_later_frames_the_installed_source() {
         versions["host.services.app.later"],
         derived.version(&source)
     );
+}
+
+#[test]
+fn public_information_is_not_published_when_a_secret_fails() {
+    let f = fixture();
+    let value = |identifier: &str, service: &str, class, mode| crate::schema::ResolvedSecret {
+        identifier: identifier.into(),
+        version_id: "v1".into(),
+        service: service.into(),
+        class,
+        secret: "value".into(),
+        contents: b"[box.example]:23 ssh-ed25519 key\n".to_vec(),
+        owner: geteuid().as_raw(),
+        group: getegid().as_raw(),
+        mode,
+        audit_ssh_user: None,
+        audit_key_names: Vec::new(),
+    };
+    let mut secret = value("host.services.app.explicit", "app", SecretClass::Service, 0o440);
+    // Owner -1 leaves the owner unchanged: staging this value fails.
+    secret.owner = u32::MAX;
+    let resolved = ResolvedBatch {
+        entries: vec![
+            value("host.services.box.known-hosts", "box", SecretClass::PublicInfo, 0o644),
+            secret,
+        ],
+    };
+    let error = publish(resolved, &f.secrets, &f.public)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("staging host.services.app.explicit"), "{error}");
+    assert!(f.public.current_versions().unwrap().is_empty());
+    assert!(f.secrets.current_versions().unwrap().is_empty());
 }

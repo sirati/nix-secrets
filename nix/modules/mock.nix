@@ -167,6 +167,7 @@ in
       after = [
         "local-fs.target"
         "systemd-tmpfiles-setup.service"
+        "nix-secrets-recover.service"
       ]
       ++ publicDefaultUnits;
       unitConfig.RequiresMountsFor = [ "/persistent" ];

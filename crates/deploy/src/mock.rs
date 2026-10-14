@@ -100,6 +100,7 @@ pub fn mock_install(
             unknown.join(", ")
         )));
     }
+    crate::recover(secrets, public)?;
     let secret_versions = secrets.current_versions()?;
     let mut installed = secret_versions.clone();
     installed.extend(public.current_versions()?);
@@ -217,21 +218,15 @@ pub fn mock_install(
     Ok(report)
 }
 
-/// The receiver's publish step: public information and secrets each go to
-/// their own atomic tree.
+/// The receiver's publish step: public information and secrets go to their
+/// own trees as one deployment.
 fn publish(
     resolved: ResolvedBatch,
     secrets: &Deployer,
     public: &Deployer,
 ) -> Result<(), DeployError> {
     let (private, public_batch) = resolved.partition();
-    if !public_batch.is_empty() {
-        public.deploy(&public_batch)?;
-    }
-    if !private.is_empty() {
-        secrets.deploy(&private)?;
-    }
-    Ok(())
+    crate::deploy_together(secrets, public, Some(&private), Some(&public_batch)).map(|_| ())
 }
 
 enum Leaf<'a> {

@@ -17,14 +17,19 @@ pub(crate) fn validate(batch: &ResolvedBatch) -> Result<Vec<ValidatedSecret<'_>>
         .entries
         .iter()
         .map(|spec| {
-            validate_name("service", &spec.service)?;
-            validate_name("secret", &spec.secret)?;
+            let in_value = |error: DeployError| {
+                error.during(&format!("validating {}", spec.identifier))
+            };
+            validate_name("service", &spec.service).map_err(in_value)?;
+            validate_name("secret", &spec.secret).map_err(in_value)?;
             if spec.class == crate::SecretClass::PublicInfo {
                 if spec.mode != 0o644 {
-                    return Err(DeployError::Invalid("public-info mode must be 0644".into()));
+                    return Err(in_value(DeployError::Invalid(
+                        "public-info mode must be 0644".into(),
+                    )));
                 }
             } else {
-                validate_mode(spec.mode)?;
+                validate_mode(spec.mode).map_err(in_value)?;
             }
             if spec.identifier.is_empty() || spec.version_id.is_empty() {
                 return Err(DeployError::Invalid(
@@ -35,10 +40,10 @@ pub(crate) fn validate(batch: &ResolvedBatch) -> Result<Vec<ValidatedSecret<'_>>
                 .join(spec.class.directory())
                 .join(&spec.secret);
             if !destinations.insert(relative.clone()) {
-                return Err(DeployError::Invalid(format!(
+                return Err(in_value(DeployError::Invalid(format!(
                     "duplicate destination: {}",
                     relative.display()
-                )));
+                ))));
             }
             Ok(ValidatedSecret { spec, relative })
         })
