@@ -47,6 +47,20 @@ the result and the exit status. COMMAND receives the token in `NIX_SECRETS_PROCE
 The command exits with COMMAND's status. If no backend is reachable, COMMAND
 still runs and its requests appear one by one.
 
+```text
+nix-secrets procedure-step-failed --label TEXT --reason TEXT
+```
+
+Run inside COMMAND, reports that the step TEXT failed. The dialog lists it
+with ✗, its position and the reason, and the result names it, also after
+COMMAND exits, until the operator closes it. A second report with the same
+label right after updates that step, so "rolling back" can become "rolled
+back". A later request starts a new step. The command prints
+`nix-secrets: step failed: LABEL: REASON` to stderr. Outside a procedure or
+without a running backend it notes that the TUI was not reached and exits 0.
+It waits at most 5 seconds for the backend. It exits 1 if the backend
+refuses the report. It never starts a backend.
+
 ## with-secrets and pipe-secret
 
 ```text

@@ -385,3 +385,70 @@ fn requests_from_older_requesters_without_procedure_fields_still_work() {
     }
     let _ = Request::EndSecretSession;
 }
+
+#[test]
+fn a_step_the_command_reports_failed_reaches_the_operator_with_its_reason() {
+    let fixture = fixture(Duration::from_secs(600));
+    let operator = fixture.attach();
+    let report = |reason: &str| {
+        format!(
+            r#""$NIX_SECRETS" procedure-step-failed --backend-socket "$SOCKET" --label "activate host" --reason "{reason}""#
+        )
+    };
+    let holder = fixture.procedure(
+        "Update host",
+        &format!(
+            r#"{} && {} && printf %s "$NIX_SECRETS_PROCEDURE" > "$OUT/token" && while [ ! -e "$OUT/stop" ]; do sleep 0.05; done; exit 4"#,
+            report("switch exited 4, rolling back"),
+            report("rolled back and verified"),
+        ),
+    );
+    let mut failures = Vec::new();
+    let until = Instant::now() + Duration::from_secs(30);
+    while failures.len() < 2 {
+        assert!(Instant::now() < until, "the failure reports never arrived");
+        if let ChannelEvent::Procedure(step) = operator.next() {
+            if step.failure.is_some() {
+                failures.push(step);
+            }
+        }
+    }
+    // Both reports are about one step, the first of the procedure.
+    for step in &failures {
+        assert_eq!((step.step, step.steps), (1, Some(3)));
+        assert_eq!((step.title.as_str(), step.label.as_str()), ("Update host", "activate host"));
+        assert!(!step.deployment);
+    }
+    assert_eq!(failures[0].failure.as_deref(), Some("switch exited 4, rolling back"));
+    assert_eq!(failures[1].failure.as_deref(), Some("rolled back and verified"));
+    // A process outside the procedure is refused even with its token, and
+    // says so; the failure itself is still printed.
+    let token_file = fixture.temp.path().join("token");
+    while std::fs::read_to_string(&token_file).map_or(true, |token| token.is_empty()) {
+        assert!(Instant::now() < until, "the procedure never wrote its token");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let token = std::fs::read_to_string(&token_file).unwrap();
+    let output = fixture
+        .command(&["procedure-step-failed", "--backend-socket"])
+        .arg(&fixture.socket)
+        .args(["--label", "forged", "--reason", "x"])
+        .env("NIX_SECRETS_PROCEDURE", &token)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.starts_with("nix-secrets: step failed: forged: x\n"), "{stderr}");
+    assert!(stderr.contains("does not belong to procedure"), "{stderr}");
+    std::fs::write(fixture.temp.path().join("stop"), "").unwrap();
+    let id = failures[0].id.clone();
+    assert_eq!(operator.until_ended(&id), Some(4));
+    let output = finish(holder);
+    assert_eq!(output.status.code(), Some(4));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nix-secrets: step failed: activate host: switch exited 4, rolling back"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("not reached"), "{stderr}");
+}

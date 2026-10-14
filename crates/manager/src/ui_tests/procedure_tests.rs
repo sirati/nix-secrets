@@ -60,6 +60,7 @@ fn step(id: &str, title: &str, number: u32, label: &str) -> ProcedureStep {
         steps: Some(3),
         label: label.into(),
         deployment: false,
+        failure: None,
     }
 }
 
@@ -953,4 +954,98 @@ fn a_deployment_asked_again_gets_its_new_outcome_recorded() {
     let procedure = model.procedure(UPDATE).unwrap();
     assert_eq!(procedure.finished.len(), 2);
     assert!(model.deployment_in_flight().is_none());
+}
+
+fn failed(number: u32, label: &str, reason: &str) -> ProcedureEvent {
+    let mut step = step(UPDATE, "Update ns1", number, label);
+    step.failure = Some(reason.into());
+    ProcedureEvent::Step(step)
+}
+
+#[test]
+fn a_step_reported_failed_shows_its_reason_live_and_after_the_end() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    signed(&mut model, "closure", Ok(()));
+    assert!(render(&model).contains("waiting for step 2/3"));
+    channel
+        .events
+        .push(failed(2, "activate ns1", "exited 4; rolling back"));
+    tick(&mut model, &mut channel);
+    // Shown as failed, not as a prompt waiting for an answer.
+    assert!(model.shown_prompt().is_none());
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · failed at step 2/3: activate ns1"), "{screen}");
+    assert!(screen.contains("✓ step 1/3: closure signed"), "{screen}");
+    assert!(
+        screen.contains("✗ step 2/3: activate ns1: exited 4; rolling back"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Failed at step 2/3: activate ns1: exited 4; rolling back"),
+        "{screen}"
+    );
+    assert!(screen.contains("Enter OK"), "{screen}");
+    assert!(!screen.contains("waiting for step"), "{screen}");
+    // A second report about the same step replaces the reason.
+    channel
+        .events
+        .push(failed(2, "activate ns1", "rolled back; previous system verified"));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert_eq!(screen.matches("✗ step 2/3").count(), 1, "{screen}");
+    assert!(!screen.contains("rolling back"), "{screen}");
+    assert!(
+        screen.contains("Failed at step 2/3: activate ns1: rolled back; previous system verified"),
+        "{screen}"
+    );
+    // The end keeps the failure and adds the exit status.
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(1)));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · failed at step 2/3: activate ns1"), "{screen}");
+    assert!(
+        screen.contains("✗ step 2/3: activate ns1: rolled back; previous system verified"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Failed at step 2/3: activate ns1: rolled back; previous system verified"),
+        "{screen}"
+    );
+    assert!(screen.contains("The command failed with exit status 1."), "{screen}");
+    reduce(&mut model, UiEvent::Enter, &mut channel);
+    assert!(model.procedures.is_empty());
+}
+
+#[test]
+fn a_failure_reported_while_minimised_flashes_and_survives_the_end() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    // Reported while its own closure step is still being signed.
+    channel.events.push(failed(2, "activate ns1", "rolled back"));
+    tick(&mut model, &mut channel);
+    signed(&mut model, "closure", Ok(()));
+    let procedure = model.procedure(UPDATE).unwrap();
+    assert!(procedure.minimised && procedure.flashing && procedure.failed());
+    let screen = render(&model);
+    assert!(
+        screen.contains("▪ Update ns1 · failed at step 2/3: activate ns1 · waiting for you"),
+        "{screen}"
+    );
+    reduce(&mut model, UiEvent::Character('M'), &mut channel);
+    reduce(&mut model, UiEvent::Enter, &mut channel);
+    // Dismissed while live, the end still names the failed step.
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(1)));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · failed at step 2/3: activate ns1"), "{screen}");
+    assert!(screen.contains("Failed at step 2/3: activate ns1: rolled back"), "{screen}");
+    assert!(screen.contains("The command failed with exit status 1."), "{screen}");
 }

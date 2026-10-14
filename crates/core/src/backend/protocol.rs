@@ -214,6 +214,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
     },
+    /// From inside a procedure: the step `label` failed because of
+    /// `reason`. The backend numbers it like a repeatable request, so a
+    /// second report about the same step updates it, marks it failed in the
+    /// [`Response::ProcedureUpdate`] it broadcasts and answers
+    /// [`Response::Success`].
+    FailProcedureStep {
+        /// The token from [`crate::procedure::PROCEDURE_ENVIRONMENT`].
+        procedure: String,
+        label: String,
+        reason: String,
+    },
     /// The schema document the backend evaluated; see
     /// [`Response::SchemaDocument`]. A TUI that finds requests waiting uses it
     /// instead of evaluating the repository again.
@@ -380,4 +391,65 @@ pub enum Response {
     /// To a requester that asked for progress: the operator cancelled the
     /// automatic denial; the request now waits for the operator's decision.
     CountdownCancelled,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::procedure::ProcedureStep;
+
+    #[test]
+    fn a_failed_step_report_and_its_update_round_trip() {
+        let request = Request::FailProcedureStep {
+            procedure: "proc-1-ab:secret".into(),
+            label: "activate ns1".into(),
+            reason: "rolled back".into(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"operation": "fail-procedure-step",
+                "procedure": "proc-1-ab:secret", "label": "activate ns1",
+                "reason": "rolled back"})
+        );
+        match serde_json::from_value::<Request>(json).unwrap() {
+            Request::FailProcedureStep { procedure, label, reason } => {
+                assert_eq!(
+                    (procedure.as_str(), label.as_str(), reason.as_str()),
+                    ("proc-1-ab:secret", "activate ns1", "rolled back")
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let mut step = ProcedureStep {
+            id: "proc-1-ab".into(),
+            title: "Update ns1".into(),
+            step: 2,
+            steps: Some(4),
+            label: "activate ns1".into(),
+            deployment: false,
+            failure: Some("rolled back".into()),
+        };
+        let update = serde_json::to_string(&Response::ProcedureUpdate {
+            procedure: step.clone(),
+        })
+        .unwrap();
+        assert!(update.contains(r#""failure":"rolled back""#), "{update}");
+        match serde_json::from_str::<Response>(&update).unwrap() {
+            Response::ProcedureUpdate { procedure } => assert_eq!(procedure, step),
+            other => panic!("unexpected {other:?}"),
+        }
+        // A step without failure keeps the old wire format.
+        step.failure = None;
+        let update = serde_json::to_string(&Response::ProcedureUpdate {
+            procedure: step.clone(),
+        })
+        .unwrap();
+        assert!(!update.contains("failure"), "{update}");
+        // Unknown fields are still refused.
+        assert!(serde_json::from_str::<ProcedureStep>(
+            r#"{"id":"p","title":"t","step":1,"label":"l","failed":true}"#
+        )
+        .is_err());
+    }
 }

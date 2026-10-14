@@ -34,6 +34,8 @@ pub enum StepKind {
     Artifacts,
     Closure,
     Deployment,
+    /// A step the procedure's command reported as failed; nothing was asked.
+    Reported,
 }
 
 impl StepKind {
@@ -60,6 +62,7 @@ impl StepKind {
             Self::Artifacts => "artifacts signed",
             Self::Closure => "closure signed",
             Self::Deployment => "secrets deployed",
+            Self::Reported => "reported",
         }
     }
 }
@@ -184,6 +187,9 @@ pub struct Procedure {
     pub between: Option<Between>,
     /// How its command exited, once it ended and if it said so.
     pub exit_code: Option<i32>,
+    /// The result of a step its command reported failed while another step
+    /// was open; it shows once nothing is.
+    reported_failure: Option<String>,
 }
 
 impl Procedure {
@@ -202,6 +208,7 @@ impl Procedure {
             finished: Vec::new(),
             between: None,
             exit_code: None,
+            reported_failure: None,
         }
     }
 
@@ -246,6 +253,7 @@ impl Procedure {
                 steps: None,
                 label: String::new(),
                 deployment: false,
+                failure: None,
             });
         next.step += 1;
         next.position()
@@ -355,6 +363,12 @@ pub fn approval_procedure(request: &ApprovalRequest) -> String {
         .as_ref()
         .map(|step| step.id.clone())
         .unwrap_or_else(|| format!("deployment:{}", request.id))
+}
+
+/// `Failed at step 2/4: activate ns1: rolled back`, for a step the
+/// procedure's command reported failed.
+fn reported_failure(step: &FinishedStep) -> String {
+    format!("Failed at {}: {}: {}", step.step.position(), step.step.label, step.text)
 }
 
 /// How a procedure's command ended, for its result.
@@ -514,6 +528,53 @@ impl Model {
         if step.deployment {
             procedure.awaiting_deployment = true;
         }
+        if step.failure.is_some() {
+            self.step_reported_failed(step);
+        }
+    }
+
+    /// The procedure's command reported a step as failed. It is listed as
+    /// failed with its reason and fails the procedure like a failed prompt.
+    /// A later report about the same step only updates the reason.
+    fn step_reported_failed(&mut self, step: ProcedureStep) {
+        let Some(reason) = step.failure.clone() else {
+            return;
+        };
+        let Some(index) = self.procedures.iter().position(|procedure| procedure.id == step.id)
+        else {
+            return;
+        };
+        let request = format!("failed:{}:{}", step.id, step.step);
+        let procedure = &mut self.procedures[index];
+        if let Some(known) = procedure
+            .finished
+            .iter_mut()
+            .find(|finished| finished.request == request)
+        {
+            let old = reported_failure(known);
+            known.text = reason;
+            known.step = step;
+            let new = reported_failure(known);
+            let shown = match &mut procedure.between {
+                Some(Between::Result { text, .. }) => Some(text),
+                _ => None,
+            };
+            for text in shown.into_iter().chain(procedure.reported_failure.as_mut()) {
+                if let Some(rest) = text.strip_prefix(&old) {
+                    *text = format!("{new}{rest}");
+                }
+            }
+            return;
+        }
+        let flight = InFlight {
+            request,
+            step,
+            kind: StepKind::Reported,
+            denied: false,
+            deadline: None,
+        };
+        self.record_step(index, flight, StepOutcome::Failed, reason);
+        self.tidy_procedures();
     }
 
     /// The backend reported the end of a procedure and, if known, how its
@@ -558,6 +619,16 @@ impl Model {
                             format!("Ended after step {reached} of {declared}. {exit}")
                         } else {
                             exit
+                        };
+                        // A step the command reported failed says why first.
+                        let summary = match procedure
+                            .finished
+                            .iter()
+                            .rev()
+                            .find(|step| step.kind == StepKind::Reported)
+                        {
+                            Some(reported) => format!("{}\n{summary}", reported_failure(reported)),
+                            None => summary,
                         };
                         Between::Result {
                             succeeded: exit_code == Some(0) && all_done && !early,
@@ -704,6 +775,9 @@ impl Model {
             text,
             outcome,
         });
+        let reported = (flight.kind == StepKind::Reported)
+            .then(|| procedure.finished.last().map(reported_failure))
+            .flatten();
         let open = !procedure.prompts.is_empty()
             || matches!(&self.mode, Mode::Approval(open) if approval_procedure(open) == procedure.id);
         let procedure = &mut self.procedures[index];
@@ -719,14 +793,19 @@ impl Model {
                 _ => {}
             }
         } else if !open && procedure.in_flight.is_empty() && !procedure.failed() {
+            // A failure the command reported while a step was open shows
+            // once nothing is.
+            let reported = reported.or_else(|| procedure.reported_failure.take());
+            procedure.reported_failure = None;
+            let succeeded = succeeded && reported.is_none();
             procedure.between = Some(if !succeeded {
                 Between::Result {
                     succeeded: false,
-                    text: match outcome {
+                    text: reported.unwrap_or_else(|| match outcome {
                         StepOutcome::Denied => "You denied the step.".into(),
                         StepOutcome::TimedOut => "Nobody answered the step in time.".into(),
                         _ => "The step failed.".into(),
-                    },
+                    }),
                 }
             } else if procedure.last_step_done() {
                 Between::Result {
@@ -745,6 +824,12 @@ impl Model {
                     self.procedures[index].minimised = true;
                     self.procedures[index].flashing = true;
                 }
+            }
+        } else if let (Some(text), false) = (reported, procedure.failed()) {
+            // Listed now; the result waits until the open step is done.
+            procedure.reported_failure = Some(text);
+            if procedure.minimised {
+                procedure.flashing = true;
             }
         }
     }

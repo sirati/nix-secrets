@@ -70,6 +70,11 @@ fn main() {
         .is_some()
     {
         procedure(arguments.collect())
+    } else if arguments
+        .next_if(|argument| argument == "procedure-step-failed")
+        .is_some()
+    {
+        procedure_step_failed(arguments.collect())
     } else {
         run(arguments.collect()).map(|()| 0)
     };
@@ -227,6 +232,23 @@ fn procedure(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>
     let invocation = parse(arguments, env::current_dir()?)?;
     let status = run(&invocation, &runtime_directory(&home()?))?;
     Ok(exit_code(status))
+}
+
+/// Reports a failed step of the procedure this runs in; see
+/// `procedure_command`.
+fn procedure_step_failed(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_manager::procedure_command::{
+        parse_step_failed, report_step_failed, STEP_FAILED_TIMEOUT,
+    };
+    // Nothing about this environment may keep the failure from being shown.
+    let failure = parse_step_failed(arguments, env::current_dir().unwrap_or_default())?;
+    Ok(report_step_failed(
+        &failure,
+        &runtime_directory(&home().unwrap_or_default()),
+        with_secrets::procedure_token(),
+        STEP_FAILED_TIMEOUT,
+        &mut io::stderr(),
+    ))
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {

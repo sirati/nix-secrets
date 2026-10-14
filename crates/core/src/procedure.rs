@@ -10,12 +10,19 @@
 //! numbers the request as the next step and tells the TUI which procedure
 //! the prompt belongs to. The procedure ends when its registering
 //! connection closes.
+//!
+//! `nix-secrets procedure-step-failed --label TEXT --reason TEXT` inside the
+//! command reports a step as failed ([`crate::Request::FailProcedureStep`]):
+//! the backend numbers it like a request, with the same token and
+//! descendant checks, and the TUI shows it as a failed step with its reason.
 use serde::{Deserialize, Serialize};
 
 /// The environment variable carrying a procedure token to requesters.
 pub const PROCEDURE_ENVIRONMENT: &str = "NIX_SECRETS_PROCEDURE";
 pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_LABEL_BYTES: usize = 512;
+/// The longest reason a requester may give for a failed step.
+pub const MAX_REASON_BYTES: usize = 2048;
 /// The most steps a procedure may declare.
 pub const MAX_DECLARED_STEPS: u32 = 1000;
 /// Live procedures per backend.
@@ -39,6 +46,10 @@ pub struct ProcedureStep {
     /// queue rather than the operator channel.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deployment: bool,
+    /// The procedure's command reported this step as failed, and why; see
+    /// [`crate::Request::FailProcedureStep`]. Any later step clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 impl ProcedureStep {
@@ -74,6 +85,13 @@ impl ProcedureStep {
         }
         if self.steps.is_some_and(|steps| steps == 0 || steps > MAX_DECLARED_STEPS) {
             return Err("procedure step count is invalid");
+        }
+        if self
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.is_empty() || failure.len() > MAX_REASON_BYTES)
+        {
+            return Err("procedure step failure has an invalid length");
         }
         Ok(())
     }
@@ -112,6 +130,7 @@ mod tests {
             steps: Some(4),
             label: "sign closure".into(),
             deployment: false,
+            failure: None,
         };
         assert!(step.countdown());
         assert_eq!(step.position(), "step 1/4");
@@ -123,6 +142,13 @@ mod tests {
         step.steps = None;
         assert_eq!(step.position(), "step 5");
         assert!(step.validate().is_ok());
+        step.failure = Some("rolled back".into());
+        assert!(step.validate().is_ok());
+        step.failure = Some(String::new());
+        assert!(step.validate().is_err());
+        step.failure = Some("x".repeat(MAX_REASON_BYTES + 1));
+        assert!(step.validate().is_err());
+        step.failure = None;
         step.id = "proc:1".into();
         assert!(step.validate().is_err());
     }

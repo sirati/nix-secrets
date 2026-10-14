@@ -108,7 +108,9 @@ deployment is a procedure of its own. Only the first step of a procedure
 counts down; later steps wait until answered. Between steps the dialog
 stays open: it lists the finished steps and waits for the next one. After
 the last step, or when the command exits, it shows the result. Any key
-closes a success; Enter closes a failure.
+closes a success; Enter closes a failure. A step the command reports
+failed with `nix-secrets procedure-step-failed` is listed with ✗ and its
+reason, and the procedure's result names it.
 m      Minimise the open secret request or deployment dialog
 M      Restore the next procedure that waits for you, flashing ones first
 Click  A task bar entry restores it

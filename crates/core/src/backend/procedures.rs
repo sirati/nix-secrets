@@ -8,7 +8,8 @@
 use super::{Request, Response};
 use crate::framing::{read_json, write_json};
 use crate::procedure::{
-    MAX_DECLARED_STEPS, MAX_LABEL_BYTES, MAX_PROCEDURES, MAX_TITLE_BYTES, ProcedureStep,
+    MAX_DECLARED_STEPS, MAX_LABEL_BYTES, MAX_PROCEDURES, MAX_REASON_BYTES, MAX_TITLE_BYTES,
+    ProcedureStep,
     clean_text, split_token,
 };
 use crate::secret_request::is_same_or_descendant;
@@ -84,6 +85,7 @@ impl Procedures {
             steps,
             label: "starting".into(),
             deployment: false,
+            failure: None,
         };
         live.insert(
             id.clone(),
@@ -125,6 +127,40 @@ impl Procedures {
         deployment: bool,
         repeatable: bool,
     ) -> Result<ProcedureStep, String> {
+        self.number_step(token, peer, label, deployment, repeatable, None)
+    }
+
+    /// Records that the step `label` failed, numbered like a repeatable
+    /// request: a report about the same step again (say "rolling back",
+    /// then "rolled back") updates that step instead of adding one.
+    pub(super) fn fail_step(
+        &self,
+        token: &str,
+        peer: u32,
+        label: &str,
+        reason: &str,
+    ) -> Result<ProcedureStep, String> {
+        if clean_text(label, MAX_LABEL_BYTES).is_empty() {
+            return Err("a failed step needs a label".into());
+        }
+        let reason = clean_text(reason, MAX_REASON_BYTES);
+        let reason = if reason.is_empty() {
+            "no reason given".to_owned()
+        } else {
+            reason
+        };
+        self.number_step(token, peer, label, false, true, Some(reason))
+    }
+
+    fn number_step(
+        &self,
+        token: &str,
+        peer: u32,
+        label: &str,
+        deployment: bool,
+        repeatable: bool,
+        failure: Option<String>,
+    ) -> Result<ProcedureStep, String> {
         let (id, secret) = split_token(token).ok_or("the procedure token is malformed")?;
         let mut live = self.live.lock().map_err(|_| "procedure registry poisoned")?;
         let procedure = live
@@ -147,6 +183,7 @@ impl Procedures {
         }
         procedure.step.label = label;
         procedure.step.deployment = deployment;
+        procedure.step.failure = failure;
         procedure.repeatable = repeatable;
         Ok(procedure.step.clone())
     }
@@ -269,6 +306,55 @@ mod tests {
         assert_eq!(next("deploy secrets to ns1", false), 5);
         // A login after something else is a new step again.
         assert_eq!(next("SSH authentication to update@ns2", true), 6);
+    }
+
+    #[test]
+    fn a_failed_step_is_numbered_checked_updated_and_cleared() {
+        let procedures = Procedures::default();
+        let own = std::process::id();
+        let (_, token) = procedures.begin(own, "Update ns1", Some(4)).unwrap();
+        let step = procedures
+            .next_step(&token, own, "sign closure for ns1", false, false)
+            .unwrap();
+        assert_eq!((step.step, step.failure), (1, None));
+        let failed = procedures
+            .fail_step(&token, own, "activate ns1", "failed\x1b[2J, rolling back")
+            .unwrap();
+        assert_eq!((failed.step, failed.label.as_str()), (2, "activate ns1"));
+        assert_eq!(failed.failure.as_deref(), Some("failed [2J, rolling back"));
+        assert!(failed.validate().is_ok());
+        // The same step reported again updates its reason in place.
+        let again = procedures
+            .fail_step(&token, own, "activate ns1", "rolled back and verified")
+            .unwrap();
+        assert_eq!(again.step, 2);
+        assert_eq!(again.failure.as_deref(), Some("rolled back and verified"));
+        assert_eq!(procedures.snapshot()[0].failure.as_deref(), Some("rolled back and verified"));
+        // The reason is bounded.
+        let long = procedures
+            .fail_step(&token, own, "activate ns1", &"x".repeat(3 * MAX_REASON_BYTES))
+            .unwrap();
+        assert_eq!(long.failure.unwrap().len(), MAX_REASON_BYTES);
+        // Another step reported failed is a new step.
+        assert_eq!(procedures.fail_step(&token, own, "activate ns2", "x").unwrap().step, 3);
+        // A later normal step clears the failure.
+        let next = procedures
+            .next_step(&token, own, "deploy secrets to ns1", true, false)
+            .unwrap();
+        assert_eq!((next.step, next.failure), (4, None));
+        assert!(procedures.fail_step(&token, own, " \x07 ", "x").is_err(), "empty label");
+        // The token and descendant checks hold as for any request.
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let (_, foreign) = procedures.begin(child.id(), "Other", None).unwrap();
+        let error = procedures.fail_step(&foreign, own, "x", "y").unwrap_err();
+        assert!(error.contains("does not belong"), "{error}");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let (id, _) = split_token(&token).unwrap();
+        let forged = format!("{id}:{}", "0".repeat(64));
+        assert!(procedures.fail_step(&forged, own, "x", "y").is_err());
+        assert!(procedures.fail_step("garbage", own, "x", "y").is_err());
+        assert_eq!(procedures.snapshot().iter().find(|s| s.id == id).unwrap().step, 4);
     }
 
     #[test]

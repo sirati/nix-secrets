@@ -50,6 +50,7 @@ fn prompt(id: &str, deadline: Option<Instant>, step: Option<(u32, &str)>) -> Sec
             steps: Some(3),
             label: label.into(),
             deployment: false,
+            failure: None,
         }),
     }
 }

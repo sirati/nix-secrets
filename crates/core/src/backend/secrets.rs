@@ -240,6 +240,20 @@ impl Operators {
         self.broadcast_step(step.clone());
         Ok(step)
     }
+
+    /// Like [`Self::advance`] for a step the procedure's command reports as
+    /// failed; see [`super::Request::FailProcedureStep`].
+    pub(super) fn fail_step(
+        &self,
+        token: &str,
+        peer: u32,
+        label: &str,
+        reason: &str,
+    ) -> Result<ProcedureStep, String> {
+        let step = self.procedures.fail_step(token, peer, label, reason)?;
+        self.broadcast_step(step.clone());
+        Ok(step)
+    }
 }
 
 /// Serves an attached TUI until it disconnects.

@@ -12,13 +12,23 @@
 //! token, and the backend accepts it only from descendants of this process.
 //! The procedure ends when the command exits. Without a reachable backend
 //! the command still runs, and its prompts appear one by one.
-use crate::with_secrets::{connect_backend, Options};
+//!
+//! ```text
+//! nix-secrets procedure-step-failed [--repository PATH] [--backend-socket PATH] --label TEXT --reason TEXT
+//! ```
+//!
+//! Inside the command, reports that the step `--label` failed. The TUI
+//! shows it in the procedure dialog as a failed step with the reason; a
+//! second report with the same label updates that step.
+use crate::socket::connect_verified;
+use crate::with_secrets::{backend_candidates, connect_backend, Options};
 use nix_secrets_core::framing::{read_json, write_json};
-use nix_secrets_core::procedure::{MAX_DECLARED_STEPS, PROCEDURE_ENVIRONMENT};
+use nix_secrets_core::procedure::{clean_text, MAX_DECLARED_STEPS, PROCEDURE_ENVIRONMENT};
 use nix_secrets_core::{Request, Response};
 use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub const USAGE: &str = "usage: nix-secrets procedure [--repository PATH] [--backend-socket PATH] \
 --title TEXT [--steps N] -- COMMAND [ARGUMENT...]";
@@ -157,6 +167,143 @@ pub fn run(
     status
 }
 
+pub const STEP_FAILED_USAGE: &str = "usage: nix-secrets procedure-step-failed [--repository PATH] \
+[--backend-socket PATH] --label TEXT --reason TEXT";
+
+/// How long a failure report waits for the backend before giving up.
+pub const STEP_FAILED_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `nix-secrets procedure-step-failed`: the command of a procedure reports
+/// that a step failed, and why.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StepFailure {
+    pub options: Options,
+    pub label: String,
+    pub reason: String,
+}
+
+pub fn parse_step_failed(
+    arguments: impl IntoIterator<Item = OsString>,
+    working_directory: PathBuf,
+) -> Result<StepFailure, String> {
+    let mut arguments = arguments.into_iter();
+    let mut options = Options {
+        repository: working_directory,
+        ..Options::default()
+    };
+    let (mut label, mut reason) = (None, None);
+    while let Some(argument) = arguments.next() {
+        let text = argument
+            .to_str()
+            .ok_or_else(|| format!("unexpected argument {argument:?}; {STEP_FAILED_USAGE}"))?
+            .to_owned();
+        let mut value = |name: &str| {
+            arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| format!("{name} requires UTF-8 text; {STEP_FAILED_USAGE}"))
+        };
+        match text.as_str() {
+            "--label" => label = Some(value("--label")?),
+            "--reason" => reason = Some(value("--reason")?),
+            "--repository" => options.repository = value("--repository")?.into(),
+            "--backend-socket" => options.backend_socket = Some(value("--backend-socket")?.into()),
+            _ => return Err(format!("unexpected argument {text:?}; {STEP_FAILED_USAGE}")),
+        }
+    }
+    let label = label
+        .filter(|label| !label.trim().is_empty())
+        .ok_or_else(|| format!("name the failed step with --label; {STEP_FAILED_USAGE}"))?;
+    let reason = reason
+        .filter(|reason| !reason.trim().is_empty())
+        .ok_or_else(|| format!("say why the step failed with --reason; {STEP_FAILED_USAGE}"))?;
+    Ok(StepFailure {
+        options,
+        label,
+        reason,
+    })
+}
+
+/// A running backend for the procedure: the one it registered with is
+/// already running, so this never starts one.
+fn connect_running(options: &Options, runtime: &Path) -> Result<UnixStream, String> {
+    if let Some(socket) = &options.backend_socket {
+        return connect_verified(socket)
+            .map_err(|error| format!("cannot connect to {}: {error}", socket.display()));
+    }
+    backend_candidates(runtime, &options.repository)
+        .iter()
+        .find_map(|socket| connect_verified(socket).ok())
+        .ok_or_else(|| "no nix-secrets backend is running for this repository".into())
+}
+
+/// Sends the report; `Ok(Err(..))` is the backend refusing it.
+fn send_failure(
+    failure: &StepFailure,
+    runtime: &Path,
+    token: String,
+    timeout: Duration,
+) -> Result<Result<(), String>, String> {
+    let mut stream = connect_running(&failure.options, runtime)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|error| error.to_string())?;
+    write_json(
+        &mut stream,
+        &Request::FailProcedureStep {
+            procedure: token,
+            label: failure.label.clone(),
+            reason: failure.reason.clone(),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    match read_json::<Response>(&mut stream).map_err(|error| error.to_string())? {
+        Some(Response::Success) => Ok(Ok(())),
+        Some(Response::Error { message }) => Ok(Err(message)),
+        Some(other) => Ok(Err(format!("unexpected backend response: {other:?}"))),
+        None => Ok(Err("the backend closed the connection without an answer".into())),
+    }
+}
+
+/// Reports a failed step to the TUI. The failure is always printed first,
+/// so it is never hidden; a missing token or an unreachable backend only
+/// adds a note and exits 0. A backend that refuses the report exits 1.
+pub fn report_step_failed(
+    failure: &StepFailure,
+    runtime: &Path,
+    token: Option<String>,
+    timeout: Duration,
+    stderr: &mut dyn std::io::Write,
+) -> i32 {
+    let shown = |text: &str| clean_text(text, usize::MAX);
+    let _ = writeln!(
+        stderr,
+        "nix-secrets: step failed: {}: {}",
+        shown(&failure.label),
+        shown(&failure.reason)
+    );
+    let Some(token) = token else {
+        let _ = writeln!(
+            stderr,
+            "nix-secrets: not inside `nix-secrets procedure` ({PROCEDURE_ENVIRONMENT} is unset); \
+             the TUI was not reached"
+        );
+        return 0;
+    };
+    match send_failure(failure, runtime, token, timeout) {
+        Ok(Ok(())) => 0,
+        Ok(Err(message)) => {
+            let _ = writeln!(stderr, "nix-secrets: the backend refused the report: {message}");
+            1
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "nix-secrets: {error}; the TUI was not reached");
+            0
+        }
+    }
+}
+
 /// The exit code as a shell reports it: 128 + the signal that ended it.
 fn shell_exit_code(status: &std::process::ExitStatus) -> Option<i32> {
     use std::os::unix::process::ExitStatusExt;
@@ -199,5 +346,108 @@ mod tests {
         assert!(parse(os(&["--title", "t"]), "/".into()).is_err(), "no command");
         assert!(parse(os(&["--title", "t", "--steps", "0", "--", "x"]), "/".into()).is_err());
         assert!(parse(os(&["--title", "t", "--local", "--", "x"]), "/".into()).is_err());
+    }
+
+    #[test]
+    fn parses_a_failed_step_report() {
+        let parsed = parse_step_failed(
+            os(&[
+                "--label",
+                "activate ns1",
+                "--reason",
+                "rolled back",
+                "--backend-socket",
+                "/b.sock",
+            ]),
+            "/cwd".into(),
+        )
+        .unwrap();
+        assert_eq!(parsed.label, "activate ns1");
+        assert_eq!(parsed.reason, "rolled back");
+        assert_eq!(parsed.options.repository, PathBuf::from("/cwd"));
+        assert_eq!(parsed.options.backend_socket, Some(PathBuf::from("/b.sock")));
+        let repository =
+            parse_step_failed(os(&["--repository", "/r", "--label", "l", "--reason", "r"]), "/".into())
+                .unwrap();
+        assert_eq!(repository.options.repository, PathBuf::from("/r"));
+        assert!(parse_step_failed(os(&["--reason", "r"]), "/".into()).is_err(), "no label");
+        assert!(parse_step_failed(os(&["--label", " ", "--reason", "r"]), "/".into()).is_err());
+        assert!(parse_step_failed(os(&["--label", "l"]), "/".into()).is_err(), "no reason");
+        assert!(parse_step_failed(os(&["--label", "l", "--reason"]), "/".into()).is_err());
+        assert!(
+            parse_step_failed(os(&["--label", "l", "--reason", "r", "--", "x"]), "/".into()).is_err()
+        );
+    }
+
+    #[test]
+    fn a_failure_report_is_always_printed_and_never_fails_for_lack_of_a_tui() {
+        let temp = tempfile::tempdir().unwrap();
+        let failure = StepFailure {
+            options: Options {
+                repository: temp.path().into(),
+                backend_socket: Some(temp.path().join("missing.sock")),
+                ..Options::default()
+            },
+            label: "activate ns1".into(),
+            reason: "rolled back\x1b[2J".into(),
+        };
+        let report = |token: Option<&str>| {
+            let mut stderr = Vec::new();
+            let code = report_step_failed(
+                &failure,
+                temp.path(),
+                token.map(str::to_owned),
+                STEP_FAILED_TIMEOUT,
+                &mut stderr,
+            );
+            (code, String::from_utf8(stderr).unwrap())
+        };
+        let (code, stderr) = report(None);
+        assert_eq!(code, 0);
+        assert!(
+            stderr.starts_with("nix-secrets: step failed: activate ns1: rolled back [2J\n"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("the TUI was not reached"), "{stderr}");
+        let (code, stderr) = report(Some("proc-1-ab:secret"));
+        assert_eq!(code, 0);
+        assert!(stderr.starts_with("nix-secrets: step failed: activate ns1:"), "{stderr}");
+        assert!(stderr.contains("missing.sock"), "{stderr}");
+        assert!(stderr.contains("the TUI was not reached"), "{stderr}");
+    }
+
+    #[test]
+    fn a_failure_report_waits_for_a_silent_backend_only_briefly() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("silent.sock");
+        // Accepts and reads, but never answers.
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let silent = std::thread::spawn(move || {
+            let connection = listener.accept().unwrap().0;
+            std::thread::sleep(Duration::from_secs(3));
+            drop(connection);
+        });
+        let failure = StepFailure {
+            options: Options {
+                backend_socket: Some(socket),
+                ..Options::default()
+            },
+            label: "activate ns1".into(),
+            reason: "rolled back".into(),
+        };
+        let started = std::time::Instant::now();
+        let mut stderr = Vec::new();
+        let code = report_step_failed(
+            &failure,
+            temp.path(),
+            Some("proc-1-ab:secret".into()),
+            Duration::from_millis(300),
+            &mut stderr,
+        );
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert_eq!(code, 0, "{stderr}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(stderr.contains("the TUI was not reached"), "{stderr}");
+        silent.join().unwrap();
     }
 }
