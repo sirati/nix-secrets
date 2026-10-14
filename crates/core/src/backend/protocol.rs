@@ -234,6 +234,15 @@ pub enum Request {
         label: String,
         reason: String,
     },
+    /// From inside a procedure: the step `label` worked, with a caveat,
+    /// `reason`. Numbered like [`Request::FailProcedureStep`]; it sets the
+    /// step's warning and never touches its failure.
+    WarnProcedureStep {
+        /// The token from [`crate::procedure::PROCEDURE_ENVIRONMENT`].
+        procedure: String,
+        label: String,
+        reason: String,
+    },
     /// The schema document the backend evaluated; see
     /// [`Response::SchemaDocument`]. A TUI that finds requests waiting uses it
     /// instead of evaluating the repository again.
@@ -444,6 +453,7 @@ mod tests {
             label: "activate ns1".into(),
             deployment: false,
             failure: Some("rolled back".into()),
+            warning: None,
         };
         let update = serde_json::to_string(&Response::ProcedureUpdate {
             procedure: step.clone(),
@@ -466,5 +476,56 @@ mod tests {
             r#"{"id":"p","title":"t","step":1,"label":"l","failed":true}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_warned_step_report_and_its_update_round_trip() {
+        let request = Request::WarnProcedureStep {
+            procedure: "proc-1-ab:secret".into(),
+            label: "activate ns1".into(),
+            reason: "nothing regressed".into(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"operation": "warn-procedure-step",
+                "procedure": "proc-1-ab:secret", "label": "activate ns1",
+                "reason": "nothing regressed"})
+        );
+        match serde_json::from_value::<Request>(json).unwrap() {
+            Request::WarnProcedureStep { procedure, label, reason } => {
+                assert_eq!(
+                    (procedure.as_str(), label.as_str(), reason.as_str()),
+                    ("proc-1-ab:secret", "activate ns1", "nothing regressed")
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let mut step = ProcedureStep {
+            id: "proc-1-ab".into(),
+            title: "Update ns1".into(),
+            step: 2,
+            steps: Some(4),
+            label: "activate ns1".into(),
+            deployment: false,
+            failure: None,
+            warning: Some("nothing regressed".into()),
+        };
+        let update = serde_json::to_string(&Response::ProcedureUpdate {
+            procedure: step.clone(),
+        })
+        .unwrap();
+        assert!(update.contains(r#""warning":"nothing regressed""#), "{update}");
+        assert!(!update.contains("failure"), "{update}");
+        match serde_json::from_str::<Response>(&update).unwrap() {
+            Response::ProcedureUpdate { procedure } => assert_eq!(procedure, step),
+            other => panic!("unexpected {other:?}"),
+        }
+        step.warning = None;
+        let update = serde_json::to_string(&Response::ProcedureUpdate {
+            procedure: step.clone(),
+        })
+        .unwrap();
+        assert!(!update.contains("warning"), "{update}");
     }
 }

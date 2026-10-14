@@ -20,6 +20,14 @@
 //! Inside the command, reports that the step `--label` failed. The TUI
 //! shows it in the procedure dialog as a failed step with the reason; a
 //! second report with the same label updates that step.
+//!
+//! ```text
+//! nix-secrets procedure-step-warning [--repository PATH] [--backend-socket PATH] --label TEXT --reason TEXT
+//! ```
+//!
+//! Reports that the step worked with a caveat, the same way. The TUI lists
+//! it with ⚠, and a procedure that succeeds with warnings stays until the
+//! operator closes its result.
 use crate::socket::connect_verified;
 use crate::with_secrets::{backend_candidates, connect_backend, Options};
 use nix_secrets_core::framing::{read_json, write_json};
@@ -167,25 +175,59 @@ pub fn run(
     status
 }
 
-pub const STEP_FAILED_USAGE: &str = "usage: nix-secrets procedure-step-failed [--repository PATH] \
-[--backend-socket PATH] --label TEXT --reason TEXT";
+/// What `procedure-step-failed` and `procedure-step-warning` report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StepReportKind {
+    Failed,
+    Warning,
+}
 
-/// How long a failure report waits for the backend before giving up.
-pub const STEP_FAILED_TIMEOUT: Duration = Duration::from_secs(5);
+impl StepReportKind {
+    /// The subcommand that reports it.
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Failed => "procedure-step-failed",
+            Self::Warning => "procedure-step-warning",
+        }
+    }
 
-/// `nix-secrets procedure-step-failed`: the command of a procedure reports
-/// that a step failed, and why.
+    /// `failed`, as in `nix-secrets: step failed: LABEL: REASON`.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::Warning => "warning",
+        }
+    }
+
+    pub fn usage(self) -> String {
+        format!(
+            "usage: nix-secrets {} [--repository PATH] [--backend-socket PATH] --label TEXT \
+             --reason TEXT",
+            self.command()
+        )
+    }
+}
+
+/// How long a step report waits for the backend before giving up.
+pub const STEP_REPORT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `nix-secrets procedure-step-failed` or `procedure-step-warning`: the
+/// command of a procedure reports that a step failed, or worked with a
+/// caveat, and why.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StepFailure {
+pub struct StepReport {
+    pub kind: StepReportKind,
     pub options: Options,
     pub label: String,
     pub reason: String,
 }
 
-pub fn parse_step_failed(
+pub fn parse_step_report(
+    kind: StepReportKind,
     arguments: impl IntoIterator<Item = OsString>,
     working_directory: PathBuf,
-) -> Result<StepFailure, String> {
+) -> Result<StepReport, String> {
+    let usage = kind.usage();
     let mut arguments = arguments.into_iter();
     let mut options = Options {
         repository: working_directory,
@@ -195,29 +237,30 @@ pub fn parse_step_failed(
     while let Some(argument) = arguments.next() {
         let text = argument
             .to_str()
-            .ok_or_else(|| format!("unexpected argument {argument:?}; {STEP_FAILED_USAGE}"))?
+            .ok_or_else(|| format!("unexpected argument {argument:?}; {usage}"))?
             .to_owned();
         let mut value = |name: &str| {
             arguments
                 .next()
                 .and_then(|value| value.into_string().ok())
-                .ok_or_else(|| format!("{name} requires UTF-8 text; {STEP_FAILED_USAGE}"))
+                .ok_or_else(|| format!("{name} requires UTF-8 text; {usage}"))
         };
         match text.as_str() {
             "--label" => label = Some(value("--label")?),
             "--reason" => reason = Some(value("--reason")?),
             "--repository" => options.repository = value("--repository")?.into(),
             "--backend-socket" => options.backend_socket = Some(value("--backend-socket")?.into()),
-            _ => return Err(format!("unexpected argument {text:?}; {STEP_FAILED_USAGE}")),
+            _ => return Err(format!("unexpected argument {text:?}; {usage}")),
         }
     }
     let label = label
         .filter(|label| !label.trim().is_empty())
-        .ok_or_else(|| format!("name the failed step with --label; {STEP_FAILED_USAGE}"))?;
+        .ok_or_else(|| format!("name the step with --label; {usage}"))?;
     let reason = reason
         .filter(|reason| !reason.trim().is_empty())
-        .ok_or_else(|| format!("say why the step failed with --reason; {STEP_FAILED_USAGE}"))?;
-    Ok(StepFailure {
+        .ok_or_else(|| format!("give the reason with --reason; {usage}"))?;
+    Ok(StepReport {
+        kind,
         options,
         label,
         reason,
@@ -238,26 +281,31 @@ fn connect_running(options: &Options, runtime: &Path) -> Result<UnixStream, Stri
 }
 
 /// Sends the report; `Ok(Err(..))` is the backend refusing it.
-fn send_failure(
-    failure: &StepFailure,
+fn send_report(
+    report: &StepReport,
     runtime: &Path,
     token: String,
     timeout: Duration,
 ) -> Result<Result<(), String>, String> {
-    let mut stream = connect_running(&failure.options, runtime)?;
+    let mut stream = connect_running(&report.options, runtime)?;
     stream
         .set_read_timeout(Some(timeout))
         .and_then(|()| stream.set_write_timeout(Some(timeout)))
         .map_err(|error| error.to_string())?;
-    write_json(
-        &mut stream,
-        &Request::FailProcedureStep {
-            procedure: token,
-            label: failure.label.clone(),
-            reason: failure.reason.clone(),
+    let (procedure, label, reason) = (token, report.label.clone(), report.reason.clone());
+    let request = match report.kind {
+        StepReportKind::Failed => Request::FailProcedureStep {
+            procedure,
+            label,
+            reason,
         },
-    )
-    .map_err(|error| error.to_string())?;
+        StepReportKind::Warning => Request::WarnProcedureStep {
+            procedure,
+            label,
+            reason,
+        },
+    };
+    write_json(&mut stream, &request).map_err(|error| error.to_string())?;
     match read_json::<Response>(&mut stream).map_err(|error| error.to_string())? {
         Some(Response::Success) => Ok(Ok(())),
         Some(Response::Error { message }) => Ok(Err(message)),
@@ -266,11 +314,12 @@ fn send_failure(
     }
 }
 
-/// Reports a failed step to the TUI. The failure is always printed first,
-/// so it is never hidden; a missing token or an unreachable backend only
-/// adds a note and exits 0. A backend that refuses the report exits 1.
-pub fn report_step_failed(
-    failure: &StepFailure,
+/// Reports a failed or warned step to the TUI. The report is always
+/// printed first, so it is never hidden; a missing token or an unreachable
+/// backend only adds a note and exits 0. A backend that refuses the report
+/// exits 1.
+pub fn report_step(
+    report: &StepReport,
     runtime: &Path,
     token: Option<String>,
     timeout: Duration,
@@ -279,9 +328,10 @@ pub fn report_step_failed(
     let shown = |text: &str| clean_text(text, usize::MAX);
     let _ = writeln!(
         stderr,
-        "nix-secrets: step failed: {}: {}",
-        shown(&failure.label),
-        shown(&failure.reason)
+        "nix-secrets: step {}: {}: {}",
+        report.kind.word(),
+        shown(&report.label),
+        shown(&report.reason)
     );
     let Some(token) = token else {
         let _ = writeln!(
@@ -291,7 +341,7 @@ pub fn report_step_failed(
         );
         return 0;
     };
-    match send_failure(failure, runtime, token, timeout) {
+    match send_report(report, runtime, token, timeout) {
         Ok(Ok(())) => 0,
         Ok(Err(message)) => {
             let _ = writeln!(stderr, "nix-secrets: the backend refused the report: {message}");
@@ -349,7 +399,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_failed_step_report() {
+    fn parses_failed_and_warned_step_reports() {
+        for kind in [StepReportKind::Failed, StepReportKind::Warning] {
+            parses_a_step_report(kind, |arguments, cwd| parse_step_report(kind, arguments, cwd));
+        }
+    }
+
+    fn parses_a_step_report(
+        kind: StepReportKind,
+        parse_step_failed: impl Fn(Vec<OsString>, PathBuf) -> Result<StepReport, String>,
+    ) {
         let parsed = parse_step_failed(
             os(&[
                 "--label",
@@ -363,6 +422,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed.label, "activate ns1");
+        assert_eq!(parsed.kind, kind);
         assert_eq!(parsed.reason, "rolled back");
         assert_eq!(parsed.options.repository, PathBuf::from("/cwd"));
         assert_eq!(parsed.options.backend_socket, Some(PathBuf::from("/b.sock")));
@@ -380,9 +440,16 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_report_is_always_printed_and_never_fails_for_lack_of_a_tui() {
+    fn a_step_report_is_always_printed_and_never_fails_for_lack_of_a_tui() {
+        for (kind, word) in [(StepReportKind::Failed, "failed"), (StepReportKind::Warning, "warning")] {
+            report_is_always_printed(kind, word);
+        }
+    }
+
+    fn report_is_always_printed(kind: StepReportKind, word: &str) {
         let temp = tempfile::tempdir().unwrap();
-        let failure = StepFailure {
+        let failure = StepReport {
+            kind,
             options: Options {
                 repository: temp.path().into(),
                 backend_socket: Some(temp.path().join("missing.sock")),
@@ -393,11 +460,11 @@ mod tests {
         };
         let report = |token: Option<&str>| {
             let mut stderr = Vec::new();
-            let code = report_step_failed(
+            let code = report_step(
                 &failure,
                 temp.path(),
                 token.map(str::to_owned),
-                STEP_FAILED_TIMEOUT,
+                STEP_REPORT_TIMEOUT,
                 &mut stderr,
             );
             (code, String::from_utf8(stderr).unwrap())
@@ -405,19 +472,19 @@ mod tests {
         let (code, stderr) = report(None);
         assert_eq!(code, 0);
         assert!(
-            stderr.starts_with("nix-secrets: step failed: activate ns1: rolled back [2J\n"),
+            stderr.starts_with(&format!("nix-secrets: step {word}: activate ns1: rolled back [2J\n")),
             "{stderr}"
         );
         assert!(stderr.contains("the TUI was not reached"), "{stderr}");
         let (code, stderr) = report(Some("proc-1-ab:secret"));
         assert_eq!(code, 0);
-        assert!(stderr.starts_with("nix-secrets: step failed: activate ns1:"), "{stderr}");
+        assert!(stderr.starts_with(&format!("nix-secrets: step {word}: activate ns1:")), "{stderr}");
         assert!(stderr.contains("missing.sock"), "{stderr}");
         assert!(stderr.contains("the TUI was not reached"), "{stderr}");
     }
 
     #[test]
-    fn a_failure_report_waits_for_a_silent_backend_only_briefly() {
+    fn a_step_report_waits_for_a_silent_backend_only_briefly() {
         let temp = tempfile::tempdir().unwrap();
         let socket = temp.path().join("silent.sock");
         // Accepts and reads, but never answers.
@@ -427,7 +494,8 @@ mod tests {
             std::thread::sleep(Duration::from_secs(3));
             drop(connection);
         });
-        let failure = StepFailure {
+        let failure = StepReport {
+            kind: StepReportKind::Warning,
             options: Options {
                 backend_socket: Some(socket),
                 ..Options::default()
@@ -437,7 +505,7 @@ mod tests {
         };
         let started = std::time::Instant::now();
         let mut stderr = Vec::new();
-        let code = report_step_failed(
+        let code = report_step(
             &failure,
             temp.path(),
             Some("proc-1-ab:secret".into()),

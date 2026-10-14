@@ -32,24 +32,29 @@
 //! stdout.
 //!
 //! From the model it also prints each step a procedure's command reported
-//! failed, again when its reason changes, and each procedure's end:
+//! failed or warned, again when its reason changes, and each procedure's
+//! end:
 //!
 //! ```text
 //! procedure-step-failed: TITLE POSITION: LABEL: REASON
-//! procedure-ended: TITLE exit=CODE|none[ failed-at=POSITION: LABEL: REASON]
+//! procedure-step-warning: TITLE POSITION: LABEL: REASON
+//! procedure-ended: TITLE exit=CODE|none[ failed-at=POSITION: LABEL: REASON][ warnings=POSITION: LABEL: REASON[; ...]]
 //! procedure-ended: TITLE exit=0|0-or-none
 //! ```
 //!
 //! The second form is for a procedure the model dropped as soon as it
-//! ended, which it does only for a success. It closes the failed result of
-//! a procedure with a reported failed step with Enter when it is on screen,
-//! so later procedures can open.
+//! ended, which it does only for a success without warnings. It closes with
+//! Enter, when it is on screen, the failed result of a procedure with a
+//! reported failed step and a result that succeeded with warnings, so later
+//! procedures can open.
 use nix_secrets_core::Schema;
 use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_manager::async_ui::AsyncWriter;
 use nix_secrets_manager::client::BackendClient;
 use nix_secrets_manager::controller::Controller;
-use nix_secrets_manager::model::{Mode, Model, NoticeSeverity, Procedure, StepKind};
+use nix_secrets_manager::model::{
+    FinishedStep, Mode, Model, NoticeSeverity, Procedure, StepKind, StepOutcome,
+};
 use nix_secrets_manager::socket::connect_verified;
 use nix_secrets_manager::ui::{drive, Frontend, UiEvent};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -197,22 +202,29 @@ struct Scripted {
     procedures: ProcedureLog,
 }
 
+/// `POSITION: LABEL: REASON` of a step its command reported.
+fn reported(step: &FinishedStep) -> String {
+    format!("{}: {}: {}", step.step.position(), step.step.label, step.text)
+}
+
 /// The last step of a procedure that its command reported failed.
 fn reported_failure(procedure: &Procedure) -> Option<String> {
     procedure
         .finished
         .iter()
         .rev()
-        .find(|step| step.kind == StepKind::Reported)
-        .map(|step| format!("{}: {}: {}", step.step.position(), step.step.label, step.text))
+        .find(|step| step.kind == StepKind::Reported && step.outcome == StepOutcome::Failed)
+        .map(reported)
 }
 
-/// Prints what the model shows of procedures: each failed step the command
-/// reported, again when its reason changes, and how each procedure ended.
+/// Prints what the model shows of procedures: each failed or warned step
+/// the command reported, again when its reason changes, and how each
+/// procedure ended.
 #[derive(Default)]
 struct ProcedureLog {
-    /// Failed steps printed, by procedure and step, with their reason.
-    failed: HashMap<(String, u32), String>,
+    /// Reported steps printed, by procedure, step and whether it was a
+    /// warning, with their reason.
+    reported: HashMap<(String, u32, bool), String>,
     /// Live procedures seen, with their titles and whether a step of
     /// theirs had finished.
     live: HashMap<String, (String, bool)>,
@@ -228,16 +240,16 @@ impl ProcedureLog {
                 if step.kind != StepKind::Reported {
                     continue;
                 }
-                let key = (procedure.id.clone(), step.step.step);
-                if self.failed.get(&key) != Some(&step.text) {
+                let warning = step.outcome == StepOutcome::Warning;
+                let key = (procedure.id.clone(), step.step.step, warning);
+                if self.reported.get(&key) != Some(&step.text) {
                     lines.push(format!(
-                        "procedure-step-failed: {} {}: {}: {}",
+                        "procedure-step-{}: {} {}",
+                        if warning { "warning" } else { "failed" },
                         procedure.title,
-                        step.step.position(),
-                        step.step.label,
-                        step.text
+                        reported(step)
                     ));
-                    self.failed.insert(key, step.text.clone());
+                    self.reported.insert(key, step.text.clone());
                 }
             }
             if !procedure.ended {
@@ -253,16 +265,22 @@ impl ProcedureLog {
                 let failed_at = reported_failure(procedure)
                     .map(|failure| format!(" failed-at={failure}"))
                     .unwrap_or_default();
+                let warnings = procedure.warnings().map(reported).collect::<Vec<_>>();
+                let warnings = if warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!(" warnings={}", warnings.join("; "))
+                };
                 lines.push(format!(
-                    "procedure-ended: {} exit={exit}{failed_at}",
+                    "procedure-ended: {} exit={exit}{failed_at}{warnings}",
                     procedure.title
                 ));
             }
         }
         // The model drops an ended procedure at once only when it
-        // succeeded: a failure waits for the operator. After a finished
-        // step that takes exit status 0; before any, an unknown status
-        // counts as success too.
+        // succeeded without warnings: a failure or warnings wait for the
+        // operator. After a finished step that takes exit status 0; before
+        // any, an unknown status counts as success too.
         let gone = self
             .live
             .keys()
@@ -322,11 +340,13 @@ impl Frontend for Scripted {
             }
             return Ok(());
         }
-        // A failed procedure result on screen would keep later procedures
-        // from opening; Enter closes it, as an operator who read it.
+        // A failed or warned procedure result on screen would keep later
+        // procedures from opening; Enter closes it, as an operator who read
+        // it.
         if self.queued.is_empty()
             && model.between_shown().is_some_and(|procedure| {
-                procedure.failed() && reported_failure(procedure).is_some()
+                (procedure.failed() && reported_failure(procedure).is_some())
+                    || procedure.succeeded_with_warnings()
             })
         {
             self.queued.push_back(UiEvent::Enter);
@@ -528,7 +548,47 @@ mod tests {
             label: label.into(),
             deployment: false,
             failure: failure.map(Into::into),
+            warning: None,
         }
+    }
+
+    #[test]
+    fn warned_steps_and_a_success_with_warnings_are_printed_and_closed() {
+        let mut scripted = scripted();
+        let mut model = Model::new(vec![]);
+        let warned = |number, label: &str, reason: &str| {
+            let mut step = step("proc-1", "Update ns1", number, label, None);
+            step.warning = Some(reason.into());
+            step
+        };
+        model.procedure_step(step("proc-1", "Update ns1", 0, "starting", None));
+        model.procedure_step(warned(2, "activate ns1", "switch exited 4"));
+        assert_eq!(
+            scripted.procedures.lines(&model),
+            ["procedure-step-warning: Update ns1 step 2/3: activate ns1: switch exited 4"]
+        );
+        model.procedure_step(warned(2, "activate ns1", "switch exited 4"));
+        assert!(scripted.procedures.lines(&model).is_empty());
+        model.procedure_step(warned(2, "activate ns1", "a.service was failed before"));
+        model.procedure_step(warned(3, "activate ns2", "b.service was failed before"));
+        assert_eq!(
+            scripted.procedures.lines(&model),
+            [
+                "procedure-step-warning: Update ns1 step 2/3: activate ns1: a.service was failed before",
+                "procedure-step-warning: Update ns1 step 3/3: activate ns2: b.service was failed before",
+            ]
+        );
+        model.procedure_ended("proc-1", Some(0));
+        assert_eq!(
+            scripted.procedures.lines(&model),
+            ["procedure-ended: Update ns1 exit=0 warnings=step 2/3: activate ns1: a.service was \
+              failed before; step 3/3: activate ns2: b.service was failed before"]
+        );
+        // Kept for its warnings; on screen, Enter closes it.
+        model.restore("proc-1").unwrap();
+        scripted.draw(&model).unwrap();
+        assert_eq!(scripted.queued.pop_front(), Some(UiEvent::Enter));
+        assert!(scripted.queued.is_empty());
     }
 
     #[test]

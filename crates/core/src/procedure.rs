@@ -15,13 +15,15 @@
 //! command reports a step as failed ([`crate::Request::FailProcedureStep`]):
 //! the backend numbers it like a request, with the same token and
 //! descendant checks, and the TUI shows it as a failed step with its reason.
+//! `nix-secrets procedure-step-warning` reports a step that worked with a
+//! caveat ([`crate::Request::WarnProcedureStep`]) the same way.
 use serde::{Deserialize, Serialize};
 
 /// The environment variable carrying a procedure token to requesters.
 pub const PROCEDURE_ENVIRONMENT: &str = "NIX_SECRETS_PROCEDURE";
 pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_LABEL_BYTES: usize = 512;
-/// The longest reason a requester may give for a failed step.
+/// The longest reason a requester may give for a failed or warned step.
 pub const MAX_REASON_BYTES: usize = 2048;
 /// The most steps a procedure may declare.
 pub const MAX_DECLARED_STEPS: u32 = 1000;
@@ -50,6 +52,11 @@ pub struct ProcedureStep {
     /// [`crate::Request::FailProcedureStep`]. Any later step clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// The procedure's command reported a warning for this step, and why; see
+    /// [`crate::Request::WarnProcedureStep`]. It never sets or clears
+    /// `failure`; any later step clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 impl ProcedureStep {
@@ -93,6 +100,13 @@ impl ProcedureStep {
         {
             return Err("procedure step failure has an invalid length");
         }
+        if self
+            .warning
+            .as_ref()
+            .is_some_and(|warning| warning.is_empty() || warning.len() > MAX_REASON_BYTES)
+        {
+            return Err("procedure step warning has an invalid length");
+        }
         Ok(())
     }
 }
@@ -131,6 +145,7 @@ mod tests {
             label: "sign closure".into(),
             deployment: false,
             failure: None,
+            warning: None,
         };
         assert!(step.countdown());
         assert_eq!(step.position(), "step 1/4");
@@ -149,6 +164,13 @@ mod tests {
         step.failure = Some("x".repeat(MAX_REASON_BYTES + 1));
         assert!(step.validate().is_err());
         step.failure = None;
+        step.warning = Some("units already failed before".into());
+        assert!(step.validate().is_ok());
+        step.warning = Some(String::new());
+        assert!(step.validate().is_err());
+        step.warning = Some("x".repeat(MAX_REASON_BYTES + 1));
+        assert!(step.validate().is_err());
+        step.warning = None;
         step.id = "proc:1".into();
         assert!(step.validate().is_err());
     }

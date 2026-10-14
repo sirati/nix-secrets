@@ -61,6 +61,7 @@ fn step(id: &str, title: &str, number: u32, label: &str) -> ProcedureStep {
         label: label.into(),
         deployment: false,
         failure: None,
+        warning: None,
     }
 }
 
@@ -1049,4 +1050,103 @@ fn a_failure_reported_while_minimised_flashes_and_survives_the_end() {
     assert!(screen.contains("┌Update ns1 · failed at step 2/3: activate ns1"), "{screen}");
     assert!(screen.contains("Failed at step 2/3: activate ns1: rolled back"), "{screen}");
     assert!(screen.contains("The command failed with exit status 1."), "{screen}");
+}
+
+fn warned(id: &str, number: u32, label: &str, reason: &str) -> ProcedureEvent {
+    let mut step = step(id, "Update ns1", number, label);
+    step.warning = Some(reason.into());
+    ProcedureEvent::Step(step)
+}
+
+#[test]
+fn a_warned_step_shows_live_and_its_success_stays_after_a_clean_exit() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    signed(&mut model, "closure", Ok(()));
+    channel
+        .events
+        .push(warned(UPDATE, 2, "activate ns1", "switch exited 4; nothing regressed"));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(
+        screen.contains("⚠ step 2/3: activate ns1: switch exited 4; nothing regressed"),
+        "{screen}"
+    );
+    assert!(!screen.contains("✗"), "{screen}");
+    assert!(screen.contains("waiting for step 3/3"), "{screen}");
+    assert!(!model.procedure(UPDATE).unwrap().failed());
+    // The same step again replaces the reason.
+    channel
+        .events
+        .push(warned(UPDATE, 2, "activate ns1", "a.service was failed before"));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert_eq!(screen.matches("⚠ step 2/3").count(), 1, "{screen}");
+    assert!(screen.contains("⚠ step 2/3: activate ns1: a.service was failed before"), "{screen}");
+    // The last step clears the warning in the backend; the dialog keeps it.
+    channel.prompts.push(closure_step("last", 3, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    signed(&mut model, "last", Ok(()));
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(0)));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · succeeded with warnings"), "{screen}");
+    assert!(screen.contains("⚠ step 2/3: activate ns1: a.service was failed before"), "{screen}");
+    assert!(screen.contains("✓ step 3/3: closure signed"), "{screen}");
+    assert!(screen.contains("The command finished successfully."), "{screen}");
+    assert!(screen.contains("Enter OK"), "{screen}");
+    // Unlike a clean success, any key does not close it; Enter does.
+    reduce(&mut model, UiEvent::Character('x'), &mut channel);
+    assert!(model.procedure(UPDATE).is_some());
+    // Like a failure, it keeps the screen from another procedure.
+    channel.prompts.push(prompt(
+        "other",
+        Some(step(INSTALL, "Install two", 1, "SSH authentication to root@ns2")),
+    ));
+    tick(&mut model, &mut channel);
+    assert!(model.procedure(INSTALL).is_some_and(|procedure| procedure.minimised));
+    assert!(render(&model).contains("┌Update ns1 · succeeded with warnings"));
+    reduce(&mut model, UiEvent::Enter, &mut channel);
+    assert!(model.procedure(UPDATE).is_none());
+}
+
+#[test]
+fn a_warned_procedure_in_the_task_bar_waits_after_its_clean_exit() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel
+        .events
+        .push(ProcedureEvent::Step(step(UPDATE, "Update ns1", 0, "starting")));
+    // Its last declared step, so it did not end early.
+    channel.events.push(warned(UPDATE, 3, "activate ns1", "nothing regressed"));
+    channel
+        .events
+        .push(ProcedureEvent::Step(step(INSTALL, "Install two", 0, "starting")));
+    tick(&mut model, &mut channel);
+    channel.events.push(ProcedureEvent::Ended(UPDATE.into(), Some(0)));
+    channel.events.push(ProcedureEvent::Ended(INSTALL.into(), Some(0)));
+    tick(&mut model, &mut channel);
+    // A clean success leaves; one with warnings waits for the operator.
+    assert!(model.procedure(INSTALL).is_none());
+    let procedure = model.procedure(UPDATE).expect("kept for its warning");
+    assert!(procedure.succeeded_with_warnings() && procedure.flashing);
+    let screen = render(&model);
+    assert!(
+        screen.contains("▪ Update ns1 · step 3/3: activate ns1 · succeeded with warnings · waiting for you"),
+        "{screen}"
+    );
+    reduce(&mut model, UiEvent::Character('M'), &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · succeeded with warnings"), "{screen}");
+    // Minimising does not count as closing it.
+    reduce(&mut model, UiEvent::Character('m'), &mut channel);
+    assert!(model.procedure(UPDATE).is_some_and(|procedure| procedure.succeeded_with_warnings()));
+    reduce(&mut model, UiEvent::Character('M'), &mut channel);
+    assert!(screen.contains("⚠ step 3/3: activate ns1: nothing regressed"), "{screen}");
+    reduce(&mut model, UiEvent::Enter, &mut channel);
+    assert!(model.procedures.is_empty());
 }

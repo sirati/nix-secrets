@@ -110,7 +110,9 @@ stays open: it lists the finished steps and waits for the next one. After
 the last step, or when the command exits, it shows the result. Any key
 closes a success; Enter closes a failure. A step the command reports
 failed with `nix-secrets procedure-step-failed` is listed with ✗ and its
-reason, and the procedure's result names it.
+reason, and the procedure's result names it. A step reported with
+`nix-secrets procedure-step-warning` is listed with ⚠; a success with
+warnings stays until Enter closes it.
 m      Minimise the open secret request or deployment dialog
 M      Restore the next procedure that waits for you, flashing ones first
 Click  A task bar entry restores it

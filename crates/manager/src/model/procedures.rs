@@ -34,7 +34,8 @@ pub enum StepKind {
     Artifacts,
     Closure,
     Deployment,
-    /// A step the procedure's command reported as failed; nothing was asked.
+    /// A step the procedure's command reported as failed or warned about;
+    /// nothing was asked.
     Reported,
 }
 
@@ -88,6 +89,8 @@ pub enum StepOutcome {
     Denied,
     /// Its countdown ran out before the operator answered.
     TimedOut,
+    /// The procedure's command reported that it worked with a caveat.
+    Warning,
 }
 
 impl StepOutcome {
@@ -98,6 +101,7 @@ impl StepOutcome {
             Self::Failed => "failed",
             Self::Denied => "denied",
             Self::TimedOut => "timed out",
+            Self::Warning => "warned",
         }
     }
 }
@@ -115,14 +119,23 @@ pub struct FinishedStep {
 }
 
 impl FinishedStep {
+    /// Done, or done with a warning.
     pub fn succeeded(&self) -> bool {
-        self.outcome == StepOutcome::Done
+        matches!(self.outcome, StepOutcome::Done | StepOutcome::Warning)
     }
 
-    /// `✓ step 1/3: closure signed` or `✗ step 2/3: SSH authentication to
-    /// update@ns1: the operator denied SSH authentication`.
+    /// A step the procedure's command reported failed.
+    fn reported_failed(&self) -> bool {
+        self.kind == StepKind::Reported && self.outcome == StepOutcome::Failed
+    }
+
+    /// `✓ step 1/3: closure signed`, `⚠ step 2/3: activate ns1: nothing
+    /// regressed` or `✗ step 2/3: SSH authentication to update@ns1: the
+    /// operator denied SSH authentication`.
     pub fn line(&self) -> String {
-        if self.succeeded() {
+        if self.outcome == StepOutcome::Warning {
+            format!("⚠ {}: {}: {}", self.step.position(), self.step.label, self.text)
+        } else if self.succeeded() {
             format!("✓ {}: {}", self.step.position(), self.text)
         } else {
             format!("✗ {}: {}: {}", self.step.position(), self.step.label, self.text)
@@ -225,6 +238,25 @@ impl Procedure {
         matches!(self.between, Some(Between::Result { succeeded: false, .. }))
     }
 
+    /// The steps its command reported warnings for, oldest first.
+    pub fn warnings(&self) -> impl Iterator<Item = &FinishedStep> {
+        self.finished
+            .iter()
+            .filter(|step| step.outcome == StepOutcome::Warning)
+    }
+
+    /// Whether its result succeeded with warnings; like a failure it waits
+    /// until the operator closes it.
+    pub fn succeeded_with_warnings(&self) -> bool {
+        matches!(self.between, Some(Between::Result { succeeded: true, .. }))
+            && self.warnings().next().is_some()
+    }
+
+    /// Whether its result waits for the operator to close it with Enter.
+    pub fn needs_acknowledgement(&self) -> bool {
+        self.failed() || self.succeeded_with_warnings()
+    }
+
     /// For a failed result, the step it missed: `timed out at step 1/3:
     /// sign closure for ns1`, `denied at …` or `failed at …`.
     pub fn missed(&self) -> Option<String> {
@@ -254,6 +286,7 @@ impl Procedure {
                 label: String::new(),
                 deployment: false,
                 failure: None,
+                warning: None,
             });
         next.step += 1;
         next.position()
@@ -267,6 +300,9 @@ impl Procedure {
                 _ => "working".into(),
             },
             Between::Waiting { .. } => format!("waiting for {}", self.next_position()),
+            Between::Result { succeeded: true, .. } if self.succeeded_with_warnings() => {
+                "succeeded with warnings".into()
+            }
             Between::Result { succeeded: true, .. } => "done".into(),
             Between::Result { .. } if self.ended_early() && self.exit_code == Some(0) => {
                 "ended early".into()
@@ -411,21 +447,22 @@ impl Model {
     }
 
     /// Whether a dialog is on screen, so a new procedure must not open. A
-    /// successful result does not hold the screen; like a notice it gives
-    /// way.
+    /// successful result without warnings does not hold the screen; like a
+    /// notice it gives way.
     pub fn foreground_busy(&self) -> bool {
         !matches!(self.mode, Mode::Browse)
             || self.shown_prompt().is_some()
             || self.between_shown().is_some_and(|procedure| {
                 !matches!(procedure.between, Some(Between::Result { succeeded: true, .. }))
+                    || procedure.succeeded_with_warnings()
             })
     }
 
     /// Whether the procedure waits for the operator: a prompt, a deployment
-    /// approval on screen or parked, or a failure to acknowledge.
+    /// approval on screen or parked, or a failure or warnings to acknowledge.
     pub fn procedure_waiting(&self, procedure: &Procedure) -> bool {
         !procedure.prompts.is_empty()
-            || procedure.failed()
+            || procedure.needs_acknowledgement()
             || self
                 .pending_approvals
                 .iter()
@@ -528,23 +565,26 @@ impl Model {
         if step.deployment {
             procedure.awaiting_deployment = true;
         }
-        if step.failure.is_some() {
-            self.step_reported_failed(step);
+        if let Some(warning) = step.warning.clone() {
+            self.step_reported(step.clone(), StepOutcome::Warning, warning);
+        }
+        if let Some(failure) = step.failure.clone() {
+            self.step_reported(step, StepOutcome::Failed, failure);
         }
     }
 
-    /// The procedure's command reported a step as failed. It is listed as
-    /// failed with its reason and fails the procedure like a failed prompt.
-    /// A later report about the same step only updates the reason.
-    fn step_reported_failed(&mut self, step: ProcedureStep) {
-        let Some(reason) = step.failure.clone() else {
-            return;
-        };
+    /// The procedure's command reported a step as failed, or as done with
+    /// a warning. It is listed with its reason; a failure fails the
+    /// procedure like a failed prompt, a warning keeps its successful result
+    /// until the operator closes it. A later report of the same kind about
+    /// the same step only updates the reason.
+    fn step_reported(&mut self, step: ProcedureStep, outcome: StepOutcome, reason: String) {
         let Some(index) = self.procedures.iter().position(|procedure| procedure.id == step.id)
         else {
             return;
         };
-        let request = format!("failed:{}:{}", step.id, step.step);
+        let kind = if outcome == StepOutcome::Warning { "warning" } else { "failed" };
+        let request = format!("{kind}:{}:{}", step.id, step.step);
         let procedure = &mut self.procedures[index];
         if let Some(known) = procedure
             .finished
@@ -555,6 +595,9 @@ impl Model {
             known.text = reason;
             known.step = step;
             let new = reported_failure(known);
+            if outcome == StepOutcome::Warning {
+                return;
+            }
             let shown = match &mut procedure.between {
                 Some(Between::Result { text, .. }) => Some(text),
                 _ => None,
@@ -573,7 +616,7 @@ impl Model {
             denied: false,
             deadline: None,
         };
-        self.record_step(index, flight, StepOutcome::Failed, reason);
+        self.record_step(index, flight, outcome, reason);
         self.tidy_procedures();
     }
 
@@ -625,7 +668,7 @@ impl Model {
                             .finished
                             .iter()
                             .rev()
-                            .find(|step| step.kind == StepKind::Reported)
+                            .find(|step| step.reported_failed())
                         {
                             Some(reported) => format!("{}\n{summary}", reported_failure(reported)),
                             None => summary,
@@ -637,13 +680,15 @@ impl Model {
                     }
                 };
                 let failed = matches!(result, Between::Result { succeeded: false, .. });
+                let warned = !failed && procedure.warnings().next().is_some();
                 let nothing_asked = procedure.finished.is_empty() && procedure.in_flight.is_empty();
                 procedure.between = Some(result);
                 if nothing_asked && !failed {
                     // A procedure that never asked anything leaves quietly.
                     procedure.between = None;
-                } else if failed && !shown {
-                    // A failure is never lost: it waits in the task bar.
+                } else if (failed || warned) && !shown {
+                    // A failure or a warning is never lost: it waits in the
+                    // task bar.
                     procedure.minimised = true;
                     procedure.flashing = true;
                 }
@@ -766,7 +811,7 @@ impl Model {
     /// that did not succeed fails the procedure; unless its dialog is on
     /// screen, its task bar entry flashes.
     fn record_step(&mut self, index: usize, flight: InFlight, outcome: StepOutcome, text: String) {
-        let succeeded = outcome == StepOutcome::Done;
+        let succeeded = matches!(outcome, StepOutcome::Done | StepOutcome::Warning);
         let procedure = &mut self.procedures[index];
         procedure.finished.push(FinishedStep {
             request: flight.request,
@@ -775,7 +820,7 @@ impl Model {
             text,
             outcome,
         });
-        let reported = (flight.kind == StepKind::Reported)
+        let reported = (flight.kind == StepKind::Reported && outcome == StepOutcome::Failed)
             .then(|| procedure.finished.last().map(reported_failure))
             .flatten();
         let open = !procedure.prompts.is_empty()
@@ -1004,8 +1049,10 @@ impl Model {
         if let Some(procedure) = self.procedure_mut(&id) {
             procedure.minimised = true;
             procedure.flashing = false;
-            // A success shown is a success seen.
-            if matches!(procedure.between, Some(Between::Result { succeeded: true, .. })) {
+            // A success shown is a success seen; warnings wait to be closed.
+            if matches!(procedure.between, Some(Between::Result { succeeded: true, .. }))
+                && !procedure.succeeded_with_warnings()
+            {
                 procedure.between = None;
             }
         }

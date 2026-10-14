@@ -209,13 +209,16 @@ ends with `EndProcedure` or when that connection closes.
 A request joins a procedure by carrying the token in `procedure`. The backend
 compares the secret in constant time and requires the requester to be the
 owner or its descendant. Each accepted request becomes the next step,
-`ProcedureStep { id, title, step, steps, label, deployment, failure }`. An SSH login
+`ProcedureStep { id, title, step, steps, label, deployment, failure, warning }`. An SSH login
 grant with the same label as the SSH login step before it keeps that
 step number. `FailProcedureStep { procedure, label, reason }` passes the same
 token and descendant checks and answers `Success`. It is numbered like an SSH
 login, so a report with the same label right after keeps the step. The step's
 `failure` holds the reason, with control characters removed and at most 2048
-bytes. The label must not be empty. The next step clears `failure`. `SubmitApproval` requests never carry a step. `EndProcedure {
+bytes. The label must not be empty. The next step clears `failure`.
+`WarnProcedureStep { procedure, label, reason }` works the same way and sets
+`warning`. On the same step it leaves `failure` alone. A new step starts
+with neither. `SubmitApproval` requests never carry a step. `EndProcedure {
 exit_code }` may report how the command exited (128 + signal when a signal
 ended it). The operator channel receives it in `ProcedureEnded { id, exit_code
 }`.

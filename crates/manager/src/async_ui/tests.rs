@@ -499,6 +499,7 @@ fn a_lost_channel_reports_the_outage_and_reattaching_lists_the_live_procedures()
         label: "sign closure for ns1".into(),
         deployment: false,
         failure: None,
+        warning: None,
     };
     channel_events.send(ChannelEvent::Attached).unwrap();
     channel_events.send(ChannelEvent::Lost("connection reset".into())).unwrap();

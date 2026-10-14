@@ -77,6 +77,16 @@ without a running backend it notes that the TUI was not reached and exits 0.
 It waits at most 5 seconds for the backend. It exits 1 if the backend
 refuses the report. It never starts a backend.
 
+```text
+nix-secrets procedure-step-warning --label TEXT --reason TEXT
+```
+
+Reports that the step TEXT worked with a caveat, the same way. The dialog
+lists it with ⚠ and keeps it after later steps. A procedure that exits 0 with
+warnings shows "succeeded with warnings" and stays until the operator closes
+it with Enter. A clean success closes on its own. The command prints
+`nix-secrets: step warning: LABEL: REASON` to stderr.
+
 ## with-secrets and pipe-secret
 
 ```text

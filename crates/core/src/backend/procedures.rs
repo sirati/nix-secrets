@@ -35,6 +35,25 @@ pub(super) struct Procedures {
     next: AtomicU64,
 }
 
+/// What the procedure's command reported about a step.
+enum Report {
+    Failure(String),
+    Warning(String),
+}
+
+/// The cleaned reason of a report; its label must not be empty.
+fn reported(label: &str, reason: &str) -> Result<String, String> {
+    if clean_text(label, MAX_LABEL_BYTES).is_empty() {
+        return Err("a reported step needs a label".into());
+    }
+    let reason = clean_text(reason, MAX_REASON_BYTES);
+    Ok(if reason.is_empty() {
+        "no reason given".to_owned()
+    } else {
+        reason
+    })
+}
+
 fn random_hex(bytes: usize) -> Result<String, String> {
     let mut random = vec![0_u8; bytes];
     getrandom::fill(&mut random).map_err(|error| error.to_string())?;
@@ -86,6 +105,7 @@ impl Procedures {
             label: "starting".into(),
             deployment: false,
             failure: None,
+            warning: None,
         };
         live.insert(
             id.clone(),
@@ -140,16 +160,21 @@ impl Procedures {
         label: &str,
         reason: &str,
     ) -> Result<ProcedureStep, String> {
-        if clean_text(label, MAX_LABEL_BYTES).is_empty() {
-            return Err("a failed step needs a label".into());
-        }
-        let reason = clean_text(reason, MAX_REASON_BYTES);
-        let reason = if reason.is_empty() {
-            "no reason given".to_owned()
-        } else {
-            reason
-        };
-        self.number_step(token, peer, label, false, true, Some(reason))
+        let reason = reported(label, reason)?;
+        self.number_step(token, peer, label, false, true, Some(Report::Failure(reason)))
+    }
+
+    /// Records a warning for the step `label`, numbered like
+    /// [`Self::fail_step`]. On the same step it leaves `failure` alone.
+    pub(super) fn warn_step(
+        &self,
+        token: &str,
+        peer: u32,
+        label: &str,
+        reason: &str,
+    ) -> Result<ProcedureStep, String> {
+        let reason = reported(label, reason)?;
+        self.number_step(token, peer, label, false, true, Some(Report::Warning(reason)))
     }
 
     fn number_step(
@@ -159,7 +184,7 @@ impl Procedures {
         label: &str,
         deployment: bool,
         repeatable: bool,
-        failure: Option<String>,
+        report: Option<Report>,
     ) -> Result<ProcedureStep, String> {
         let (id, secret) = split_token(token).ok_or("the procedure token is malformed")?;
         let mut live = self.live.lock().map_err(|_| "procedure registry poisoned")?;
@@ -180,10 +205,19 @@ impl Procedures {
             && procedure.step.label == label;
         if !repeat {
             procedure.step.step = procedure.step.step.saturating_add(1);
+            procedure.step.failure = None;
+            procedure.step.warning = None;
         }
         procedure.step.label = label;
         procedure.step.deployment = deployment;
-        procedure.step.failure = failure;
+        match report {
+            Some(Report::Failure(reason)) => procedure.step.failure = Some(reason),
+            Some(Report::Warning(reason)) => procedure.step.warning = Some(reason),
+            None => {
+                procedure.step.failure = None;
+                procedure.step.warning = None;
+            }
+        }
         procedure.repeatable = repeatable;
         Ok(procedure.step.clone())
     }
@@ -355,6 +389,67 @@ mod tests {
         assert!(procedures.fail_step(&forged, own, "x", "y").is_err());
         assert!(procedures.fail_step("garbage", own, "x", "y").is_err());
         assert_eq!(procedures.snapshot().iter().find(|s| s.id == id).unwrap().step, 4);
+    }
+
+    #[test]
+    fn a_warned_step_is_numbered_checked_updated_and_leaves_failure_alone() {
+        let procedures = Procedures::default();
+        let own = std::process::id();
+        let (_, token) = procedures.begin(own, "Update ns1", Some(4)).unwrap();
+        procedures
+            .next_step(&token, own, "sign closure for ns1", false, false)
+            .unwrap();
+        let warned = procedures
+            .warn_step(&token, own, "activate ns1", "switch exited 4\x07; nothing regressed")
+            .unwrap();
+        assert_eq!((warned.step, warned.label.as_str()), (2, "activate ns1"));
+        assert_eq!(warned.warning.as_deref(), Some("switch exited 4 ; nothing regressed"));
+        assert_eq!(warned.failure, None);
+        assert!(warned.validate().is_ok());
+        // The same step again updates the warning in place.
+        let again = procedures
+            .warn_step(&token, own, "activate ns1", "a.service was failed before")
+            .unwrap();
+        assert_eq!(again.step, 2);
+        assert_eq!(again.warning.as_deref(), Some("a.service was failed before"));
+        let long = procedures
+            .warn_step(&token, own, "activate ns1", &"x".repeat(3 * MAX_REASON_BYTES))
+            .unwrap();
+        assert_eq!(long.warning.unwrap().len(), MAX_REASON_BYTES);
+        // A failure of that step keeps its warning, and a warning after it
+        // keeps the failure.
+        let failed = procedures.fail_step(&token, own, "activate ns1", "rolled back").unwrap();
+        assert_eq!(failed.step, 2);
+        assert_eq!(failed.failure.as_deref(), Some("rolled back"));
+        assert!(failed.warning.is_some());
+        let warned = procedures.warn_step(&token, own, "activate ns1", "still warned").unwrap();
+        assert_eq!(warned.failure.as_deref(), Some("rolled back"));
+        assert_eq!(warned.warning.as_deref(), Some("still warned"));
+        // A warning of another step is a new step, without the old reports.
+        let other = procedures.warn_step(&token, own, "activate ns2", "w").unwrap();
+        assert_eq!((other.step, other.failure, other.warning.as_deref()), (3, None, Some("w")));
+        // A later normal step clears it.
+        let next = procedures
+            .next_step(&token, own, "deploy secrets to ns1", true, false)
+            .unwrap();
+        assert_eq!((next.step, next.warning, next.failure), (4, None, None));
+        // A failure reported as a new step starts without the warning.
+        procedures.warn_step(&token, own, "activate ns3", "w").unwrap();
+        let failed = procedures.fail_step(&token, own, "activate ns4", "f").unwrap();
+        assert_eq!((failed.step, failed.warning), (6, None));
+        assert!(procedures.warn_step(&token, own, " \x07 ", "x").is_err(), "empty label");
+        // The token and descendant checks hold as for any request.
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let (_, foreign) = procedures.begin(child.id(), "Other", None).unwrap();
+        let error = procedures.warn_step(&foreign, own, "x", "y").unwrap_err();
+        assert!(error.contains("does not belong"), "{error}");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let (id, _) = split_token(&token).unwrap();
+        let forged = format!("{id}:{}", "0".repeat(64));
+        assert!(procedures.warn_step(&forged, own, "x", "y").is_err());
+        assert!(procedures.warn_step("garbage", own, "x", "y").is_err());
+        assert_eq!(procedures.snapshot().iter().find(|s| s.id == id).unwrap().step, 6);
     }
 
     #[test]

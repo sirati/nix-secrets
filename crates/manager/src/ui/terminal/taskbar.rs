@@ -16,6 +16,8 @@ pub(super) fn state(model: &Model, procedure: &Procedure) -> String {
     if procedure.failed() {
         let missed = procedure.missed().unwrap_or_else(|| "failed".into());
         format!("{missed} · waiting for you")
+    } else if procedure.succeeded_with_warnings() {
+        "succeeded with warnings · waiting for you".into()
     } else if model.procedure_waiting(procedure) {
         "waiting for you".into()
     } else if matches!(

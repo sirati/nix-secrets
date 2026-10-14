@@ -472,6 +472,13 @@ fn handle_requests(
             } => operators
                 .fail_step(&procedure, peer_pid, &label, &reason)
                 .map(|_| Response::Success),
+            Request::WarnProcedureStep {
+                procedure,
+                label,
+                reason,
+            } => operators
+                .warn_step(&procedure, peer_pid, &label, &reason)
+                .map(|_| Response::Success),
             Request::GetSchema => {
                 let waiting = operators.pending_count() > 0
                     || broker.lock().is_ok_and(|state| state.has_pending());

@@ -109,8 +109,8 @@ pub(super) fn intercept(
 
 /// Handles input while a procedure dialog shows what happens between its
 /// prompts. While the procedure works, m or Esc minimises it and other keys
-/// do nothing. Any key closes a successful result; a failure closes only with
-/// Enter or OK. Returns whether it consumed the event.
+/// do nothing. Any key closes a successful result; a failure or a success
+/// with warnings closes only with Enter or OK. Returns whether it consumed the event.
 fn between(model: &mut Model, event: &UiEvent) -> bool {
     // A notice drawn above the dialog takes the keys first.
     if model.message.is_some() {
@@ -120,7 +120,10 @@ fn between(model: &mut Model, event: &UiEvent) -> bool {
         return false;
     };
     let result = match &procedure.between {
-        Some(crate::model::Between::Result { succeeded, .. }) => Some(*succeeded),
+        // Warnings close only with Enter or OK, like a failure.
+        Some(crate::model::Between::Result { succeeded, .. }) => {
+            Some(*succeeded && !procedure.succeeded_with_warnings())
+        }
         _ => None,
     };
     match event {

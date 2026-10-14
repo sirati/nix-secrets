@@ -647,7 +647,7 @@ fn render_between(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hit
     let mut body = procedure.between_body(spinner, now).unwrap_or_default();
     let minimise = Button::new("m Minimise", MouseTarget::Shortcut(Shortcut::Character('m')));
     let footer = match between {
-        Between::Result { succeeded: true, .. } => {
+        Between::Result { succeeded: true, .. } if !procedure.succeeded_with_warnings() => {
             body.push_str("\n\n(press any key to close this)");
             None
         }

@@ -254,6 +254,20 @@ impl Operators {
         self.broadcast_step(step.clone());
         Ok(step)
     }
+
+    /// Like [`Self::fail_step`] for a warning; see
+    /// [`super::Request::WarnProcedureStep`].
+    pub(super) fn warn_step(
+        &self,
+        token: &str,
+        peer: u32,
+        label: &str,
+        reason: &str,
+    ) -> Result<ProcedureStep, String> {
+        let step = self.procedures.warn_step(token, peer, label, reason)?;
+        self.broadcast_step(step.clone());
+        Ok(step)
+    }
 }
 
 /// Serves an attached TUI until it disconnects.

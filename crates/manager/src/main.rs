@@ -1,5 +1,6 @@
 use nix_secrets_core::Schema;
 use nix_secrets_crypto::AgeCommandProvider;
+use nix_secrets_manager::procedure_command::StepReportKind;
 use nix_secrets_manager::{
     async_ui::AsyncWriter, cli, client::BackendClient, command, controller::Controller, startup,
     ui, with_secrets,
@@ -79,7 +80,12 @@ fn main() {
         .next_if(|argument| argument == "procedure-step-failed")
         .is_some()
     {
-        procedure_step_failed(arguments.collect())
+        procedure_step_report(StepReportKind::Failed, arguments.collect())
+    } else if arguments
+        .next_if(|argument| argument == "procedure-step-warning")
+        .is_some()
+    {
+        procedure_step_report(StepReportKind::Warning, arguments.collect())
     } else {
         run(arguments.collect()).map(|()| 0)
     };
@@ -248,19 +254,20 @@ fn procedure(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>
     Ok(exit_code(status))
 }
 
-/// Reports a failed step of the procedure this runs in; see
+/// Reports a failed or warned step of the procedure this runs in; see
 /// `procedure_command`.
-fn procedure_step_failed(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
-    use nix_secrets_manager::procedure_command::{
-        parse_step_failed, report_step_failed, STEP_FAILED_TIMEOUT,
-    };
-    // Nothing about this environment may keep the failure from being shown.
-    let failure = parse_step_failed(arguments, env::current_dir().unwrap_or_default())?;
-    Ok(report_step_failed(
-        &failure,
+fn procedure_step_report(
+    kind: StepReportKind,
+    arguments: Vec<OsString>,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_manager::procedure_command::{parse_step_report, report_step, STEP_REPORT_TIMEOUT};
+    // Nothing about this environment may keep the report from being shown.
+    let report = parse_step_report(kind, arguments, env::current_dir().unwrap_or_default())?;
+    Ok(report_step(
+        &report,
         &runtime_directory(&home().unwrap_or_default()),
         with_secrets::procedure_token(),
-        STEP_FAILED_TIMEOUT,
+        STEP_REPORT_TIMEOUT,
         &mut io::stderr(),
     ))
 }

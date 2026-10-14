@@ -452,3 +452,51 @@ fn a_step_the_command_reports_failed_reaches_the_operator_with_its_reason() {
     );
     assert!(!stderr.contains("not reached"), "{stderr}");
 }
+
+#[test]
+fn a_step_the_command_reports_warned_reaches_the_operator_with_its_reason() {
+    let fixture = fixture(Duration::from_secs(600));
+    let operator = fixture.attach();
+    let report = |reason: &str| {
+        format!(
+            r#""$NIX_SECRETS" procedure-step-warning --backend-socket "$SOCKET" --label "activate host" --reason "{reason}""#
+        )
+    };
+    let holder = fixture.procedure(
+        "Update host",
+        &format!(
+            "{} && {}",
+            report("switch exited 4, nothing regressed"),
+            report("a.service was failed before"),
+        ),
+    );
+    let mut warnings = Vec::new();
+    let until = Instant::now() + Duration::from_secs(30);
+    while warnings.len() < 2 {
+        assert!(Instant::now() < until, "the warnings never arrived");
+        if let ChannelEvent::Procedure(step) = operator.next() {
+            if step.warning.is_some() {
+                warnings.push(step);
+            }
+        }
+    }
+    for step in &warnings {
+        assert_eq!((step.step, step.steps), (1, Some(3)));
+        assert_eq!((step.title.as_str(), step.label.as_str()), ("Update host", "activate host"));
+        assert_eq!(step.failure, None);
+    }
+    assert_eq!(
+        warnings[0].warning.as_deref(),
+        Some("switch exited 4, nothing regressed")
+    );
+    assert_eq!(warnings[1].warning.as_deref(), Some("a.service was failed before"));
+    assert_eq!(operator.until_ended(&warnings[0].id), Some(0));
+    let output = finish(holder);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nix-secrets: step warning: activate host: switch exited 4, nothing regressed"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("not reached"), "{stderr}");
+}
