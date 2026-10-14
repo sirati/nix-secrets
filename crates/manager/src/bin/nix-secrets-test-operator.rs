@@ -30,15 +30,29 @@
 //! trusts an unknown host key with `y`. It exits after `--requests`
 //! deployment requests finished (default 1) and prints each notice on
 //! stdout.
+//!
+//! From the model it also prints each step a procedure's command reported
+//! failed, again when its reason changes, and each procedure's end:
+//!
+//! ```text
+//! procedure-step-failed: TITLE POSITION: LABEL: REASON
+//! procedure-ended: TITLE exit=CODE|none[ failed-at=POSITION: LABEL: REASON]
+//! procedure-ended: TITLE exit=0|0-or-none
+//! ```
+//!
+//! The second form is for a procedure the model dropped as soon as it
+//! ended, which it does only for a success. It closes the failed result of
+//! a procedure with a reported failed step with Enter when it is on screen,
+//! so later procedures can open.
 use nix_secrets_core::Schema;
 use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_manager::async_ui::AsyncWriter;
 use nix_secrets_manager::client::BackendClient;
 use nix_secrets_manager::controller::Controller;
-use nix_secrets_manager::model::{Mode, Model, NoticeSeverity};
+use nix_secrets_manager::model::{Mode, Model, NoticeSeverity, Procedure, StepKind};
 use nix_secrets_manager::socket::connect_verified;
 use nix_secrets_manager::ui::{drive, Frontend, UiEvent};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -180,10 +194,96 @@ struct Scripted {
     prompt_delay: Duration,
     /// The prompt on screen, when to answer it, and whether that happened.
     prompt: Option<(String, std::time::Instant, bool)>,
+    procedures: ProcedureLog,
+}
+
+/// The last step of a procedure that its command reported failed.
+fn reported_failure(procedure: &Procedure) -> Option<String> {
+    procedure
+        .finished
+        .iter()
+        .rev()
+        .find(|step| step.kind == StepKind::Reported)
+        .map(|step| format!("{}: {}: {}", step.step.position(), step.step.label, step.text))
+}
+
+/// Prints what the model shows of procedures: each failed step the command
+/// reported, again when its reason changes, and how each procedure ended.
+#[derive(Default)]
+struct ProcedureLog {
+    /// Failed steps printed, by procedure and step, with their reason.
+    failed: HashMap<(String, u32), String>,
+    /// Live procedures seen, with their titles and whether a step of
+    /// theirs had finished.
+    live: HashMap<String, (String, bool)>,
+    /// Procedures whose end was printed.
+    ended: HashSet<String>,
+}
+
+impl ProcedureLog {
+    fn lines(&mut self, model: &Model) -> Vec<String> {
+        let mut lines = Vec::new();
+        for procedure in model.procedures.iter().filter(|procedure| !procedure.implicit) {
+            for step in &procedure.finished {
+                if step.kind != StepKind::Reported {
+                    continue;
+                }
+                let key = (procedure.id.clone(), step.step.step);
+                if self.failed.get(&key) != Some(&step.text) {
+                    lines.push(format!(
+                        "procedure-step-failed: {} {}: {}: {}",
+                        procedure.title,
+                        step.step.position(),
+                        step.step.label,
+                        step.text
+                    ));
+                    self.failed.insert(key, step.text.clone());
+                }
+            }
+            if !procedure.ended {
+                self.live.insert(
+                    procedure.id.clone(),
+                    (procedure.title.clone(), !procedure.finished.is_empty()),
+                );
+            } else if self.ended.insert(procedure.id.clone()) {
+                self.live.remove(&procedure.id);
+                let exit = procedure
+                    .exit_code
+                    .map_or_else(|| "none".to_owned(), |code| code.to_string());
+                let failed_at = reported_failure(procedure)
+                    .map(|failure| format!(" failed-at={failure}"))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "procedure-ended: {} exit={exit}{failed_at}",
+                    procedure.title
+                ));
+            }
+        }
+        // The model drops an ended procedure at once only when it
+        // succeeded: a failure waits for the operator. After a finished
+        // step that takes exit status 0; before any, an unknown status
+        // counts as success too.
+        let gone = self
+            .live
+            .keys()
+            .filter(|id| model.procedure(id).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in gone {
+            let (title, stepped) = self.live.remove(&id).unwrap_or_default();
+            self.ended.insert(id);
+            let exit = if stepped { "0" } else { "0-or-none" };
+            lines.push(format!("procedure-ended: {title} exit={exit}"));
+        }
+        lines
+    }
 }
 
 impl Frontend for Scripted {
     fn draw(&mut self, model: &Model) -> io::Result<()> {
+        for line in self.procedures.lines(model) {
+            println!("{line}");
+        }
         if let Some(notice) = &model.message {
             // Its acknowledgement is still queued.
             if !self.queued.is_empty() {
@@ -220,6 +320,16 @@ impl Frontend for Scripted {
                     false,
                 ));
             }
+            return Ok(());
+        }
+        // A failed procedure result on screen would keep later procedures
+        // from opening; Enter closes it, as an operator who read it.
+        if self.queued.is_empty()
+            && model.between_shown().is_some_and(|procedure| {
+                procedure.failed() && reported_failure(procedure).is_some()
+            })
+        {
+            self.queued.push_back(UiEvent::Enter);
             return Ok(());
         }
         self.busy = model.activity.is_some();
@@ -370,6 +480,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         prompt_answer: options.prompt_answer,
         prompt_delay: options.prompt_delay,
         prompt: None,
+        procedures: ProcedureLog::default(),
     };
     // Ready: `nix-secrets deploy` can now reach a registered frontend.
     println!("ready");
@@ -380,10 +491,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix_secrets_core::procedure::ProcedureStep;
     use nix_secrets_manager::model::{ApprovalRequest, HostMutationReview};
-    #[test]
-    fn deployment_consent_does_not_implicitly_consent_to_host_replacements() {
-        let mut scripted = Scripted {
+
+    fn scripted() -> Scripted {
+        Scripted {
             answer: 'y',
             host_value_answer: 'n',
             remaining: 1,
@@ -394,7 +506,80 @@ mod tests {
             prompt_answer: None,
             prompt_delay: Duration::ZERO,
             prompt: None,
-        };
+            procedures: ProcedureLog::default(),
+        }
+    }
+
+    fn step(id: &str, title: &str, number: u32, label: &str, failure: Option<&str>) -> ProcedureStep {
+        ProcedureStep {
+            id: id.into(),
+            title: title.into(),
+            step: number,
+            steps: Some(3),
+            label: label.into(),
+            deployment: false,
+            failure: failure.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn failed_steps_and_procedure_ends_are_printed_from_the_model() {
+        let mut scripted = scripted();
+        let mut model = Model::new(vec![]);
+        model.procedure_step(step("proc-1", "Update ns1", 0, "starting", None));
+        assert!(scripted.procedures.lines(&model).is_empty());
+        let failed = |reason| step("proc-1", "Update ns1", 1, "activate ns1", Some(reason));
+        model.procedure_step(failed("rolling back"));
+        assert_eq!(
+            scripted.procedures.lines(&model),
+            ["procedure-step-failed: Update ns1 step 1/3: activate ns1: rolling back"]
+        );
+        // The same report again prints nothing; a new reason prints again.
+        model.procedure_step(failed("rolling back"));
+        assert!(scripted.procedures.lines(&model).is_empty());
+        // Drawing prints, so the line is not printed twice.
+        model.procedure_step(failed("still rolling back"));
+        scripted.draw(&model).unwrap();
+        assert!(scripted.procedures.lines(&model).is_empty());
+        model.procedure_step(failed("rolled back"));
+        assert_eq!(
+            scripted.procedures.lines(&model),
+            ["procedure-step-failed: Update ns1 step 1/3: activate ns1: rolled back"]
+        );
+        // A failed result on screen is closed with Enter, nothing else.
+        model.restore("proc-1").unwrap();
+        assert!(model.between_shown().is_some());
+        scripted.draw(&model).unwrap();
+        assert_eq!(scripted.queued.pop_front(), Some(UiEvent::Enter));
+        assert!(scripted.queued.is_empty());
+        model.procedure_ended("proc-1", Some(4));
+        assert_eq!(
+            scripted.procedures.lines(&model),
+            ["procedure-ended: Update ns1 exit=4 failed-at=step 1/3: activate ns1: rolled back"]
+        );
+        assert!(scripted.procedures.lines(&model).is_empty());
+        // A procedure that succeeded leaves the model at once.
+        model.procedure_step(step("proc-2", "Install", 0, "starting", None));
+        assert!(scripted.procedures.lines(&model).is_empty());
+        model.procedure_ended("proc-2", Some(0));
+        assert!(model.procedure("proc-2").is_none());
+        assert_eq!(
+            scripted.procedures.lines(&model),
+            ["procedure-ended: Install exit=0-or-none"]
+        );
+        assert!(scripted.procedures.lines(&model).is_empty());
+        // Any other failed result stays open, as before.
+        model.procedure_step(step("proc-3", "Rotate", 0, "starting", None));
+        model.procedure_ended("proc-3", Some(1));
+        assert_eq!(scripted.procedures.lines(&model), ["procedure-ended: Rotate exit=1"]);
+        model.restore("proc-3").unwrap();
+        assert!(model.between_shown().is_some_and(Procedure::failed));
+        scripted.draw(&model).unwrap();
+        assert!(scripted.queued.is_empty());
+    }
+    #[test]
+    fn deployment_consent_does_not_implicitly_consent_to_host_replacements() {
+        let mut scripted = scripted();
         let mut model = Model::new(vec![]);
         let normal = ApprovalRequest {
             id: "same".into(),
