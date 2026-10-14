@@ -698,8 +698,38 @@ pkgs.testers.runNixOSTest {
     assert "old.example" in operator.succeed(f"cat {repo}/nix-secrets.toml")
     assert machine.succeed("cat /persistent/public-info/storage-box/known-hosts") == installed
 
+    # 7. A deployer that died mid-commit. The on-disk state a crash leaves
+    #    is laid out by hand; the recovery is the production unit.
+    #    a) Before the commit point: both roots hold a pending pointer, the
+    #       secret root still the old one. Recovery discards both.
+    def generation(root):
+        return machine.succeed(f"readlink {root}/.current").strip()
+    def lay_out_crash(gid, switch_secrets):
+        for root in ["/persistent/secrets", "/persistent/public-info"]:
+            machine.succeed(f"cp -a {root}/{generation(root)} {root}/.generations/{gid}")
+            machine.succeed(f"ln -s .generations/{gid} {root}/.current-{gid}")
+        if switch_secrets:
+            machine.succeed(f"mv -T /persistent/secrets/.current-{gid} /persistent/secrets/.current")
+    secrets_before = generation("/persistent/secrets")
+    public_before = generation("/persistent/public-info")
+    lay_out_crash("9" * 38 + "1-0000000001", False)
+    machine.succeed("systemctl restart nix-secrets-recover.service")
+    assert generation("/persistent/secrets") == secrets_before
+    assert generation("/persistent/public-info") == public_before
+    machine.fail("ls -d /persistent/secrets/.current-* /persistent/public-info/.current-* 2>/dev/null | grep -q .")
+    #    b) Between the two switches: the secret root is committed, public
+    #       information is not. The boot recovery finishes it before any
+    #       consumer starts.
+    committed = "9" * 38 + "2-0000000002"
+    lay_out_crash(committed, True)
+    assert generation("/persistent/public-info") == public_before
+
     # The published generation survives a reboot and releases the consumers.
     machine.reboot()
+    machine.wait_for_unit("nix-secrets-recover.service")
+    assert generation("/persistent/secrets") == f".generations/{committed}"
+    assert generation("/persistent/public-info") == f".generations/{committed}"
+    machine.fail("ls -d /persistent/public-info/.current-* 2>/dev/null | grep -q .")
     machine.wait_for_unit("multi-user.target")
     machine.succeed("systemctl start alpha-consumer dns-consumer")
     machine.wait_for_unit("alpha-consumer.service")
