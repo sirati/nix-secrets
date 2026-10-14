@@ -373,6 +373,18 @@ fn handle_requests(
                 .remove_public_info_if_version(schema, &path, &expected_version)
                 .map(|existed| Response::Removed { existed })
                 .map_err(|error| error.to_string()),
+            Request::Quarantine { value } => store
+                .quarantine(value)
+                .map(|id| Response::Quarantined { id })
+                .map_err(|error| error.to_string()),
+            Request::ListQuarantine => store
+                .list_quarantine()
+                .map(|entries| Response::QuarantineEntries { entries })
+                .map_err(|error| error.to_string()),
+            Request::RemoveQuarantined { id } => store
+                .remove_quarantined(&id)
+                .map(|existed| Response::Removed { existed })
+                .map_err(|error| error.to_string()),
             Request::RegisterFrontend => with_broker(broker, |state| {
                 state
                     .register(session)

@@ -704,6 +704,26 @@ impl Controller {
         }
         let pending = self.host_mutations.take().expect("pending checked");
         if !accepted {
+            // The host already installed these keys: rejecting them as the
+            // stored values must not lose them.
+            let origin = super::quarantine::Origin {
+                host: active.request.target.clone(),
+                deployment: active.request.id.clone(),
+            };
+            let mut quarantined = Vec::new();
+            for mutation in &pending.batch.mutations {
+                let (path, key) = match mutation {
+                    HostMutation::Generated { path, proposed, .. } => (path, proposed.public_key.clone()),
+                    HostMutation::Attached { path, proposed, .. } => (path, proposed.clone()),
+                    _ => continue,
+                };
+                quarantined.push(self.quarantine_public_key(
+                    &origin,
+                    &path.to_string(),
+                    &key,
+                    "the operator rejected it replacing the stored public key",
+                ));
+            }
             self.submit_host_followups(pending.batch.committed_followups)?;
             let active = self.active.take().expect("active checked");
             self.identity_publication = None;
@@ -711,6 +731,11 @@ impl Controller {
                 "host-provided identity change rejected; no deployment sent and existing values kept"
             } else {
                 "target deployment completed; host-provided changes rejected, existing values kept"
+            };
+            let reason = if quarantined.is_empty() {
+                reason.to_owned()
+            } else {
+                format!("{reason}; {}", quarantined.join("; "))
             };
             self.client
                 .resolve(

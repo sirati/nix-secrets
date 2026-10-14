@@ -182,6 +182,20 @@ pub(crate) fn approval_lines(
         lines.push(Line::styled(failure.to_owned(), bold(Color::Red)));
         lines.push(Line::default());
     }
+    if !request.quarantined.is_empty() {
+        lines.push(Line::styled(
+            format!(
+                "Quarantined values from {} ({}): never deployed; adopt or discard them with `nix-secrets quarantine`",
+                request.target,
+                request.quarantined.len()
+            ),
+            bold(Color::Red),
+        ));
+        for line in &request.quarantined {
+            lines.push(Line::styled(format!("  {line}"), Style::default().fg(Color::Red)));
+        }
+        lines.push(Line::default());
+    }
     for warning in &request.connection_warnings {
         lines.push(Line::styled(format!("Connection warning: {warning}"), Style::default().fg(Color::Yellow)));
         lines.push(Line::default());

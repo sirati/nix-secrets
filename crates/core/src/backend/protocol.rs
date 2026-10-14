@@ -56,6 +56,15 @@ pub enum Request {
         path: SecretPath,
         expected_version: String,
     },
+    /// Keeps a value a host returned that the schema did not accept.
+    Quarantine {
+        value: crate::QuarantinedValue,
+    },
+    ListQuarantine,
+    /// Removes a quarantined value the operator adopted or discarded.
+    RemoveQuarantined {
+        id: String,
+    },
     RegisterFrontend,
     PollApprovals,
     SubmitApproval {
@@ -269,6 +278,12 @@ pub enum Response {
     },
     PublicInfoEntries {
         entries: std::collections::BTreeMap<String, crate::PublicInfoRecord>,
+    },
+    Quarantined {
+        id: String,
+    },
+    QuarantineEntries {
+        entries: std::collections::BTreeMap<String, crate::QuarantinedValue>,
     },
     Error {
         message: String,

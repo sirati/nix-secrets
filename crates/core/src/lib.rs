@@ -30,5 +30,6 @@ pub use schema::{
     SecretSpec, StorageBoxBootstrap, ValueGenerator, ValueType,
 };
 pub use store::{
-    CommitState, EncryptedSecret, GeneratedPublicKey, PublicInfoRecord, SecretStore, StoreError,
+    CommitState, EncryptedSecret, GeneratedPublicKey, PublicInfoRecord, QuarantinedContent,
+    QuarantinedValue, SecretStore, StoreError,
 };

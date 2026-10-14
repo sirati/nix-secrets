@@ -70,6 +70,8 @@ pub struct Controller {
     /// Requested public information whose stored value the current schema
     /// rejects, with why; refreshed with every `plan_set`.
     stale_public: std::collections::BTreeMap<String, String>,
+    /// The store's quarantined host values; refreshed with every `plan_set`.
+    quarantined: std::collections::BTreeMap<String, nix_secrets_core::QuarantinedValue>,
     /// Where to reconnect when the backend connection breaks.
     socket: Option<PathBuf>,
     /// Starts the backend, or its tunnel, again when the socket is gone.
@@ -293,6 +295,7 @@ impl Controller {
             phase: None,
             followup_procedures: Default::default(),
             stale_public: Default::default(),
+            quarantined: Default::default(),
             socket: None,
             restart: None,
             retry: None,
@@ -462,6 +465,7 @@ impl Controller {
             host_mutations: vec![],
             host_mutations_before_deploy: false,
             connection_warnings: self.connection_warnings.clone(),
+            quarantined: self.quarantined_lines(&request.target),
             host_mutation_token: None,
             tasks,
             generate: plan
@@ -802,7 +806,11 @@ impl Controller {
             .collect::<BTreeSet<_>>();
 
         self.phase("Waiting for SSH deployment and target generators");
-        let (mut applied, mut warnings) = deployment::deploy(
+        let deployment::Returned {
+            mut applied,
+            unrequested,
+            mut warnings,
+        } = deployment::deploy(
             prepared,
             deploy_entries,
             task_entries,
@@ -810,11 +818,28 @@ impl Controller {
             derive_on_target,
         )?;
         // The target has applied the deployment. From here on nothing it
-        // returned is dropped silently: what this schema accepts is saved,
-        // and everything else is named in the result.
+        // returned is dropped: what this schema accepts is saved, and
+        // everything else is quarantined and named in the result.
         self.phase("Saving target results to the backend");
+        let origin = quarantine::Origin {
+            host: source_host.clone(),
+            deployment: self
+                .active
+                .as_ref()
+                .map(|active| active.request.id.clone())
+                .unwrap_or_default(),
+        };
+        let mut quarantined = Vec::new();
+        for (identifier, record) in &unrequested {
+            quarantined.push(self.quarantine_record(
+                &origin,
+                identifier,
+                record,
+                "the target returned a generated record nobody requested",
+            ));
+        }
         // Store generated values first: they are the only copy outside the target.
-        let (stored, problem) = self.store_generated_all(&applied.generated_records);
+        let (stored, problem) = self.store_generated_all(&origin, &applied.generated_records);
         warnings.extend(problem);
         if validate_returned_public_key_scope(&allowed_public_keys, &applied.generated_public_keys)
             .is_err()
@@ -827,8 +852,11 @@ impl Controller {
                 .collect::<Vec<_>>();
             for identifier in unexpected {
                 let key = applied.generated_public_keys.remove(&identifier).unwrap_or_default();
-                warnings.push(format!(
-                    "{identifier} (the target returned the public key `{key}` outside the approved tasks; it was not registered)"
+                quarantined.push(self.quarantine_public_key(
+                    &origin,
+                    &identifier,
+                    &key,
+                    "the target returned a public key outside the approved tasks",
                 ));
             }
         }
@@ -840,16 +868,12 @@ impl Controller {
             &mut batch,
         ) {
             batch = host_mutations::HostMutationBatch::default();
-            warnings.push(format!(
-                "generated public keys ({}) were not registered: {error}",
-                applied
-                    .generated_public_keys
-                    .iter()
-                    .map(|(identifier, key)| format!("{identifier} = `{key}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            let reason = format!("registering the generated public key failed: {error}");
+            for (identifier, key) in applied.generated_public_keys.clone() {
+                quarantined.push(self.quarantine_public_key(&origin, &identifier, &key, &reason));
+            }
         }
+        warnings.extend(quarantined);
         if let Some(publication) = self.identity_publication.take() {
             if publication.was_sent(&identifiers, &applied.not_deployed) {
                 batch.committed_followups = publication.followups;
@@ -876,12 +900,25 @@ impl Controller {
             .collect::<Vec<_>>();
         let skipped = skipped.into_iter().chain(warnings).collect::<Vec<_>>();
         let sent = deploy_entries_count + task_entries_count;
+        // Everything this deployment quarantined, shown in red.
+        let quarantined = self
+            .client
+            .list_quarantine()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|(_, value)| value.deployment_id == origin.deployment)
+                    .map(|(id, value)| quarantine::describe(id, value))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|error| vec![format!("listing the quarantine failed: {error}")]);
         self.last_summary = Some(crate::model::DeploySummary {
             target: source_host.clone(),
             sent: sent.saturating_sub(applied.not_deployed.len()),
             generated: applied.generated_records.len(),
             left_out: left_out.clone(),
             missing: skipped.clone(),
+            quarantined,
         });
         if !batch.reviews().is_empty() {
             let pending = host_mutations::PendingHostMutations {
@@ -965,6 +1002,7 @@ mod metadata;
 mod operator;
 mod preflight;
 mod public_info;
+pub mod quarantine;
 mod registration;
 mod ssh_validation;
 pub(crate) mod unset;

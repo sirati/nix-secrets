@@ -16,6 +16,8 @@ mod generated_metadata;
 pub use committed::CommitState;
 mod persistence;
 mod public_info;
+mod quarantine;
+pub use quarantine::{QuarantinedContent, QuarantinedValue};
 mod validation;
 use validation::{hydrate_record, validate_public_metadata, validate_record};
 
@@ -67,6 +69,9 @@ struct StoreDocument {
     recipient_registry: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     public_info: BTreeMap<String, PublicInfoRecord>,
+    /// Host-returned values this schema did not accept; see `quarantine`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    quarantine: BTreeMap<String, QuarantinedValue>,
 }
 
 pub struct SecretStore {
@@ -94,6 +99,8 @@ pub enum StoreError {
     InvalidRecipientRegistry,
     #[error("public-info value or schema is invalid")]
     InvalidPublicInfo,
+    #[error("quarantined value is invalid or the quarantine is full")]
+    InvalidQuarantine,
     #[error("secret version changed during update")]
     VersionConflict,
     #[error("this value is derived from another secret and is never stored")]

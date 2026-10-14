@@ -509,58 +509,74 @@ impl Controller {
         &mut self,
         records: &BTreeMap<String, GeneratedRecord>,
     ) -> Result<Vec<String>, String> {
-        match self.store_generated_all(records) {
+        let origin = super::quarantine::Origin {
+            host: "host".into(),
+            deployment: "test-deployment".into(),
+        };
+        match self.store_generated_all(&origin, records) {
             (stored, None) => Ok(stored),
             (_, Some(problem)) => Err(problem),
         }
     }
 
-    /// Stores every valid record, and says what was not stored.
+    /// Stores every valid record, quarantines every other one, and says
+    /// what was not stored as a value.
     pub(super) fn store_generated_all(
         &mut self,
+        origin: &super::quarantine::Origin,
         records: &BTreeMap<String, GeneratedRecord>,
     ) -> (Vec<String>, Option<String>) {
         // One record this schema rejects never costs the others: each valid
-        // record is stored, and each rejected one is named.
-        let mut envelopes = Vec::with_capacity(records.len());
-        let mut rejected = Vec::new();
-        for (identifier, record) in records {
-            match record_envelope(&self.schema, identifier, record) {
-                Ok(envelope) => envelopes.push((identifier.clone(), envelope)),
-                Err(error) => rejected.push(error),
-            }
-        }
+        // record is stored, and each rejected one is quarantined.
         let mut stored = Vec::new();
+        let mut quarantined = Vec::new();
         let mut conflicts = Vec::new();
-        let mut failures = rejected;
-        for (identifier, envelope) in envelopes {
-            let path = match SecretPath::parse(&identifier) {
+        for (identifier, record) in records {
+            let envelope = match record_envelope(&self.schema, identifier, record) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    quarantined.push(self.quarantine_record(origin, identifier, record, &error));
+                    continue;
+                }
+            };
+            let path = match SecretPath::parse(identifier) {
                 Ok(path) => path,
                 Err(error) => {
-                    failures.push(format!("{identifier}: {error}"));
+                    let reason = format!("{identifier}: {error}");
+                    quarantined.push(self.quarantine_record(origin, identifier, record, &reason));
                     continue;
                 }
             };
             match self.client.set_envelope_if_version(&path, envelope, None) {
-                Ok(()) => stored.push(identifier),
+                Ok(()) => stored.push(identifier.clone()),
                 Err(error) if error.to_string().contains("version changed") => {
-                    conflicts.push(identifier)
+                    // The operator's value wins; the host's copy is kept.
+                    conflicts.push(identifier.clone());
+                    quarantined.push(self.quarantine_record(
+                        origin,
+                        identifier,
+                        record,
+                        "a value was entered in the store while the target generated this one",
+                    ));
                 }
-                Err(error) => failures.push(format!("{identifier}: {error}")),
+                Err(error) => {
+                    let reason = format!("storing it failed: {error}");
+                    quarantined.push(self.quarantine_record(origin, identifier, record, &reason));
+                }
             }
         }
         let mut problems = Vec::new();
-        if !failures.is_empty() {
-            problems.push(format!(
-                "storing failed for {}. Deploy again: the target returns the installed values.",
-                failures.join("; ")
-            ));
-        }
         if !conflicts.is_empty() {
             problems.push(format!(
                 "these were entered in the store meanwhile and kept: {}. \
                  Deploy again to install the stored values.",
                 conflicts.join(", ")
+            ));
+        }
+        if !quarantined.is_empty() {
+            problems.push(format!(
+                "these generated records were not stored as values: {}",
+                quarantined.join("; ")
             ));
         }
         let problem = (!problems.is_empty())

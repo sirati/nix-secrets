@@ -340,12 +340,24 @@ fn apply_completion(model: &mut Model, completion: Completion) {
                 model.mode = Mode::Browse;
             }
             let mut notice = String::new();
+            let mut quarantined = Vec::new();
             if let Some(summary) = summary {
                 notice.push_str(&summary_line(&summary));
                 notice.push_str("\n\n");
+                quarantined = summary.quarantined;
             }
             notice.push_str(&deployed_notice(&generated, &skipped));
-            model.inform(notice);
+            if quarantined.is_empty() {
+                model.inform(notice);
+            } else {
+                // Red, and closed only by an explicit OK.
+                notice.push_str(&format!(
+                    "\n\nQUARANTINED ({}): values the host returned that this schema does not accept. They are kept, never deployed, and wait for you: `nix-secrets quarantine list`, then `adopt ID` or `discard ID`.\n{}",
+                    quarantined.len(),
+                    quarantined.join("\n")
+                ));
+                model.fail(notice);
+            }
         }
         Completion::DeploymentRequested(host) => {
             model.inform(format!(

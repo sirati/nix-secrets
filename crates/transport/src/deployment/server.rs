@@ -57,11 +57,12 @@ where
         .map(|item| item.identifier.clone())
         .collect::<Vec<_>>();
     let result = match apply(batch) {
+        // Extra records still reach the operator, who quarantines them:
+        // the deployment is already applied and they may be the only copy.
         Ok(output)
-            if output.generated_records.len() != generate.len()
-                || generate
-                    .iter()
-                    .any(|id| !output.generated_records.contains_key(id)) =>
+            if generate
+                .iter()
+                .any(|id| !output.generated_records.contains_key(id)) =>
         {
             DeploymentResult::Rejected {
                 message: "target did not return exactly the generated records".into(),

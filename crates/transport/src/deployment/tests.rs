@@ -358,6 +358,15 @@ fn server_rejects_an_apply_that_omits_generated_records() {
         age_ciphertext_base64: STANDARD.encode(b"age"),
         adopted: false,
     };
+    // A record nobody asked for still reaches the operator, who keeps it in
+    // quarantine: the target already applied the deployment.
+    assert!(matches!(
+        run(BTreeMap::from([
+            (id.to_string(), record.clone()),
+            ("host.services.mail.unasked".to_string(), record.clone()),
+        ])),
+        DeploymentResult::Applied { generated_records, .. } if generated_records.len() == 2
+    ));
     assert!(matches!(
         run(BTreeMap::from([(id.to_string(), record)])),
         DeploymentResult::Applied { generated_records, .. } if generated_records.len() == 1

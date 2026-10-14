@@ -170,6 +170,7 @@ impl Controller {
             }
         }
         self.stale_public = stale_public_info(&self.schema, identifiers, &public);
+        self.quarantined = self.client.list_quarantine().map_err(|error| error.to_string())?;
         Ok(set)
     }
 }

@@ -348,6 +348,10 @@ fn a_value_entered_during_deployment_is_kept() {
     .unwrap();
     let error = controller.store_generated(&records).unwrap_err();
     assert!(error.contains("entered in the store meanwhile"), "{error}");
+    // The host's value is kept in quarantine, not lost.
+    let quarantine = controller.client.list_quarantine().unwrap();
+    assert_eq!(quarantine.len(), 1);
+    assert!(quarantine.values().all(|value| value.identifier == "host.services.app.db-password"));
     assert_eq!(
         fixture.decrypt(&mut controller, "db-password").as_slice(),
         b"typed-meanwhile"
@@ -401,14 +405,73 @@ fn one_rejected_record_never_costs_the_others() {
     let mut records = target.deploy(&fixture, &plan);
     assert_eq!(records.len(), 2);
     records.get_mut("host.services.app.cookie").unwrap().recipient_ids = vec!["someone-else".into()];
-    let (stored, problem) = controller.store_generated_all(&records);
+    let origin = super::super::quarantine::Origin {
+        host: "host".into(),
+        deployment: "deploy-7".into(),
+    };
+    let (stored, problem) = controller.store_generated_all(&origin, &records);
     assert_eq!(stored, ["host.services.app.db-password"]);
     let problem = problem.unwrap();
-    assert!(problem.contains("host.services.app.cookie"), "{problem}");
+    assert!(problem.contains("host.services.app.cookie (QUARANTINED as "), "{problem}");
+    // The rejected record is kept, marked, and never a deployable value.
+    let quarantine = controller.client.list_quarantine().unwrap();
+    let (_, kept) = quarantine.iter().next().unwrap();
+    assert_eq!(quarantine.len(), 1);
+    assert_eq!(kept.identifier, "host.services.app.cookie");
+    assert_eq!((kept.source_host.as_str(), kept.deployment_id.as_str()), ("host", "deploy-7"));
+    assert!(kept.reason.contains("recipients"), "{}", kept.reason);
+    assert!(kept.quarantined_at > 0);
+    let nix_secrets_core::QuarantinedContent::GeneratedRecord { age_ciphertext_base64, .. } = &kept.content else {
+        panic!("a generated record is quarantined as one");
+    };
+    assert_eq!(age_ciphertext_base64, &records["host.services.app.cookie"].age_ciphertext_base64);
+    assert!(!controller.client.list().unwrap().contains_key("host.services.app.cookie"));
     assert_eq!(
         fixture.decrypt(&mut controller, "db-password").as_slice(),
         target.value("db-password")
     );
+}
+
+/// The operator adopts or discards each quarantined value explicitly;
+/// adoption checks it against the current schema again and never replaces
+/// a stored value.
+#[test]
+fn quarantined_records_are_adopted_or_discarded_explicitly() {
+    use crate::quarantine_command::{adopt, discard, list};
+    let fixture = fixture();
+    let mut controller = fixture.controller();
+    let identifiers = Fixture::ids(&["db-password"]);
+    let plan = plan_unset(&fixture.schema, &identifiers, &BTreeSet::new(), &Default::default()).unwrap();
+    let mut target = Target::default();
+    let records = target.deploy(&fixture, &plan);
+    let record = &records["host.services.app.db-password"];
+    let origin = super::super::quarantine::Origin { host: "host".into(), deployment: "deploy-9".into() };
+    let mut foreign = record.clone();
+    foreign.recipient_ids = vec!["someone-else".into()];
+    controller.quarantine_record(&origin, "host.services.app.db-password", &foreign, "test: other recipients");
+    controller.quarantine_record(&origin, "host.services.app.db-password", record, "test: nobody requested it");
+    let entries = controller.client.list_quarantine().unwrap();
+    let id_of = |reason: &str| entries.iter().find(|(_, value)| value.reason.contains(reason)).unwrap().0.clone();
+    let (bad, good) = (id_of("other recipients"), id_of("nobody requested"));
+    let listed = list(&mut controller.client).unwrap();
+    assert!(listed.contains(&bad) && listed.contains("from host (deployment deploy-9"), "{listed}");
+    // Still invalid under the schema: refused, and kept.
+    let error = adopt(&mut controller.client, &fixture.schema, &bad).unwrap_err();
+    assert!(error.contains("cannot adopt") && error.contains("recipients"), "{error}");
+    assert!(controller.client.list().unwrap().is_empty());
+    adopt(&mut controller.client, &fixture.schema, &good).unwrap();
+    assert_eq!(
+        fixture.decrypt(&mut controller, "db-password").as_slice(),
+        target.value("db-password")
+    );
+    // A stored value is never replaced by adoption.
+    let again = controller.quarantine_record(&origin, "host.services.app.db-password", record, "test: again");
+    let again = again.split("QUARANTINED as ").nth(1).unwrap().split(':').next().unwrap().to_owned();
+    assert!(adopt(&mut controller.client, &fixture.schema, &again).unwrap_err().contains("a value is stored there"));
+    discard(&mut controller.client, &again).unwrap();
+    discard(&mut controller.client, &bad).unwrap();
+    assert!(discard(&mut controller.client, &bad).is_err());
+    assert!(controller.client.list_quarantine().unwrap().is_empty());
 }
 
 mod derived {

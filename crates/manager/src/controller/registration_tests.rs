@@ -405,7 +405,17 @@ fn rotated_metadata_and_nonempty_inventory_need_exact_review_and_denial_keeps_by
             .unwrap()
             .is_none()
     );
-    assert_eq!(std::fs::read(&fixture.store).unwrap(), before);
+    // Denial keeps every stored byte; the host's rejected keys go to the
+    // quarantine, never into the values.
+    let without_quarantine = |bytes: &[u8]| {
+        let mut document: toml::Table = toml::from_str(std::str::from_utf8(bytes).unwrap()).unwrap();
+        document.remove("quarantine");
+        document
+    };
+    assert_eq!(without_quarantine(&std::fs::read(&fixture.store).unwrap()), without_quarantine(&before));
+    let quarantined = fixture.controller.client.list_quarantine().unwrap();
+    assert!(!quarantined.is_empty());
+    assert!(quarantined.values().all(|value| value.reason.contains("rejected") && value.source_host == "sender"));
     assert!(
         fixture
             .controller
@@ -1094,4 +1104,32 @@ impl Fixture {
             .unwrap()
             .value
     }
+}
+
+/// A host-generated public key outside the approved tasks is quarantined
+/// with where it came from, and adopted only on the operator's command.
+#[test]
+fn a_quarantined_public_key_is_adopted_explicitly() {
+    let mut fixture = Fixture::new("sender", false);
+    let keys = fixture.keys("20261005T120001123Z", 5, false);
+    let (identifier, dated) = keys.iter().next().unwrap();
+    let origin = super::quarantine::Origin {
+        host: "sender".into(),
+        deployment: "deploy-3".into(),
+    };
+    let line = fixture.controller.quarantine_public_key(
+        &origin,
+        identifier,
+        dated,
+        "the target returned a public key outside the approved tasks",
+    );
+    assert!(line.contains("QUARANTINED as "), "{line}");
+    let path = SecretPath::parse(identifier).unwrap();
+    assert!(fixture.controller.client.generated_public_key(&path).unwrap().is_none());
+    let schema = fixture.controller.schema.clone();
+    let id = fixture.controller.client.list_quarantine().unwrap().into_keys().next().unwrap();
+    crate::quarantine_command::adopt(&mut fixture.controller.client, &schema, &id).unwrap();
+    let adopted = fixture.controller.client.generated_public_key(&path).unwrap().unwrap();
+    assert_eq!(adopted.public_key, dated.split_once(' ').unwrap().1);
+    assert!(fixture.controller.client.list_quarantine().unwrap().is_empty());
 }

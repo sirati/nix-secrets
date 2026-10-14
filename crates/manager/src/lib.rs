@@ -9,6 +9,7 @@ pub mod closure_signing;
 pub mod command;
 pub mod controller;
 pub mod deploy_command;
+pub mod quarantine_command;
 pub mod deployment;
 pub mod editor;
 pub mod generator;

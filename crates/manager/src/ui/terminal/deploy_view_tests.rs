@@ -307,6 +307,7 @@ fn the_result_counts_sent_generated_left_out_and_missing() {
         generated: 2,
         left_out: vec!["ns1.services.a.b".into()],
         missing: vec!["x".into(), "y".into(), "z".into()],
+        quarantined: vec![],
     });
     assert!(line.starts_with("Deploy ns1 · step 3/3 done: 12 sent · 2 generated · 1 left out · 3 missing"), "{line}");
     assert!(line.contains("Left out by you: ns1.services.a.b"), "{line}");
@@ -391,4 +392,40 @@ fn predeployment_identity_review_and_route_warning_do_not_claim_deployment_compl
     request.host_mutations.clear(); request.host_key=Some("ssh-ed25519 SHA256:verified".into());
     let trust=deploy_view::plain(&deploy_view::approval_lines(&request,None,false,60));
     assert!(trust.contains("Connection warning: Direct client"));
+}
+
+/// Quarantined host values are red in the request, and a deployment that
+/// quarantined anything ends in a red notice that only OK closes.
+#[test]
+fn quarantined_values_are_red_before_approval_and_after_deployment() {
+    let mut request = ns1_request();
+    request.quarantined = vec!["0a1b: generated record ns1.services.x.y from ns1 (deployment d, at 1): test".into()];
+    let lines = deploy_view::approval_lines(&request, None, false, 120);
+    let red = lines
+        .iter()
+        .filter(|line| {
+            line.style.fg == Some(ratatui::style::Color::Red)
+                && deploy_view::plain(std::slice::from_ref(line)).contains("0a1b: generated record")
+        })
+        .count();
+    assert_eq!(red, 1);
+    let mut model = crate::model::Model::new(vec![]);
+    crate::ui::apply_completion_for_tests(
+        &mut model,
+        crate::ui::Completion::Deployed {
+            generated: vec![],
+            skipped: vec![],
+            summary: Some(crate::model::DeploySummary {
+                target: "ns1".into(),
+                sent: 1,
+                generated: 0,
+                left_out: vec![],
+                missing: vec![],
+                quarantined: vec!["0a1b: generated record ns1.services.x.y".into()],
+            }),
+        },
+    );
+    let notice = model.message.unwrap();
+    assert_eq!(notice.severity, crate::model::NoticeSeverity::Failure);
+    assert!(notice.text.contains("QUARANTINED (1)") && notice.text.contains("nix-secrets quarantine list"));
 }

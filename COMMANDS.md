@@ -32,6 +32,22 @@ exits once the request is queued. With `--wait`, it exits non-zero if the
 operator rejects the deployment or it fails. `--allow-partial` is accepted and
 has no effect, because missing values are always skipped and listed.
 
+## quarantine
+
+```sh
+nix-secrets quarantine list
+nix-secrets quarantine adopt ID
+nix-secrets quarantine discard ID
+```
+
+A host may return a value the schema does not accept: a generated record
+nobody requested or encrypted to other recipients, one that lost a race with
+a value you entered, or a public key outside the approved tasks. Each is kept
+in the store's `quarantine` table with its source host, deployment, time and
+reason, never deployed, and shown in red in the TUI. `adopt` checks the value
+against the current schema and stores it only where nothing is stored yet.
+`discard` deletes it.
+
 ## procedure
 
 ```text

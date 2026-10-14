@@ -51,3 +51,32 @@ impl BackendClient {
         }
     }
 }
+
+impl BackendClient {
+    /// Keeps a value a host returned that the schema did not accept.
+    pub fn quarantine(&mut self, value: nix_secrets_core::QuarantinedValue) -> io::Result<String> {
+        match self.exchange(&Request::Quarantine { value })? {
+            Response::Quarantined { id } => Ok(id),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn list_quarantine(
+        &mut self,
+    ) -> io::Result<BTreeMap<String, nix_secrets_core::QuarantinedValue>> {
+        match self.exchange(&Request::ListQuarantine)? {
+            Response::QuarantineEntries { entries } => Ok(entries),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+
+    pub fn remove_quarantined(&mut self, id: &str) -> io::Result<bool> {
+        match self.exchange(&Request::RemoveQuarantined { id: id.into() })? {
+            Response::Removed { existed } => Ok(existed),
+            Response::Error { message } => Err(io::Error::other(message)),
+            response => Err(unexpected(response)),
+        }
+    }
+}

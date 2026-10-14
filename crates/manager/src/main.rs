@@ -66,6 +66,11 @@ fn main() {
     } else if arguments.next_if(|argument| argument == "deploy").is_some() {
         deploy(arguments.collect())
     } else if arguments
+        .next_if(|argument| argument == "quarantine")
+        .is_some()
+    {
+        quarantine(arguments.collect())
+    } else if arguments
         .next_if(|argument| argument == "procedure")
         .is_some()
     {
@@ -194,6 +199,15 @@ fn with_secrets(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Err
 }
 
 /// Asks the attached TUI to deploy a host; see `deploy_command`.
+/// Lists, adopts or discards values hosts returned that the schema did
+/// not accept.
+fn quarantine(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_manager::quarantine_command::{parse, run};
+    let invocation = parse(arguments, env::current_dir()?)?;
+    println!("{}", run(&invocation, &runtime_directory(&home()?))?);
+    Ok(0)
+}
+
 fn deploy(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
     use nix_secrets_manager::deploy_command::{parse, run, Outcome};
     let invocation = parse(arguments, env::current_dir()?)?;

@@ -2,8 +2,8 @@
 
 ## Backend socket
 
-The socket is `$XDG_RUNTIME_DIR/nix-secrets/backend-v25-<hash>.sock`, where
-`<hash>` is 16 hex digits hashed from the canonical repository path and 25 is
+The socket is `$XDG_RUNTIME_DIR/nix-secrets/backend-v26-<hash>.sock`, where
+`<hash>` is 16 hex digits hashed from the canonical repository path and 26 is
 the compatibility version. A `.lock` file next to it belongs to the running
 backend. A starter never removes the socket of a backend that holds the lock.
 A backend whose socket is removed or replaced exits.
@@ -37,6 +37,10 @@ seconds old.
   the operator approves the replacement.
 - `generated_public_keys`, keyed by identifier, with `version_id` and
   `public_key`.
+- `quarantine`, keyed by a random id: values a host returned that the schema
+  did not accept, with `identifier`, `source_host`, `deployment_id`,
+  `quarantined_at`, `reason` and the record or public key. Nothing deploys
+  from it; `nix-secrets quarantine` adopts or discards each entry.
 
 The age plaintext is `NIXSECRT`, the byte `1`, a 2-byte big-endian identifier
 length, the identifier (at most 4096 bytes), the 16-byte version and the value

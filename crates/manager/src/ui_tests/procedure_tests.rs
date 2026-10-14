@@ -627,6 +627,7 @@ fn the_last_step_shows_the_result_in_the_procedure_dialog() {
                 generated: 0,
                 left_out: vec![],
                 missing: vec![],
+                quarantined: vec![],
             }),
         },
     );

@@ -44,6 +44,9 @@ pub struct HostMutationReview {
 pub struct ApprovalRequest {
     pub id: String,
     pub target: String,
+    /// Values this host returned earlier that sit in quarantine; shown
+    /// in red until the operator adopts or discards them.
+    pub quarantined: Vec<String>,
     pub host_mutations: Vec<HostMutationReview>,
     pub host_mutations_before_deploy: bool,
     pub connection_warnings: Vec<String>,
@@ -656,4 +659,6 @@ pub struct DeploySummary {
     pub left_out: Vec<String>,
     /// Values that could not be deployed, with why.
     pub missing: Vec<String>,
+    /// Host-returned values this deployment quarantined.
+    pub quarantined: Vec<String>,
 }

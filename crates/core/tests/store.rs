@@ -491,3 +491,43 @@ fn public_info_accepts_default_sha256_and_editor_versions_but_rejects_other_form
         Some(editor)
     );
 }
+
+/// A host-generated value the schema rejects is kept, marked, and never
+/// listed with the deployable values.
+#[test]
+fn quarantined_values_persist_apart_from_deployable_values() {
+    use nix_secrets_core::{QuarantinedContent, QuarantinedValue};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("nix-secrets.toml");
+    let store = SecretStore::new(&path);
+    let value = QuarantinedValue {
+        identifier: "ns1.services.app.token".into(),
+        source_host: "ns1".into(),
+        deployment_id: "deploy-1".into(),
+        quarantined_at: 1_791_958_347,
+        reason: "the target returned a generated record nobody requested".into(),
+        content: QuarantinedContent::GeneratedRecord {
+            format_version: 1,
+            version_id_base64: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+            recipient_ids: vec!["operator".into()],
+            age_ciphertext_base64: "YWdl".into(),
+            adopted: false,
+        },
+    };
+    let id = store.quarantine(value.clone()).unwrap();
+    let key = QuarantinedValue {
+        content: QuarantinedContent::PublicKey { public_key: "ssh-ed25519 AAAA".into() },
+        ..value.clone()
+    };
+    let key_id = store.quarantine(key.clone()).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("[quarantine."), "{text}");
+    let reopened = SecretStore::new(&path);
+    let listed = reopened.list_quarantine().unwrap();
+    assert_eq!(listed[&id], value);
+    assert_eq!(listed[&key_id], key);
+    assert!(reopened.list().unwrap().is_empty());
+    assert!(reopened.remove_quarantined(&id).unwrap());
+    assert!(!reopened.remove_quarantined(&id).unwrap());
+    assert_eq!(reopened.list_quarantine().unwrap().len(), 1);
+}

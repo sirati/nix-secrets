@@ -369,6 +369,9 @@ impl Frontend for Scripted {
             request.missing,
             request.skippable
         );
+        for line in &request.quarantined {
+            println!("quarantined: {line}");
+        }
         for (identifier, kind) in &request.missing_kinds {
             println!("missing-kind: {identifier}: {kind}");
         }
