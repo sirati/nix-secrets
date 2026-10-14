@@ -2,7 +2,7 @@
 
 use nix_secrets_crypto::AgeCommandProvider;
 use nix_secrets_deploy::{
-    deploy_together, install_public_default, load_and_validate_manifest, load_mock_values,
+    deploy_together, install_public_default, load_and_validate_leaving_out, load_mock_values,
     load_target_state, mock_install, recover, run_generated_tasks_with, run_value_generation,
     system_hostname, Deployer, DeploymentBatch, SecretDeployment, SystemHost,
 };
@@ -201,8 +201,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 not_deployed: generated.not_deployed,
             });
         }
-        let resolved = load_and_validate_manifest(path, &hostname, &local)
+        let (resolved, refused) = load_and_validate_leaving_out(path, &hostname, &local)
             .map_err(|error| format!("validating the batch against {}: {error}", path.display()))?;
+        // What this host's activation refuses is left out and reported; the
+        // rest is published as one generation.
+        let mut not_deployed = generated.not_deployed;
+        not_deployed.extend(refused);
+        let deployed = local
+            .requested_identifiers
+            .iter()
+            .filter(|identifier| !not_deployed.contains_key(*identifier))
+            .cloned()
+            .collect::<Vec<_>>();
         let audit_details = resolved.audit_details();
         let (secrets, public) = resolved.partition();
         let previous = if secrets.is_empty() && public.is_empty() {
@@ -213,7 +223,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
         let audit = audit::event(
             &hostname,
-            &local.requested_identifiers,
+            &deployed,
             &previous,
             &audit_details,
         )?;
@@ -242,7 +252,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             versions: current_versions(&deployer, &public_deployer)?,
             generated_public_keys: generated.public_keys,
             generated_records: values.records,
-            not_deployed: generated.not_deployed,
+            not_deployed: not_deployed,
         })
     })?;
     Ok(())

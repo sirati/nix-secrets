@@ -34,11 +34,26 @@ struct TargetLeaves {
 mod hostname;
 pub use hostname::system_hostname;
 
+/// Refuses the whole batch if any value cannot be accepted.
 pub fn load_and_validate_manifest(
     path: &Path,
     hostname: &str,
     batch: &DeploymentBatch,
 ) -> Result<ResolvedBatch, DeployError> {
+    let (resolved, left_out) = load_and_validate_leaving_out(path, hostname, batch)?;
+    match left_out.into_iter().next() {
+        None => Ok(resolved),
+        Some((identifier, reason)) => Err(DeployError::Invalid(format!("{identifier}: {reason}"))),
+    }
+}
+
+/// Validates the batch, and leaves out each value this host's activation
+/// cannot accept, with why. Anything malformed still refuses the batch.
+pub fn load_and_validate_leaving_out(
+    path: &Path,
+    hostname: &str,
+    batch: &DeploymentBatch,
+) -> Result<(ResolvedBatch, BTreeMap<String, String>), DeployError> {
     if !path.is_absolute() {
         return Err(DeployError::Invalid(
             "manifest path must be absolute".into(),
@@ -193,7 +208,7 @@ fn validate_manifest(
     schema: &Schema,
     hostname: &str,
     batch: &DeploymentBatch,
-) -> Result<ResolvedBatch, DeployError> {
+) -> Result<(ResolvedBatch, BTreeMap<String, String>), DeployError> {
     if !(nix_secrets_transport::LEGACY_DEPLOYMENT_PROTOCOL_VERSION..=nix_secrets_transport::DEPLOYMENT_PROTOCOL_VERSION)
         .contains(&u16::try_from(batch.version).unwrap_or(0))
     {
@@ -252,6 +267,7 @@ fn validate_manifest(
         ));
     }
     let mut entries = Vec::with_capacity(requested.len());
+    let mut left_out = BTreeMap::new();
     for requested_identifier in requested {
         let identifier = requested_identifier.to_owned();
         let manifest_entry = expected.remove(&identifier).ok_or_else(|| {
@@ -259,7 +275,6 @@ fn validate_manifest(
                 "requested secret is absent from manifest: {identifier}"
             ))
         })?;
-        let spec = expected_from_destination(&manifest_entry.service, &manifest_entry.destination)?;
         let supplied = supplied
             .get(identifier.as_str())
             .ok_or_else(|| DeployError::Invalid(format!("missing secret: {identifier}")))?;
@@ -272,14 +287,6 @@ fn validate_manifest(
             .decode(&supplied.contents_base64)
             .map_err(|_| DeployError::Invalid(format!("invalid base64 for {identifier}")))?;
         if let Some(public) = &manifest_entry.public_info {
-            let text = std::str::from_utf8(&contents)
-                .map_err(|_| DeployError::Invalid(format!("public-info value of {identifier} is not UTF-8")))?;
-            nix_secrets_core::schema::validate_ssh_known_hosts(
-                text,
-                &public.hosts(),
-                public.expected_ssh_port,
-            )
-            .map_err(|error| DeployError::Invalid(format!("{identifier}: {error}")))?;
             if manifest_entry.destination.path
                 != format!("/persistent/public-info/{}", public.shared_id)
             {
@@ -288,42 +295,15 @@ fn validate_manifest(
                 ));
             }
         }
-        if manifest_entry.destination.content_type.as_deref()
-            == Some("named-ssh-ed25519-public-keys")
-        {
-            validate_named_ssh_keys(&contents)?;
-        }
-        match manifest_entry.destination.content_type.as_deref() {
-            Some("openssh-private-key") => {
-                let text = std::str::from_utf8(&contents)
-                    .map_err(|_| DeployError::Invalid("SSH private key is not UTF-8".into()))?;
-                let key = ssh_key::PrivateKey::from_openssh(text)
-                    .map_err(|_| DeployError::Invalid("invalid OpenSSH private key".into()))?;
-                if key.is_encrypted() {
-                    return Err(DeployError::Invalid(
-                        "OpenSSH private key requires an interactive passphrase".into(),
-                    ));
-                }
+        // A value this host's activation cannot accept is left out and
+        // reported; the rest of the batch still deploys.
+        let (spec, audit_key_names) = match resolve_contents(&manifest_entry, &contents) {
+            Ok(resolved) => resolved,
+            Err(DeployError::Missing(reason)) => {
+                left_out.insert(identifier, reason);
+                continue;
             }
-            Some("openssh-public-key") => {
-                let text = std::str::from_utf8(&contents)
-                    .map_err(|_| DeployError::Invalid("SSH public key is not UTF-8".into()))?;
-                ssh_key::PublicKey::from_openssh(text.trim())
-                    .map_err(|_| DeployError::Invalid("invalid OpenSSH public key".into()))?;
-            }
-            _ => {}
-        }
-        let audit_key_names = if manifest_entry.destination.content_type.as_deref()
-            == Some("named-ssh-ed25519-public-keys")
-        {
-            std::str::from_utf8(&contents)
-                .expect("validated public key inventory is UTF-8")
-                .lines()
-                .filter_map(|line| line.split_ascii_whitespace().next())
-                .map(str::to_owned)
-                .collect()
-        } else {
-            Vec::new()
+            Err(error) => return Err(error),
         };
         entries.push(ResolvedSecret {
             identifier,
@@ -339,7 +319,63 @@ fn validate_manifest(
             audit_key_names,
         });
     }
-    Ok(ResolvedBatch { entries })
+    Ok((ResolvedBatch { entries }, left_out))
+}
+
+/// The value's owner and checked contents. `Missing` names why this host
+/// cannot accept it: its owner or group is absent, or the value does not
+/// match what this host's activation declares.
+fn resolve_contents(
+    manifest_entry: &ManifestEntry,
+    contents: &[u8],
+) -> Result<(Expected, Vec<String>), DeployError> {
+    let spec = expected_from_destination(&manifest_entry.service, &manifest_entry.destination)?;
+    let refuse = |reason: String| DeployError::Missing(format!("this host refuses the value: {reason}"));
+    if let Some(public) = &manifest_entry.public_info {
+        let text = std::str::from_utf8(contents)
+            .map_err(|_| refuse("public information is not UTF-8".into()))?;
+        nix_secrets_core::schema::validate_ssh_known_hosts(
+            text,
+            &public.hosts(),
+            public.expected_ssh_port,
+        )
+        .map_err(refuse)?;
+    }
+    let content_type = manifest_entry.destination.content_type.as_deref();
+    if content_type == Some("named-ssh-ed25519-public-keys") {
+        validate_named_ssh_keys(contents).map_err(|error| refuse(error.to_string()))?;
+    }
+    match content_type {
+        Some("openssh-private-key") => {
+            let text = std::str::from_utf8(contents)
+                .map_err(|_| refuse("SSH private key is not UTF-8".into()))?;
+            let key = ssh_key::PrivateKey::from_openssh(text)
+                .map_err(|_| refuse("invalid OpenSSH private key".into()))?;
+            if key.is_encrypted() {
+                return Err(refuse(
+                    "OpenSSH private key requires an interactive passphrase".into(),
+                ));
+            }
+        }
+        Some("openssh-public-key") => {
+            let text = std::str::from_utf8(contents)
+                .map_err(|_| refuse("SSH public key is not UTF-8".into()))?;
+            ssh_key::PublicKey::from_openssh(text.trim())
+                .map_err(|_| refuse("invalid OpenSSH public key".into()))?;
+        }
+        _ => {}
+    }
+    let audit_key_names = if content_type == Some("named-ssh-ed25519-public-keys") {
+        std::str::from_utf8(contents)
+            .expect("validated public key inventory is UTF-8")
+            .lines()
+            .filter_map(|line| line.split_ascii_whitespace().next())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok((spec, audit_key_names))
 }
 
 mod named_keys;

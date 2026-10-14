@@ -132,12 +132,12 @@ pub(super) fn expected_from_destination(
     crate::validate::validate_name("secret", secret)?;
     let owner = User::from_name(&destination.owner)
         .map_err(errno)?
-        .ok_or_else(|| DeployError::Invalid(format!("unknown owner: {}", destination.owner)))?
+        .ok_or_else(|| DeployError::Missing(format!("its owner {} does not exist on this host", destination.owner)))?
         .uid
         .as_raw();
     let group = Group::from_name(&destination.group)
         .map_err(errno)?
-        .ok_or_else(|| DeployError::Invalid(format!("unknown group: {}", destination.group)))?
+        .ok_or_else(|| DeployError::Missing(format!("its group {} does not exist on this host", destination.group)))?
         .gid
         .as_raw();
     let mode_text = destination

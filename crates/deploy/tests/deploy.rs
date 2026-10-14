@@ -187,3 +187,45 @@ fn generated_output_uses_manifest_and_atomic_generation() {
         Some("version-one")
     );
 }
+
+/// One value this host's activation cannot accept is left out with why, and
+/// the rest still deploys.
+#[test]
+fn a_value_this_host_refuses_is_left_out_and_the_rest_deploys() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = manifest(&temp, "0440");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["testhost"]["services"]["git"]["token"]["destination"]["owner"] = json!("no-such-owner-x");
+    value["testhost"]["services"]["trust"] = json!({"known-hosts": {
+        "kind": "public-info", "recipientPublicKeys": [], "recipientIds": [], "consumerUnits": [],
+        "sharedPublicId": "trust/known-hosts", "expectedSshHost": "report.example", "expectedSshPort": 22,
+        "destination": {"path": "/persistent/public-info/trust/known-hosts", "category": "public-info",
+            "owner": "root", "group": "root", "mode": "0644", "contentType": "ssh-known-hosts"}
+    }});
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+    let batch = DeploymentBatch {
+        version: 5,
+        requested_identifiers: vec![
+            "testhost.services.mail.password".into(),
+            "testhost.services.git.token".into(),
+            "testhost.services.trust.known-hosts".into(),
+        ],
+        entries: vec![
+            request("testhost.services.mail.password", b"secret"),
+            request("testhost.services.git.token", b"token"),
+            request("testhost.services.trust.known-hosts", format!("ns1.lamk.eu {key}\n").as_bytes()),
+        ],
+    };
+    let (resolved, refused) =
+        nix_secrets_deploy::load_and_validate_leaving_out(&path, "testhost", &batch).unwrap();
+    assert_eq!(resolved.audit_details().len(), 1);
+    assert!(refused["testhost.services.git.token"].contains("no-such-owner-x does not exist"));
+    assert!(refused["testhost.services.trust.known-hosts"].contains("names ns1.lamk.eu"));
+    let root = temp.path().join("secrets");
+    Deployer::at(&root).unwrap().deploy(&resolved).unwrap();
+    assert_eq!(fs::read(root.join("mail/service/password")).unwrap(), b"secret");
+    assert!(!root.join("git/service/token").exists());
+    // The strict loader, used where one value is the whole request, refuses.
+    assert!(load_and_validate_manifest(&path, "testhost", &batch).is_err());
+}

@@ -12,7 +12,9 @@ mod validate;
 
 pub use deploy::{deploy_together, recover, DeployError, Deployer};
 pub use generate::{run_value_generation, GeneratedValues, GenerationHost, SystemHost};
-pub use manifest::{load_and_validate_manifest, load_target_state, system_hostname};
+pub use manifest::{
+    load_and_validate_leaving_out, load_and_validate_manifest, load_target_state, system_hostname,
+};
 pub use mock::{load_mock_values, mock_install, MockReport};
 pub use public_default::install_public_default;
 pub use schema::{AuditDetail, DeploymentBatch, ResolvedBatch, SecretClass, SecretDeployment};
