@@ -47,6 +47,7 @@ fn secret_request(id: &str) -> SecretRequest {
         requester: ProcessInfo::read(std::process::id()),
         parent: None,
         procedure: None,
+        confirmation: None,
     }
 }
 fn signatures(manifest: &Manifest) -> Signatures {
@@ -772,5 +773,111 @@ fn without_a_tui_a_request_waits_and_its_countdown_starts_when_one_attaches() {
         answer(&mut tui, &request.id, "seen");
         assert_eq!(denial(waiting.join().unwrap()), "seen");
         tui.shutdown(std::net::Shutdown::Both).unwrap();
+    });
+}
+
+fn confirmation() -> Result<crate::procedure::Confirmation, String> {
+    crate::procedure::Confirmation::cleaned(
+        "deployed from a dirty tree",
+        "the operator's tree has uncommitted changes",
+        &["M flake.nix".into(), "?? new.nix".into()],
+    )
+}
+
+/// What the requester of a confirmation reads back.
+fn confirmed(client: &mut UnixStream) -> Result<bool, String> {
+    match read_json::<Response>(client).unwrap().expect("no answer") {
+        Response::ProcedureConfirmation { confirmed } => Ok(confirmed),
+        Response::Error { message } => Err(message),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn a_confirmation_needs_a_tui_and_a_procedure_and_fails_at_once_without() {
+    let operators = Operators::default();
+    let (_, token) = operators
+        .procedures
+        .begin(std::process::id(), "Update ns1", Some(3))
+        .unwrap();
+    let (mut requester, mut client) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let started = Instant::now();
+    request_confirmation(&mut requester, &operators, std::process::id(), token.clone(), confirmation())
+        .unwrap();
+    assert_eq!(confirmed(&mut client), Err(NO_OPERATOR.into()));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // No step was used up by the refusal.
+    assert_eq!(operators.procedures.snapshot()[0].step, 0);
+    request_confirmation(&mut requester, &operators, std::process::id(), token, Err("bad".into()))
+        .unwrap();
+    assert_eq!(confirmed(&mut client), Err("bad".into()));
+}
+
+#[test]
+fn only_an_explicit_confirmation_confirms_and_nothing_counts_it_down() {
+    let deadline = Duration::from_millis(200);
+    let operators = Operators::default().with_timing(deadline, Duration::from_secs(30));
+    let (mut backend, tui) = UnixStream::pair().unwrap();
+    tui.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let (_, token) = operators
+        .procedures
+        .begin(std::process::id(), "Update ns1", Some(3))
+        .unwrap();
+    thread::scope(|scope| {
+        let mut tui = tui;
+        scope.spawn(|| attach(&mut backend, &operators, 1, std::process::id()));
+        assert!(matches!(next_frame(&mut tui), Response::OperatorAttached));
+        next_frame(&mut tui);
+        let operators = &operators;
+        let ask = |token: String| {
+            let (mut requester, client) = UnixStream::pair().unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let asking = scope.spawn(move || {
+                request_confirmation(&mut requester, operators, std::process::id(), token, confirmation())
+                    .unwrap();
+                requester
+            });
+            (asking, client)
+        };
+        let answers = [
+            (SecretAnswer::Confirmed, Ok(true)),
+            (SecretAnswer::Denied { reason: "no".into() }, Ok(false)),
+            // An older TUI that showed it as a request for no values.
+            (SecretAnswer::Approved { values: vec![] }, Ok(false)),
+        ];
+        for (number, (answer, expected)) in answers.into_iter().enumerate() {
+            let (asking, mut client) = ask(token.clone());
+            // Asked about the current step, which it neither advances nor
+            // announces: the declared steps stay right.
+            let request = requested(&mut tui);
+            assert_eq!(request.procedure.as_ref().unwrap().step, number as u32);
+            assert_eq!(request.confirmation, confirmation().ok());
+            assert_eq!(request.procedure.as_ref().unwrap().label, "deployed from a dirty tree");
+            assert!(request.identifiers.is_empty());
+            // Even the first step of a procedure waits past any deadline.
+            assert!(!request.countdown());
+            std::thread::sleep(deadline * 3);
+            write_json(
+                &mut tui,
+                &Request::AnswerSecretRequest { request_id: request.id, answer },
+            )
+            .unwrap();
+            assert_eq!(confirmed(&mut client), expected);
+            asking.join().unwrap();
+            // The next real step is numbered as if nothing was confirmed.
+            let step = operators
+                .advance(&token, std::process::id(), "sign closure", false, false)
+                .unwrap();
+            assert_eq!(step.step, number as u32 + 1);
+            next_frame(&mut tui);
+        }
+        // A TUI that goes away while asked declines rather than waiting.
+        let (asking, mut client) = ask(token.clone());
+        requested(&mut tui);
+        tui.shutdown(std::net::Shutdown::Both).unwrap();
+        let declined = confirmed(&mut client);
+        assert!(declined.as_ref().is_err_and(|message| message.contains("went away")), "{declined:?}");
+        asking.join().unwrap();
     });
 }

@@ -201,6 +201,30 @@ impl Procedures {
         })
     }
 
+    /// Verifies that `peer` may act in the procedure of `token` and returns
+    /// its current step relabelled `label`, for a prompt about that step
+    /// such as a confirmation. Nothing changes: no step is numbered, so a
+    /// declared total stays right, and the TUIs are not told.
+    pub(super) fn annotate(
+        &self,
+        token: &str,
+        peer: u32,
+        label: &str,
+    ) -> Result<ProcedureStep, String> {
+        let label = clean_text(label, MAX_LABEL_BYTES);
+        if label.is_empty() {
+            return Err("a confirmation needs a label".into());
+        }
+        self.joined(token, peer, |procedure| ProcedureStep {
+            label,
+            deployment: false,
+            failure: None,
+            warning: None,
+            progress: None,
+            ..procedure.step.clone()
+        })
+    }
+
     /// Runs `change` on the procedure of `token` once `peer` may act in it.
     fn joined<T>(
         &self,
@@ -493,6 +517,27 @@ mod tests {
         assert!(procedures.warn_step(&forged, own, "x", "y").is_err());
         assert!(procedures.warn_step("garbage", own, "x", "y").is_err());
         assert_eq!(procedures.snapshot().iter().find(|s| s.id == id).unwrap().step, 6);
+    }
+
+    #[test]
+    fn an_annotation_checks_the_token_and_numbers_nothing() {
+        let procedures = Procedures::default();
+        let own = std::process::id();
+        let (_, token) = procedures.begin(own, "Update ns1", Some(3)).unwrap();
+        let note = procedures
+            .annotate(&token, own, "deployed from a dirty tree\x07")
+            .unwrap();
+        assert_eq!((note.step, note.label.as_str()), (0, "deployed from a dirty tree"));
+        let first = procedures.next_step(&token, own, "sign closure", false, false).unwrap();
+        assert_eq!(first.step, 1);
+        let note = procedures.annotate(&token, own, "again").unwrap();
+        assert_eq!((note.step, note.steps), (1, Some(3)));
+        let (id, _) = split_token(&token).unwrap();
+        let live = procedures.snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!((live.step, live.label.as_str()), (1, "sign closure"));
+        assert!(procedures.annotate(&token, own, " \x07 ").is_err());
+        let forged = format!("{id}:{}", "0".repeat(64));
+        assert!(procedures.annotate(&forged, own, "x").is_err());
     }
 
     #[test]

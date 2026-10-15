@@ -56,6 +56,7 @@ fn prompt(id: &str, deadline: Instant) -> SecretPrompt {
         parent: Some(process(41, &["nmbl-install", "--target", "dns-vps"])),
         deadline: Some(deadline),
         procedure: None,
+        confirmation: None,
     }
 }
 

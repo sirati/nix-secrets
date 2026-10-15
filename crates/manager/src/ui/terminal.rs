@@ -187,6 +187,7 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
                     exclusive: true,
                     styled: None,
                     min_width: 0,
+                    danger: false,
                     line_targets: None,
                 },
             );
@@ -214,6 +215,7 @@ fn render_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hits:
                     exclusive: false,
                     styled: None,
                     min_width: 0,
+                    danger: false,
                     line_targets: None,
                 },
             );
@@ -262,6 +264,7 @@ fn render_mode_modal(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, 
             exclusive: true,
             styled: None,
             min_width: 0,
+            danger: false,
             line_targets: None,
         },
     );
@@ -296,6 +299,8 @@ struct Dialog<'a> {
     /// cutting it; the dialog is never narrower when the screen allows it,
     /// and scrolls vertically instead.
     min_width: u16,
+    /// A warning that needs the operator.s attention: red border and title.
+    danger: bool,
     /// Clickable body lines at an inner width, and what a click on them does.
     line_targets: Option<LineTargets<'a>>,
 }
@@ -335,6 +340,7 @@ fn approval_dialog<'a>(model: &'a Model, request: &'a ApprovalRequest, footer: V
             deploy_view::approval_lines(request, model.message_text(), model.approval_details, width)
         })),
         min_width: deploy_view::needed_width(request, model.approval_details) as u16 + 2,
+        danger: false,
         line_targets: Some(Box::new(move |width| {
             deploy_view::checkbox_lines(request, model.message_text(), model.approval_details, width)
                 .into_iter()
@@ -448,6 +454,12 @@ fn draw_dialog(
     let mut block = Block::default()
         .title(dialog.title.as_str())
         .borders(Borders::ALL);
+    if dialog.danger {
+        let red = Style::default().fg(Color::Red);
+        block = block
+            .border_style(red)
+            .title_style(red.add_modifier(ratatui::style::Modifier::BOLD));
+    }
     if let Some(note) = dialog.note {
         block = block.title_bottom(Line::from(note).right_aligned());
     }
@@ -674,6 +686,7 @@ fn render_between(frame: &mut ratatui::Frame<'_>, model: &Model, area: Rect, hit
             exclusive: true,
             styled: None,
             min_width: 0,
+            danger: false,
             line_targets: None,
         },
     );
@@ -693,6 +706,10 @@ fn render_secret_request(
     let Some(prompt) = model.shown_prompt() else {
         return;
     };
+    if prompt.confirmation.is_some() {
+        render_confirmation(frame, model, prompt, area, hits);
+        return;
+    }
     let mut footer = vec![
         Button::new("Ctrl+Shift+Y Yes, send", MouseTarget::ConfirmLoss),
         Button::new("n Deny", MouseTarget::Shortcut(Shortcut::Character('n'))),
@@ -735,6 +752,44 @@ fn render_secret_request(
             exclusive: true,
             styled: None,
             min_width: 0,
+            danger: false,
+            line_targets: None,
+        },
+    );
+}
+
+/// A confirmation from `nix-secrets procedure-confirm`: a red warning that
+/// only y confirms.
+fn render_confirmation(
+    frame: &mut ratatui::Frame<'_>,
+    model: &Model,
+    prompt: &crate::operator_channel::SecretPrompt,
+    area: Rect,
+    hits: &mut HitMap,
+) {
+    let footer = vec![
+        Button::new("y Yes, confirm", MouseTarget::Shortcut(Shortcut::Character('y'))),
+        Button::new("n Decline", MouseTarget::Shortcut(Shortcut::Character('n'))),
+        Button::new("Esc Decline", MouseTarget::Shortcut(Shortcut::Escape)),
+        Button::new("m Minimise", MouseTarget::Shortcut(Shortcut::Character('m'))),
+    ];
+    draw_dialog(
+        frame,
+        model,
+        area,
+        hits,
+        Dialog {
+            title: format!(" WARNING · {} ", super::secret_request::dialog_title(prompt)),
+            body: Box::new(|_| super::secret_request::confirmation_body(prompt)),
+            padded: true,
+            note: None,
+            scroll: model.secret_scroll,
+            selector: None,
+            footer: Some(footer),
+            exclusive: true,
+            styled: None,
+            min_width: 0,
+            danger: true,
             line_targets: None,
         },
     );

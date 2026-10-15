@@ -20,6 +20,7 @@ pub mod login_signer;
 pub mod operator_channel;
 pub mod pipe_secret;
 pub mod procedure_command;
+pub mod procedure_confirm;
 pub mod secret_values;
 pub mod socket;
 pub mod startup;

@@ -283,6 +283,10 @@ impl AsyncWriter {
                         self.secret_activity.remove(&id);
                         self.completions.push(Completion::ArtifactSignatureFinished { id, requester, result });
                     }
+                    ChannelEvent::ConfirmationFinished { id, requester, result } => {
+                        self.secret_activity.remove(&id);
+                        self.completions.push(Completion::ConfirmationFinished { id, requester, result });
+                    }
                     ChannelEvent::Lost(error) => {
                         // Requests on screen cannot be answered on the lost
                         // channel; the backend sends them again.

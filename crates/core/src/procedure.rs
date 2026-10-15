@@ -20,6 +20,9 @@
 //! `nix-secrets procedure-step-progress` reports what the current step does
 //! right now ([`crate::Request::ReportProcedureProgress`]); it never numbers a
 //! step.
+//! `nix-secrets procedure-confirm` asks the operator to confirm a risky step
+//! ([`crate::Request::ConfirmProcedureStep`], [`Confirmation`]) and waits for
+//! the answer; it numbers no step either.
 use serde::{Deserialize, Serialize};
 
 /// The environment variable carrying a procedure token to requesters.
@@ -151,6 +154,73 @@ pub fn clean_text(text: &str, max_bytes: usize) -> String {
     cleaned.trim().to_owned()
 }
 
+/// The most items one confirmation may list.
+pub const MAX_CONFIRMATION_ITEMS: usize = 1000;
+/// The longest item of a confirmation, such as a file name.
+pub const MAX_CONFIRMATION_ITEM_BYTES: usize = 1024;
+
+/// What `nix-secrets procedure-confirm` asks the operator to confirm: a
+/// step with a risk, its reason and what it concerns, such as the dirty
+/// files of a git tree. Only an explicit answer from the operator confirms
+/// it; see [`crate::Request::ConfirmProcedureStep`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Confirmation {
+    pub label: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<String>,
+}
+
+impl Confirmation {
+    /// Cleans requester-supplied text, as for any reported step, and bounds
+    /// the list. The label must not be empty.
+    pub fn cleaned(label: &str, reason: &str, items: &[String]) -> Result<Self, String> {
+        let label = clean_text(label, MAX_LABEL_BYTES);
+        if label.is_empty() {
+            return Err("a confirmation needs a label".into());
+        }
+        if items.len() > MAX_CONFIRMATION_ITEMS {
+            return Err(format!(
+                "a confirmation lists at most {MAX_CONFIRMATION_ITEMS} items"
+            ));
+        }
+        let reason = match clean_text(reason, MAX_REASON_BYTES) {
+            reason if reason.is_empty() => "no reason given".to_owned(),
+            reason => reason,
+        };
+        let items = items
+            .iter()
+            .map(|item| clean_text(item, MAX_CONFIRMATION_ITEM_BYTES))
+            .filter(|item| !item.is_empty())
+            .collect();
+        Ok(Self {
+            label,
+            reason,
+            items,
+        })
+    }
+
+    /// Whether it is as [`Self::cleaned`] leaves it; the TUI shows nothing
+    /// else.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let clean = |text: &str, max: usize| {
+            !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
+        };
+        if !clean(&self.label, MAX_LABEL_BYTES)
+            || !clean(&self.reason, MAX_REASON_BYTES)
+            || self.items.len() > MAX_CONFIRMATION_ITEMS
+            || !self
+                .items
+                .iter()
+                .all(|item| clean(item, MAX_CONFIRMATION_ITEM_BYTES))
+        {
+            return Err("the confirmation is malformed");
+        }
+        Ok(())
+    }
+}
+
 /// Splits a token into its public id and its secret part.
 pub fn split_token(token: &str) -> Option<(&str, &str)> {
     let (id, secret) = token.split_once(':')?;
@@ -216,5 +286,30 @@ mod tests {
         assert_eq!(split_token("proc-1:abc"), Some(("proc-1", "abc")));
         assert_eq!(split_token("proc-1:"), None);
         assert_eq!(split_token("nocolon"), None);
+    }
+
+    #[test]
+    fn confirmations_are_cleaned_bounded_and_validated() {
+        let confirmation = Confirmation::cleaned(
+            " deployed from a dirty tree\x07",
+            "",
+            &["M flake.nix".into(), "\x1b[2J".into(), " ?? new.nix ".into()],
+        )
+        .unwrap();
+        assert_eq!(confirmation.label, "deployed from a dirty tree");
+        assert_eq!(confirmation.reason, "no reason given");
+        assert_eq!(confirmation.items, ["M flake.nix", "[2J", "?? new.nix"]);
+        assert!(confirmation.validate().is_ok());
+        assert!(Confirmation::cleaned(" \x07 ", "r", &[]).is_err());
+        let many = vec!["x".to_owned(); MAX_CONFIRMATION_ITEMS + 1];
+        assert!(Confirmation::cleaned("l", "r", &many).is_err());
+        let long = Confirmation::cleaned("l", "r", &["y".repeat(5000)]).unwrap();
+        assert_eq!(long.items[0].len(), MAX_CONFIRMATION_ITEM_BYTES);
+        let mut bad = confirmation.clone();
+        bad.items.push("a\nb".into());
+        assert!(bad.validate().is_err());
+        let mut bad = confirmation;
+        bad.label.clear();
+        assert!(bad.validate().is_err());
     }
 }

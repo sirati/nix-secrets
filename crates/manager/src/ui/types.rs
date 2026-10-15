@@ -169,6 +169,13 @@ pub enum Completion {
         requester: String,
         result: Result<(), String>,
     },
+    /// The operator answered a confirmation; `Err` says why it was not
+    /// confirmed.
+    ConfirmationFinished {
+        id: String,
+        requester: String,
+        result: Result<(), String>,
+    },
     /// A commit failed; carries git's full error output.
     CommitFailed(String),
 }
@@ -179,7 +186,8 @@ impl Completion {
         match self {
             Self::SecretRequestFinished { id, .. }
             | Self::SshSignatureFinished { id, .. }
-            | Self::ArtifactSignatureFinished { id, .. } => Some(id),
+            | Self::ArtifactSignatureFinished { id, .. }
+            | Self::ConfirmationFinished { id, .. } => Some(id),
             _ => None,
         }
     }

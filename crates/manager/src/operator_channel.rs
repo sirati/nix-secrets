@@ -14,7 +14,7 @@ use crate::secret_values::{self, RequestedValue};
 use crate::socket::connect_verified;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use nix_secrets_core::framing::{read_json, write_json, write_json_sensitive};
-use nix_secrets_core::procedure::ProcedureStep;
+use nix_secrets_core::procedure::{Confirmation, ProcedureStep};
 use nix_secrets_core::secret_request::{ProcessInfo, SecretAnswer, SecretRequest, SecretValue};
 use nix_secrets_core::{Request, Response, Schema};
 use nix_secrets_crypto::CryptoProvider;
@@ -51,6 +51,9 @@ pub struct SecretPrompt {
     pub deadline: Option<Instant>,
     /// The procedure step the backend verified, if the request has one.
     pub procedure: Option<ProcedureStep>,
+    /// A risky step to confirm, from `nix-secrets procedure-confirm`: shown
+    /// as a red warning, confirmed only with `y`, never counting down.
+    pub confirmation: Option<Confirmation>,
 }
 
 impl SecretPrompt {
@@ -103,6 +106,12 @@ pub enum ChannelEvent {
         result: Result<(), String>,
     },
     ArtifactSignatureFinished {
+        id: String,
+        requester: String,
+        result: Result<(), String>,
+    },
+    /// The operator confirmed a step, or `Err` says why it was not.
+    ConfirmationFinished {
         id: String,
         requester: String,
         result: Result<(), String>,
@@ -459,6 +468,9 @@ fn handle(
             request, signature, client, schema, provider, identity, events, decisions,
         );
     }
+    if let Some(confirmation) = &request.confirmation {
+        return handle_confirmation(request, confirmation, events, decisions);
+    }
     if let Some(login) = &request.ssh_login {
         return handle_login_grant(request, login, schema, events, decisions, agent);
     }
@@ -475,6 +487,7 @@ fn handle(
         closure_signature: false,
         deadline: deadline_for(request),
         procedure: request.procedure.clone(),
+        confirmation: None,
     };
     let label = prompt_for(Vec::new()).requester_label();
     let deny = |reason: String| {
@@ -533,6 +546,68 @@ fn handle(
     }
 }
 
+/// Asks the operator to confirm a risky step of a procedure. Only the
+/// operator's explicit approval confirms it; nothing here does on its own.
+fn handle_confirmation(
+    request: &SecretRequest,
+    confirmation: &Confirmation,
+    events: &Sender<ChannelEvent>,
+    decisions: &Decisions,
+) -> (SecretAnswer, ChannelEvent) {
+    let prompt = SecretPrompt {
+        id: request.id.clone(),
+        values: Vec::new(),
+        identity: String::new(),
+        requester: request.requester.clone(),
+        parent: request.parent.clone(),
+        reason: None,
+        ssh_signature: false,
+        ssh_login: false,
+        artifact_signature: false,
+        closure_signature: false,
+        // A confirmation waits for the operator, however long they take.
+        deadline: None,
+        procedure: request.procedure.clone(),
+        confirmation: Some(confirmation.clone()),
+    };
+    let label = prompt.requester_label();
+    let finished = |result: Result<(), String>| ChannelEvent::ConfirmationFinished {
+        id: request.id.clone(),
+        requester: label.clone(),
+        result,
+    };
+    let deny = |reason: String| {
+        (
+            SecretAnswer::Denied {
+                reason: reason.clone(),
+            },
+            finished(Err(reason)),
+        )
+    };
+    let alone = request.identifiers.is_empty()
+        && request.ssh_signature.is_none()
+        && request.ssh_login.is_none()
+        && request.artifact_signature.is_none()
+        && request.closure_signature.is_none();
+    if !alone {
+        return deny("a confirmation asks for nothing else".into());
+    }
+    if request.procedure.is_none() {
+        return deny("a confirmation must belong to a procedure".into());
+    }
+    if let Err(error) = confirmation.validate() {
+        return deny(error.into());
+    }
+    if events.send(ChannelEvent::Prompt(prompt)).is_err() {
+        return deny("the nix-secrets TUI closed".into());
+    }
+    match decisions.wait(None) {
+        Waited::Approved => (SecretAnswer::Confirmed, finished(Ok(()))),
+        Waited::Denied => deny("the operator declined".into()),
+        other => deny(not_approved(other, "the confirmation")),
+    }
+}
+
 /// A login approval: its signer and what is left of it.
 struct Grant {
     login: nix_secrets_core::ssh_auth::LoginGrantRequest,
@@ -587,6 +662,7 @@ fn ssh_prompt(
         closure_signature: false,
         deadline: deadline_for(request),
         procedure: request.procedure.clone(),
+        confirmation: None,
     }
 }
 
@@ -831,6 +907,7 @@ mod tests {
                 requester: ProcessInfo::read(std::process::id()),
                 parent: None,
                 procedure: None,
+                confirmation: None,
             };
             write_json(&mut operator, &Response::SecretRequested { request }).unwrap();
             // The handler's own connection.

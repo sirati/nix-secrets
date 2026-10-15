@@ -229,6 +229,11 @@ fn handle_requests(
                 secrets::request_login_grant(&mut stream, operators, peer_pid, request, reason, procedure, progress, grants)?;
                 continue;
             }
+            Request::ConfirmProcedureStep { procedure, label, reason, items } => {
+                let confirmation = crate::procedure::Confirmation::cleaned(&label, &reason, &items);
+                secrets::request_confirmation(&mut stream, operators, peer_pid, procedure, confirmation)?;
+                continue;
+            }
             Request::RequestArtifactSignatures { request, reason, procedure, progress } => {
                 let fresh = match schema_loader.map(|load| load()).transpose() {
                     Ok(fresh) => fresh,
@@ -508,6 +513,7 @@ fn handle_requests(
             | Request::RequestClosureSignatures { .. }
             | Request::RequestSshSignature { .. }
             | Request::RequestSshLoginGrant { .. }
+            | Request::ConfirmProcedureStep { .. }
             | Request::BeginProcedure { .. } => unreachable!("handled above"),
         }
         .unwrap_or_else(|error| Response::Error {

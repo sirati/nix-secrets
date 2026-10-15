@@ -37,11 +37,16 @@ pub enum StepKind {
     /// A step the procedure's command reported as failed or warned about;
     /// nothing was asked.
     Reported,
+    /// A risky step the operator confirmed or declined; a confirmation is
+    /// listed as a warning.
+    Confirmation,
 }
 
 impl StepKind {
     fn of(prompt: &SecretPrompt) -> Self {
-        if prompt.closure_signature {
+        if prompt.confirmation.is_some() {
+            Self::Confirmation
+        } else if prompt.closure_signature {
             Self::Closure
         } else if prompt.artifact_signature {
             Self::Artifacts
@@ -64,6 +69,7 @@ impl StepKind {
             Self::Closure => "closure signed",
             Self::Deployment => "secrets deployed",
             Self::Reported => "reported",
+            Self::Confirmation => "confirmed",
         }
     }
 }
@@ -133,7 +139,11 @@ impl FinishedStep {
     /// regressed` or `✗ step 2/3: SSH authentication to update@ns1: the
     /// operator denied SSH authentication`.
     pub fn line(&self) -> String {
-        if self.outcome == StepOutcome::Warning {
+        if self.kind == StepKind::Confirmation {
+            // Unnumbered: it does not count towards the declared steps.
+            let mark = if self.succeeded() { "⚠" } else { "✗" };
+            format!("{mark} {}: {}", self.step.label, self.text)
+        } else if self.outcome == StepOutcome::Warning {
             format!("⚠ {}: {}: {}", self.step.position(), self.step.label, self.text)
         } else if self.succeeded() {
             format!("✓ {}: {}", self.step.position(), self.text)
@@ -145,13 +155,14 @@ impl FinishedStep {
     /// `timed out at step 1/3: sign closure for ns1`, for a step that did
     /// not succeed.
     pub fn missed(&self) -> Option<String> {
-        (!self.succeeded()).then(|| {
-            format!(
+        (!self.succeeded()).then(|| match self.kind {
+            StepKind::Confirmation => format!("{}: {}", self.outcome.verb(), self.step.label),
+            _ => format!(
                 "{} at {}: {}",
                 self.outcome.verb(),
                 self.step.position(),
                 self.step.label
-            )
+            ),
         })
     }
 }
@@ -558,7 +569,11 @@ impl Model {
         let id = prompt_procedure(&prompt);
         let title = super::super::ui::secret_request::title(&prompt);
         let step = prompt.procedure.clone();
-        let procedure = self.ensure_procedure(&id, || title, step.as_ref());
+        // A confirmation is asked about the current step and is none of its
+        // own: it leaves what the procedure knows of its steps alone.
+        let known = self.procedure(&id).is_some();
+        let current = step.as_ref().filter(|_| !(prompt.confirmation.is_some() && known));
+        let procedure = self.ensure_procedure(&id, || title, current);
         let was_waiting = !procedure.prompts.is_empty();
         if let (false, Some(step)) = (procedure.implicit, step) {
             procedure.in_flight.push(InFlight {
@@ -793,6 +808,11 @@ impl Model {
                 .any(|procedure| procedure.finished.iter().any(|step| step.request == request));
         };
         let (outcome, text) = match outcome {
+            // Confirming a risky step stays visible as a warning.
+            Ok(text) if flight.kind == StepKind::Confirmation => (
+                StepOutcome::Warning,
+                text.unwrap_or_else(|| flight.kind.done().into()),
+            ),
             Ok(text) => (
                 StepOutcome::Done,
                 text.unwrap_or_else(|| flight.kind.done().into()),

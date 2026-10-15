@@ -158,6 +158,7 @@ pub(crate) fn handle(
         closure_signature: false,
         deadline: deadline_for(request),
         procedure: request.procedure.clone(),
+        confirmation: None,
     };
     let deadline = prompt.deadline;
     if events.send(ChannelEvent::Prompt(prompt)).is_err() {

@@ -256,6 +256,20 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         percent: Option<u8>,
     },
+    /// From inside a procedure: asks the operator to confirm the step
+    /// `label`, which carries a risk, `reason`, concerning `items`. Same
+    /// token and descendant checks as [`Request::FailProcedureStep`]; it
+    /// becomes the next step. Without an attached TUI it fails at once;
+    /// otherwise it waits, without a deadline, for the operator. Answers
+    /// [`Response::ProcedureConfirmation`].
+    ConfirmProcedureStep {
+        /// The token from [`crate::procedure::PROCEDURE_ENVIRONMENT`].
+        procedure: String,
+        label: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        items: Vec<String>,
+    },
     /// The schema document the backend evaluated; see
     /// [`Response::SchemaDocument`]. A TUI that finds requests waiting uses it
     /// instead of evaluating the repository again.
@@ -365,6 +379,11 @@ pub enum Response {
     SecretSessionEnded,
     SshSignature {
         reply: Vec<u8>,
+    },
+    /// The operator's answer to [`Request::ConfirmProcedureStep`]: `true`
+    /// only when they confirmed it.
+    ProcedureConfirmation {
+        confirmed: bool,
     },
     /// The operator approved the SSH logins. The grant lasts
     /// `expires_in_seconds` and covers `signatures` logins.
@@ -591,5 +610,36 @@ mod tests {
             Response::ProcedureUpdate { procedure } => assert_eq!(procedure, step),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_confirmation_request_and_its_answer_round_trip() {
+        let json = serde_json::to_value(Request::ConfirmProcedureStep {
+            procedure: "proc-1-ab:secret".into(),
+            label: "deployed from a dirty tree".into(),
+            reason: "uncommitted changes".into(),
+            items: vec!["M flake.nix".into()],
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"operation": "confirm-procedure-step",
+                "procedure": "proc-1-ab:secret", "label": "deployed from a dirty tree",
+                "reason": "uncommitted changes", "items": ["M flake.nix"]})
+        );
+        let without = serde_json::json!({"operation": "confirm-procedure-step",
+            "procedure": "p:s", "label": "l", "reason": "r"});
+        assert!(matches!(
+            serde_json::from_value::<Request>(without).unwrap(),
+            Request::ConfirmProcedureStep { items, .. } if items.is_empty()
+        ));
+        let answer = serde_json::to_string(&Response::ProcedureConfirmation { confirmed: true })
+            .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Response>(&answer).unwrap(),
+            Response::ProcedureConfirmation { confirmed: true }
+        ));
+        let confirmed = serde_json::to_value(crate::secret_request::SecretAnswer::Confirmed).unwrap();
+        assert_eq!(confirmed, serde_json::json!({"answer": "confirmed"}));
     }
 }

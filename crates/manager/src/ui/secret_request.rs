@@ -8,6 +8,9 @@
 //! restores the next waiting one. A request outside a procedure, or the
 //! first step of one, denies itself after
 //! [`crate::operator_channel::DECISION_TIMEOUT`] unless c cancels that.
+//!
+//! A confirmation from `nix-secrets procedure-confirm` is a red warning
+//! instead: only y confirms, n and Esc decline, and it never counts down.
 use super::*;
 use crate::operator_channel::SecretPrompt;
 use nix_secrets_core::secret_request::ProcessInfo;
@@ -35,6 +38,9 @@ pub(super) fn intercept(
     let Some(prompt) = model.shown_prompt() else {
         return between(model, event);
     };
+    if prompt.confirmation.is_some() {
+        return confirmation(model, event, writer);
+    }
     let decision = match event {
         UiEvent::Hover(target) => {
             model.hover = *target;
@@ -105,6 +111,90 @@ pub(super) fn intercept(
         model.fail(error);
     }
     true
+}
+
+/// Handles input while a confirmation is shown. Only y (or its button)
+/// confirms; n and Esc decline. The list scrolls, m and M move between
+/// procedures, and every other key does nothing.
+fn confirmation(model: &mut Model, event: &UiEvent, writer: &mut impl SecretWriter) -> bool {
+    let confirmed = match event {
+        UiEvent::Hover(target) => {
+            model.hover = *target;
+            return true;
+        }
+        UiEvent::Approval(request) => {
+            model.offer_approval(request.clone());
+            return true;
+        }
+        UiEvent::Up | UiEvent::Down => {
+            model.secret_scroll = model.scrolled(model.secret_scroll, *event == UiEvent::Down);
+            return true;
+        }
+        UiEvent::Character('m')
+        | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Character('m'))) => {
+            model.minimise();
+            return true;
+        }
+        UiEvent::Character('M') => {
+            if let Err(reason) = model.restore_next() {
+                model.inform(reason);
+            }
+            return true;
+        }
+        UiEvent::Click(MouseTarget::Procedure(index)) => {
+            restore(model, *index);
+            return true;
+        }
+        UiEvent::Character('y')
+        | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Character('y'))) => true,
+        UiEvent::Character('n')
+        | UiEvent::Escape
+        | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Escape | Shortcut::Character('n'))) => {
+            false
+        }
+        _ => return true,
+    };
+    let prompt = model.take_shown_prompt(confirmed).expect("a prompt is shown");
+    if let Err(error) = writer.answer_secret(&prompt.id, confirmed, 0) {
+        model.fail(error);
+    }
+    true
+}
+
+/// Items a confirmation lists before it counts the rest.
+pub(crate) const CONFIRMATION_ITEMS_SHOWN: usize = 40;
+
+/// The body of a confirmation: what is at stake, why, and what it
+/// concerns. A long list is cut with a `+N more` line; the body scrolls.
+pub(crate) fn confirmation_body(prompt: &SecretPrompt) -> String {
+    let Some(confirmation) = &prompt.confirmation else {
+        return String::new();
+    };
+    let mut lines = vec![
+        format!("{} asks you to confirm:", title(prompt)),
+        String::new(),
+        confirmation.label.clone(),
+        String::new(),
+        confirmation.reason.clone(),
+    ];
+    if !confirmation.items.is_empty() {
+        lines.push(String::new());
+        let count = confirmation.items.len();
+        lines.push(format!("{count} item{}:", if count == 1 { "" } else { "s" }));
+        lines.extend(
+            confirmation
+                .items
+                .iter()
+                .take(CONFIRMATION_ITEMS_SHOWN)
+                .map(|item| format!("  {item}")),
+        );
+        if count > CONFIRMATION_ITEMS_SHOWN {
+            lines.push(format!("  +{} more", count - CONFIRMATION_ITEMS_SHOWN));
+        }
+    }
+    lines.push(String::new());
+    lines.push("y: confirm · n or Esc: decline".into());
+    lines.join("\n")
 }
 
 /// Handles input while a procedure dialog shows what happens between its
@@ -252,7 +342,9 @@ fn program_name(process: &ProcessInfo) -> String {
 pub(crate) fn title(prompt: &SecretPrompt) -> String {
     format!(
         "{} from {} (pid {})",
-        if prompt.closure_signature {
+        if prompt.confirmation.is_some() {
+            "Confirmation request"
+        } else if prompt.closure_signature {
             "Closure signing request"
         } else if prompt.artifact_signature {
             "Artifact signing request"
@@ -270,6 +362,10 @@ pub(crate) fn title(prompt: &SecretPrompt) -> String {
 /// own, who asked.
 pub(crate) fn dialog_title(prompt: &SecretPrompt) -> String {
     match &prompt.procedure {
+        // A confirmation is about a step, not one of its own.
+        Some(step) if prompt.confirmation.is_some() => {
+            format!("{} · confirm: {}", step.title, step.label)
+        }
         Some(step) => format!("{} · {}: {}", step.title, step.position(), step.label),
         None => title(prompt),
     }

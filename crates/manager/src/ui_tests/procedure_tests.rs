@@ -93,6 +93,7 @@ fn prompt(id: &str, procedure: Option<ProcedureStep>) -> SecretPrompt {
         closure_signature: false,
         deadline: countdown.then(|| Instant::now() + Duration::from_secs(120)),
         procedure,
+        confirmation: None,
     }
 }
 
@@ -1192,3 +1193,5 @@ fn the_current_step_shows_its_progress_live_in_the_procedure_dialog() {
     reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
     assert!(!render(&model).contains("activating the new system"));
 }
+
+mod confirmation;

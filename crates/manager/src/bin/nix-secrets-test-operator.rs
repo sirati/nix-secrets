@@ -21,7 +21,7 @@
 //! `--host-value-answer y|n` independently accepts or rejects host-provided
 //! nonempty replacements; it defaults to `n`.
 //!
-//! `--prompt-answer y|n` answers secret and SSH login prompts too, each
+//! `--prompt-answer y|n` answers secret and SSH login prompts and confirmations too, each
 //! `--prompt-delay SECONDS` after it appeared, as an operator who takes a
 //! while. Without it prompts stay open.
 //!
@@ -200,6 +200,8 @@ struct Scripted {
     prompt_delay: Duration,
     /// The prompt on screen, when to answer it, and whether that happened.
     prompt: Option<(String, std::time::Instant, bool)>,
+    /// The open prompt is a confirmation, which only y confirms.
+    prompt_confirmation: bool,
     procedures: ProcedureLog,
 }
 
@@ -352,6 +354,7 @@ impl Frontend for Scripted {
                     std::time::Instant::now() + self.prompt_delay,
                     false,
                 ));
+                self.prompt_confirmation = prompt.confirmation.is_some();
             }
             return Ok(());
         }
@@ -447,7 +450,9 @@ impl Frontend for Scripted {
             if !*answered && std::time::Instant::now() >= *due {
                 *answered = true;
                 println!("prompt-answered: {id}");
-                return Ok(if self.prompt_answer == Some('y') {
+                return Ok(if self.prompt_answer == Some('y') && self.prompt_confirmation {
+                    UiEvent::Character('y')
+                } else if self.prompt_answer == Some('y') {
                     UiEvent::ConfirmLoss
                 } else {
                     UiEvent::Character('n')
@@ -524,6 +529,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         prompt_answer: options.prompt_answer,
         prompt_delay: options.prompt_delay,
         prompt: None,
+        prompt_confirmation: false,
         procedures: ProcedureLog::default(),
     };
     // Ready: `nix-secrets deploy` can now reach a registered frontend.
@@ -550,6 +556,7 @@ mod tests {
             prompt_answer: None,
             prompt_delay: Duration::ZERO,
             prompt: None,
+            prompt_confirmation: false,
             procedures: ProcedureLog::default(),
         }
     }

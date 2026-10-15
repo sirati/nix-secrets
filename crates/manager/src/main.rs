@@ -91,6 +91,11 @@ fn main() {
         .is_some()
     {
         procedure_step_progress(arguments.collect())
+    } else if arguments
+        .next_if(|argument| argument == "procedure-confirm")
+        .is_some()
+    {
+        procedure_confirm(arguments.collect())
     } else {
         run(arguments.collect()).map(|()| 0)
     };
@@ -289,6 +294,19 @@ fn procedure_step_progress(arguments: Vec<OsString>) -> Result<i32, Box<dyn std:
         &runtime_directory(&home().unwrap_or_default()),
         with_secrets::procedure_token(),
         STEP_REPORT_TIMEOUT,
+        &mut io::stderr(),
+    ))
+}
+
+/// Asks the operator to confirm a step of the procedure this runs in and
+/// exits 0 only if they did; see `procedure_confirm`.
+fn procedure_confirm(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_manager::procedure_confirm::{confirm, parse};
+    let request = parse(arguments, env::current_dir().unwrap_or_default())?;
+    Ok(confirm(
+        &request,
+        &runtime_directory(&home().unwrap_or_default()),
+        with_secrets::procedure_token(),
         &mut io::stderr(),
     ))
 }

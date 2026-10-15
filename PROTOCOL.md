@@ -227,6 +227,16 @@ exit_code }` may report how the command exited (128 + signal when a signal
 ended it). The operator channel receives it in `ProcedureEnded { id, exit_code
 }`.
 
+`ConfirmProcedureStep { procedure, label, reason, items }` passes the same
+token and descendant checks but numbers no step: the operator channel
+receives a `SecretRequested` whose `procedure` is the current step relabelled
+`label` and whose `confirmation { label, reason, items }` holds the cleaned
+text (at most 1000 items of at most 1024 bytes). Without an attached TUI it
+fails at once; otherwise it waits without a deadline. Only the answer
+`confirmed` confirms it. The requester receives `ProcedureConfirmation {
+confirmed }`, or `Error` when nobody could answer, including when the TUI
+goes away.
+
 ## Storage Box tasks
 
 A task entry has `identifier`, `version_id`, `password_base64` and 32 bytes in

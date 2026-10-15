@@ -54,6 +54,7 @@ fn prompt(id: &str, deadline: Option<Instant>, step: Option<(u32, &str)>) -> Sec
             warning: None,
             progress: None,
         }),
+        confirmation: None,
     }
 }
 

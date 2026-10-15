@@ -148,6 +148,9 @@ fn procedure_outcome(model: &mut Model, completion: Completion) -> Option<Comple
         | Completion::ArtifactSignatureFinished { id, result, .. } => {
             (id.clone(), result.clone().map(|()| None))
         }
+        Completion::ConfirmationFinished { id, result, .. } => {
+            (id.clone(), result.clone().map(|()| Some("confirmed".to_owned())))
+        }
         Completion::Deployed { .. }
         | Completion::ApprovalDone(None)
         | Completion::HostMutationsDeclined { .. }
@@ -411,6 +414,14 @@ fn apply_completion(model: &mut Model, completion: Completion) {
                 Err(error) => { model.remove_prompt(&id); model.fail(format!("Signing for {requester} failed: {error}")); }
             }
         }
+        // Confirmations belong to a procedure and report in its dialog.
+        Completion::ConfirmationFinished { id, requester, result } => match result {
+            Ok(()) => model.inform(format!("You confirmed the step {requester} asked about.")),
+            Err(error) => {
+                model.remove_prompt(&id);
+                model.fail(format!("The step {requester} asked about was not confirmed: {error}"));
+            }
+        },
     }
     model.show_pending_approval();
 }

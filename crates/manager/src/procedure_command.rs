@@ -277,7 +277,7 @@ pub fn parse_step_report(
 
 /// A running backend for the procedure: the one it registered with is
 /// already running, so this never starts one.
-fn connect_running(options: &Options, runtime: &Path) -> Result<UnixStream, String> {
+pub(crate) fn connect_running(options: &Options, runtime: &Path) -> Result<UnixStream, String> {
     if let Some(socket) = &options.backend_socket {
         return connect_verified(socket)
             .map_err(|error| format!("cannot connect to {}: {error}", socket.display()));

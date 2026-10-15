@@ -119,18 +119,25 @@ pub struct SecretRequest {
     /// procedure of one step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub procedure: Option<crate::procedure::ProcedureStep>,
+    /// From `nix-secrets procedure-confirm`: a risky step the operator must
+    /// confirm explicitly. It never counts down and only
+    /// [`SecretAnswer::Confirmed`] confirms it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<crate::procedure::Confirmation>,
 }
 
 impl SecretRequest {
     /// Whether the TUI denies this request on its own after a while: only
-    /// the first step of a procedure counts down, and a login an earlier
-    /// approval covers asks nobody.
+    /// the first step of a procedure counts down, a login an earlier
+    /// approval covers asks nobody, and a confirmation waits for the
+    /// operator however long it takes.
     pub fn countdown(&self) -> bool {
         self.ssh_grant.is_none()
+            && self.confirmation.is_none()
             && self
                 .procedure
-            .as_ref()
-            .is_none_or(crate::procedure::ProcedureStep::countdown)
+                .as_ref()
+                .is_none_or(crate::procedure::ProcedureStep::countdown)
     }
 }
 
@@ -178,6 +185,8 @@ pub enum SecretAnswer {
     ClosureSigned {
         signatures: crate::closure_signing::Signatures,
     },
+    /// The operator confirmed [`SecretRequest::confirmation`].
+    Confirmed,
     Denied {
         reason: String,
     },

@@ -570,6 +570,7 @@ fn an_outcome_waits_until_the_ui_took_in_its_prompt() {
         parent: None,
         deadline: None,
         procedure: None,
+        confirmation: None,
     };
     // A prompt and its denial arrive in the same batch.
     channel_events.send(ChannelEvent::Prompt(prompt)).unwrap();

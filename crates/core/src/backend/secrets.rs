@@ -517,7 +517,8 @@ fn approved_values(
         SecretAnswer::Signed { .. }
         | SecretAnswer::LoginGranted { .. }
         | SecretAnswer::ArtifactsSigned { .. }
-        | SecretAnswer::ClosureSigned { .. } => {
+        | SecretAnswer::ClosureSigned { .. }
+        | SecretAnswer::Confirmed => {
             return Err("the TUI returned an unasked signature".into());
         }
     };
@@ -595,6 +596,7 @@ fn request_operator(
         artifact_signature,
         closure_signature,
         requester,
+        None,
         &mut None,
     )
 }
@@ -609,6 +611,7 @@ fn request_operator_with_id(
     artifact_signature: Option<crate::artifact_signing::SigningRequest>,
     closure_signature: Option<crate::closure_signing::SigningRequest>,
     requester: Requester<'_>,
+    confirmation: Option<crate::procedure::Confirmation>,
     id: &mut Option<String>,
 ) -> Result<SecretAnswer, String> {
     let Ssh {
@@ -621,6 +624,17 @@ fn request_operator_with_id(
         .is_some_and(|r| r.len() > crate::secret_request::MAX_REQUEST_REASON_BYTES)
     {
         return Err("request reason exceeds 4096 bytes".into());
+    }
+    // A confirmation belongs to a procedure and is never left waiting for a
+    // TUI that may never come: the requester learns at once that nobody can
+    // confirm it.
+    if confirmation.is_some() {
+        if requester.procedure.is_none() {
+            return Err("a confirmation must come from inside a procedure".into());
+        }
+        if operators.latest().is_none() {
+            return Err(NO_OPERATOR.into());
+        }
     }
     let _pending = operators.claim()?;
     // Without an attached TUI the request waits for one; nothing counts
@@ -638,6 +652,11 @@ fn request_operator_with_id(
         .procedure
         .filter(|_| ssh_grant.is_none())
         .map(|token| {
+            // A confirmation is asked about a step; it is none of its own and
+            // never counts towards the declared steps.
+            if let Some(confirmation) = &confirmation {
+                return operators.procedures.annotate(token, peer, &confirmation.label);
+            }
             let label = step_label(
                 &identifiers,
                 ssh_destination,
@@ -670,6 +689,7 @@ fn request_operator_with_id(
         requester: ProcessInfo::read(peer),
         parent: parent_pid(peer).map(ProcessInfo::read),
         procedure,
+        confirmation,
     };
     // Pin immutable files before the request becomes visible. The frontend
     // can read only these files, by role and opaque request ID, while pending.
@@ -739,7 +759,11 @@ fn request_operator_with_id(
             operators.detach(operator_session);
         }
         // That TUI went away before answering. The request waits for the
-        // next one, which shows it again from the start.
+        // next one, which shows it again from the start; a confirmation is
+        // declined instead, as it is when no TUI is attached.
+        if request.confirmation.is_some() {
+            return Err("the nix-secrets TUI went away before the operator answered".into());
+        }
         (operator_session, operator) = wait_for_operator(operators, requester, &mut true)?;
     }
 }
@@ -886,7 +910,8 @@ pub(super) fn request_signature(
             SecretAnswer::Approved { .. }
             | SecretAnswer::LoginGranted { .. }
             | SecretAnswer::ArtifactsSigned { .. }
-            | SecretAnswer::ClosureSigned { .. } => {
+            | SecretAnswer::ClosureSigned { .. }
+            | SecretAnswer::Confirmed => {
                 Err("the TUI returned an unasked answer".into())
             }
         });
@@ -937,6 +962,7 @@ pub(super) fn request_login_grant(
             None,
             None,
             Requester::new(stream, procedure.as_deref(), progress),
+            None,
             &mut granted,
         )?;
         match answer {
@@ -960,6 +986,46 @@ pub(super) fn request_login_grant(
     write_json(
         stream,
         &result.unwrap_or_else(|message| Response::Error { message }),
+    )
+}
+
+/// Handles [`Request::ConfirmProcedureStep`]: asks the operator to confirm
+/// a step of the requester's procedure and waits, without a deadline, for
+/// the answer. Only [`SecretAnswer::Confirmed`] confirms; a denial, any
+/// other answer, a missing TUI or an error does not.
+pub(super) fn request_confirmation(
+    stream: &mut UnixStream,
+    operators: &Operators,
+    peer: u32,
+    procedure: String,
+    confirmation: Result<crate::procedure::Confirmation, String>,
+) -> io::Result<()> {
+    let result = confirmation.and_then(|confirmation| {
+        request_operator_with_id(
+            operators,
+            peer,
+            Vec::new(),
+            None,
+            Ssh {
+                signature: None,
+                login: None,
+                grant: None,
+            },
+            None,
+            None,
+            Requester::new(stream, Some(&procedure), false),
+            Some(confirmation),
+            &mut None,
+        )
+    });
+    write_json(
+        stream,
+        &match result {
+            Ok(answer) => Response::ProcedureConfirmation {
+                confirmed: matches!(answer, SecretAnswer::Confirmed),
+            },
+            Err(message) => Response::Error { message },
+        },
     )
 }
 

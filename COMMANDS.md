@@ -97,6 +97,21 @@ step. The next step, failure or warning replaces it. It prints nothing: the
 command shows its own progress. Outside a procedure or without a backend it
 does nothing and exits 0; it exits 1 if the backend refuses the report.
 
+```text
+nix-secrets procedure-confirm --label TEXT --reason TEXT [--item TEXT]...
+```
+
+Asks the operator to confirm a risky step, such as deploying from a dirty
+git tree, and waits as long as it takes. The TUI shows a red WARNING dialog
+with the label, the reason and the items (the first 40, then `+N more`; the
+list scrolls). Only `y` confirms; `n` or Esc declines, and no other key, no
+profile, approval or countdown answers it. The procedure lists the answer
+without a step number, so it never counts towards `--steps`: a confirmation
+as a warning (`⚠ LABEL: confirmed`), a refusal as denied. It exits 0 only when
+the operator confirmed, and 1 when they declined, outside a procedure,
+without a backend or an attached TUI, when the TUI goes away, or on any
+error. It prints what it asks and the answer to stderr.
+
 ## with-secrets and pipe-secret
 
 ```text
