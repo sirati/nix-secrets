@@ -151,7 +151,8 @@ impl Deployer {
         batch: &ResolvedBatch,
         point: FailurePoint,
     ) -> Result<(), DeployError> {
-        self.deploy_inner(batch, Some(point)).map(|_| ())
+        self.deploy_inner(batch, Some(point), |_| Ok(true))
+            .map(|_| ())
     }
 }
 

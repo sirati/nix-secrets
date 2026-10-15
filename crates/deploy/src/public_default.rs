@@ -42,13 +42,19 @@ pub fn install_public_default(
     let deployer = Deployer::public_info();
     // Finish an interrupted joint deployment before reading the versions.
     deployer.recover_alone()?;
-    if deployer.current_versions()?.contains_key(identifier)
-        || fs::symlink_metadata(&spec.destination.path).is_ok()
+    // Fast path for every boot after the first; `install` decides again under the lock.
+    if deployer
+        .current_versions()?
+        .get(identifier)
+        .map(String::as_str)
+        == Some(version)
     {
         return Ok(());
     }
     let metadata = fs::metadata(source)?;
-    if !metadata.is_file() || metadata.len() > nix_secrets_core::schema::MAX_KNOWN_HOSTS_BYTES as u64 {
+    if !metadata.is_file()
+        || metadata.len() > nix_secrets_core::schema::MAX_KNOWN_HOSTS_BYTES as u64
+    {
         return Err(DeployError::Invalid(
             "public default source is invalid".into(),
         ));
@@ -74,8 +80,107 @@ pub fn install_public_default(
         ));
     }
     // The destination and contents were validated twice before entering the atomic publisher.
-    let _ = SecretClass::PublicInfo;
-    deployer.deploy(&public)
+    install(&deployer, &public).map(|_| ())
+}
+
+/// What a declared default does to the value installed at its destination.
+#[derive(Debug, Eq, PartialEq)]
+enum Decision {
+    Install,
+    Unchanged,
+    /// The installed value is an older declared default.
+    Replace,
+    /// The installed value came from the operator, or its provenance is unknown.
+    KeepOperatorValue,
+}
+
+/// The destination as found under the deployment lock.
+#[derive(Debug)]
+enum Installed {
+    Absent,
+    /// Lowercase hex SHA-256 of the file, or `None` when it is not a regular
+    /// file of plausible size.
+    Present(Option<String>),
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Host defaults are versioned by the SHA-256 of their contents (64 hex);
+/// operator edits get 16 random bytes (32 hex). An installed value is a
+/// default only while its version is such a hash of the file as it is now.
+fn decide(recorded: Option<&str>, new_version: &str, installed: &Installed) -> Decision {
+    let is_content_hash = |version: &str| {
+        version.len() == 64
+            && version
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    match (recorded, installed) {
+        (None, Installed::Absent) => Decision::Install,
+        (Some(recorded), _) if recorded == new_version => Decision::Unchanged,
+        (Some(recorded), Installed::Present(Some(digest)))
+            if is_content_hash(recorded) && digest == recorded =>
+        {
+            Decision::Replace
+        }
+        _ => Decision::KeepOperatorValue,
+    }
+}
+
+fn inspect_installed(path: &Path) -> Result<Installed, DeployError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Installed::Absent),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file()
+        || metadata.len() > nix_secrets_core::schema::MAX_KNOWN_HOSTS_BYTES as u64
+    {
+        return Ok(Installed::Present(None));
+    }
+    Ok(Installed::Present(Some(sha256_hex(&fs::read(path)?))))
+}
+
+/// Installs the single default in `public` unless the decision, taken under
+/// the deployment lock, keeps what is installed. Returns that decision.
+fn install(
+    deployer: &Deployer,
+    public: &crate::schema::ResolvedBatch,
+) -> Result<Decision, DeployError> {
+    let [entry] = public.entries.as_slice() else {
+        return Err(DeployError::Invalid(
+            "public default did not resolve to one public destination".into(),
+        ));
+    };
+    if entry.class != SecretClass::PublicInfo {
+        return Err(DeployError::Invalid(
+            "public default is not public information".into(),
+        ));
+    }
+    let mut decision = Decision::Unchanged;
+    deployer.deploy_if(public, |deployer| {
+        let versions = deployer.current_versions()?;
+        let destination = deployer.secret_path(&entry.service, entry.class, &entry.secret)?;
+        decision = decide(
+            versions.get(&entry.identifier).map(String::as_str),
+            &entry.version_id,
+            &inspect_installed(&destination)?,
+        );
+        if decision == Decision::KeepOperatorValue {
+            eprintln!(
+                "secret-deploy: {} holds an operator-deployed value; keeping it instead of the declared default",
+                entry.identifier
+            );
+        }
+        Ok(matches!(decision, Decision::Install | Decision::Replace))
+    })?;
+    Ok(decision)
 }
 
 /// The value to install and its version. The source is the operator store's
@@ -108,21 +213,15 @@ fn usable_default(
             "it stays absent until it is republished"
         }
     );
-    fallback.map(|default| {
-        use sha2::Digest;
-        let digest = sha2::Sha256::digest(default.as_bytes());
-        (
-            default.as_bytes().to_vec(),
-            digest.iter().map(|byte| format!("{byte:02x}")).collect(),
-        )
-    })
+    fallback.map(|default| (default.as_bytes().to_vec(), sha256_hex(default.as_bytes())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+    const KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
 
     fn spec(default: Option<&str>) -> nix_secrets_core::SecretSpec {
         let mut leaf = serde_json::json!({
@@ -146,8 +245,110 @@ mod tests {
         )
         .unwrap();
         schema
-            .secret(&SecretPath::parse("host.services.reporting-trust.receiver-known-hosts").unwrap())
+            .secret(
+                &SecretPath::parse("host.services.reporting-trust.receiver-known-hosts").unwrap(),
+            )
             .unwrap()
+    }
+
+    const OPERATOR_VERSION: &str = "0123456789abcdef0123456789abcdef";
+
+    fn present(contents: &[u8]) -> Installed {
+        Installed::Present(Some(sha256_hex(contents)))
+    }
+
+    #[test]
+    fn decides_every_provenance_case() {
+        let old = b"old default\n";
+        let new_version = sha256_hex(b"new default\n");
+        let old_version = sha256_hex(old);
+        let decide_new = |recorded: Option<&str>, installed: &Installed| {
+            decide(recorded, &new_version, installed)
+        };
+        assert_eq!(decide_new(None, &Installed::Absent), Decision::Install);
+        assert_eq!(
+            decide_new(Some(&new_version), &present(b"new default\n")),
+            Decision::Unchanged
+        );
+        assert_eq!(
+            decide_new(Some(&old_version), &present(old)),
+            Decision::Replace
+        );
+        // An operator value is versioned randomly, never by its content hash.
+        assert_eq!(
+            decide_new(Some(OPERATOR_VERSION), &present(old)),
+            Decision::KeepOperatorValue
+        );
+        // A content-hash version no longer matching the file is not trusted.
+        assert_eq!(
+            decide_new(Some(&old_version), &present(b"edited\n")),
+            Decision::KeepOperatorValue
+        );
+        assert_eq!(
+            decide_new(Some(&old_version.to_uppercase()), &present(old)),
+            Decision::KeepOperatorValue
+        );
+        assert_eq!(
+            decide_new(Some(&old_version), &Installed::Present(None)),
+            Decision::KeepOperatorValue
+        );
+        assert_eq!(
+            decide_new(Some(&old_version), &Installed::Absent),
+            Decision::KeepOperatorValue
+        );
+        assert_eq!(decide_new(None, &present(old)), Decision::KeepOperatorValue);
+    }
+
+    fn public_batch(contents: &[u8], version: &str) -> crate::schema::ResolvedBatch {
+        crate::schema::ResolvedBatch {
+            entries: vec![crate::schema::ResolvedSecret {
+                identifier: "host.services.reporting-trust.receiver-known-hosts".into(),
+                version_id: version.into(),
+                service: "reporting".into(),
+                class: SecretClass::PublicInfo,
+                secret: "receiver-known-hosts".into(),
+                contents: contents.into(),
+                owner: nix::unistd::geteuid().as_raw(),
+                group: nix::unistd::getegid().as_raw(),
+                mode: 0o644,
+                audit_ssh_user: None,
+                audit_key_names: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_changed_default_replaces_a_stale_default_but_never_an_operator_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("public-info");
+        let deployer = Deployer::at(&root).unwrap();
+        let installed = root.join("reporting/receiver-known-hosts");
+        let first = format!("report.example {KEY}\n");
+        let second = format!("[report.example]:2222 {KEY}\n");
+
+        let deploy_default = |value: &str| {
+            install(
+                &deployer,
+                &public_batch(value.as_bytes(), &sha256_hex(value.as_bytes())),
+            )
+            .unwrap()
+        };
+        assert_eq!(deploy_default(&first), Decision::Install);
+        assert_eq!(deploy_default(&first), Decision::Unchanged);
+        assert_eq!(deploy_default(&second), Decision::Replace);
+        assert_eq!(fs::read_to_string(&installed).unwrap(), second);
+
+        let operator = format!("operator.example {KEY}\n");
+        deployer
+            .deploy(&public_batch(operator.as_bytes(), OPERATOR_VERSION))
+            .unwrap();
+        assert_eq!(deploy_default(&first), Decision::KeepOperatorValue);
+        assert_eq!(fs::read_to_string(&installed).unwrap(), operator);
+        assert_eq!(
+            deployer.current_versions().unwrap()
+                ["host.services.reporting-trust.receiver-known-hosts"],
+            OPERATOR_VERSION
+        );
     }
 
     /// The store's record, baked in as the boot-time default, predates the

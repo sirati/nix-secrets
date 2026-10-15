@@ -147,7 +147,7 @@ let
       source = pkgs.writeText "nix-secrets-public-default-${hash}" value;
     in
     lib.nameValuePair "nix-secrets-public-default-${hash}" {
-      description = "Install declared public information if absent";
+      description = "Install declared public information unless the operator deployed a value";
       wantedBy = [ "multi-user.target" ];
       # The unit exists with the receiver; ordering after an absent unit is a no-op.
       after = [

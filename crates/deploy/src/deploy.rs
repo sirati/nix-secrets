@@ -127,18 +127,34 @@ impl Deployer {
     /// interrupted deployment. The receiver's two roots go through
     /// [`deploy_together`] instead.
     pub fn deploy(&self, batch: &ResolvedBatch) -> Result<(), DeployError> {
-        self.deploy_inner(batch, None)
+        self.deploy_inner(batch, None, |_| Ok(true)).map(|_| ())
+    }
+
+    /// Like [`Deployer::deploy`], but only when `proceed` approves the root
+    /// as it is under the deployment lock, after recovery: a concurrent
+    /// deployment has either finished before `proceed` looks or waits until
+    /// this one is done. Returns whether `batch` was deployed.
+    pub fn deploy_if(
+        &self,
+        batch: &ResolvedBatch,
+        proceed: impl FnOnce(&Self) -> Result<bool, DeployError>,
+    ) -> Result<bool, DeployError> {
+        self.deploy_inner(batch, None, proceed)
     }
 
     fn deploy_inner(
         &self,
         batch: &ResolvedBatch,
         fail: Option<FailurePoint>,
-    ) -> Result<(), DeployError> {
+        proceed: impl FnOnce(&Self) -> Result<bool, DeployError>,
+    ) -> Result<bool, DeployError> {
         let entries = validate(batch)?;
         self.prepare_root()?;
         let _lock = self.lock_deployments()?;
         self.recover_locked()?;
+        if !proceed(self)? {
+            return Ok(false);
+        }
         let id = generation_id();
         let result = self
             .prepare(&entries, &id, fail)
@@ -148,7 +164,9 @@ impl Deployer {
         if result.is_err() && fail.is_none() {
             let _ = self.recover_locked();
         }
-        result.map_err(|error| error.during(&self.publishing()))
+        result
+            .map(|()| true)
+            .map_err(|error| error.during(&self.publishing()))
     }
 
     /// Publishes generation `id` up to its pending pointer `.current-<id>`.
