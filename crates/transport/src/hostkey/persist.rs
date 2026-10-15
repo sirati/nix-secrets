@@ -481,17 +481,54 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), before);
     }
 
-    fn managed_fixture() -> PathBuf {
-        PathBuf::from(
-            std::env::var_os("NIX_SECRETS_MANAGED_KNOWN_HOSTS_FIXTURE").expect(
-                "run the normal Nix package check to provide the public root-owned fixture",
-            ),
-        )
+    /// The contents of the managed known_hosts, shared with the Nix package
+    /// check's root-owned fixture.
+    const MANAGED_KNOWN_HOSTS: &[u8] =
+        include_bytes!("../../tests/fixtures/managed_ssh_known_hosts");
+
+    /// A NixOS-shaped `/etc` whose `ssh/ssh_known_hosts` resolves through
+    /// `static` into a hard-linked store generation, plus a symlink `loop`.
+    struct ManagedFixture {
+        path: PathBuf,
+        _built: Option<Fixture>,
+    }
+
+    /// The Nix package check provides the tree root-owned and immutable in
+    /// `NIX_SECRETS_MANAGED_KNOWN_HOSTS_FIXTURE`. Plain `cargo test` builds
+    /// the same tree from the same contents, owned by whoever runs it.
+    fn managed_fixture() -> ManagedFixture {
+        if let Some(path) = std::env::var_os("NIX_SECRETS_MANAGED_KNOWN_HOSTS_FIXTURE") {
+            return ManagedFixture {
+                path: path.into(),
+                _built: None,
+            };
+        }
+        use std::os::unix::fs::symlink;
+        let built = Fixture::new();
+        let root = &built.0;
+        for directory in ["etc/ssh", "store-generation/ssh"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for directory in ["etc", "etc/ssh", "store-generation", "store-generation/ssh"] {
+            fs::set_permissions(root.join(directory), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let file = root.join("store-generation/ssh/ssh_known_hosts");
+        fs::write(&file, MANAGED_KNOWN_HOSTS).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+        fs::hard_link(&file, root.join("store-generation/optimized-copy")).unwrap();
+        symlink("../store-generation", root.join("etc/static")).unwrap();
+        symlink("../static/ssh/ssh_known_hosts", root.join("etc/ssh/ssh_known_hosts")).unwrap();
+        symlink("loop", root.join("loop")).unwrap();
+        ManagedFixture {
+            path: root.clone(),
+            _built: Some(built),
+        }
     }
 
     #[test]
     fn nixos_managed_secondary_namespace_pins_root_owned_immutable_file() {
-        let root = fs::File::open(managed_fixture()).unwrap();
+        let managed = managed_fixture();
+        let root = fs::File::open(&managed.path).unwrap();
         let mapped_owner = root.metadata().unwrap().uid();
         let mut content =
             managed_secondary_at(&root, Path::new("/etc/ssh/ssh_known_hosts"), mapped_owner)
@@ -500,7 +537,7 @@ mod tests {
         assert!(content.metadata().unwrap().nlink() >= 2);
         let mut bytes = Vec::new();
         content.read_to_end(&mut bytes).unwrap();
-        assert_eq!(bytes,b"[ns1.example]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f\n");
+        assert_eq!(bytes, MANAGED_KNOWN_HOSTS);
         // ssh-keygen inspects the exact pinned file as in persistence, not a
         // pathname that could resolve through a different namespace ancestry.
         let output = ProcessRunner
@@ -521,10 +558,11 @@ mod tests {
     fn managed_secondary_namespace_refuses_user_root_escape_and_root_owned_loop() {
         use std::os::unix::fs::symlink;
         let fixture = Fixture::new();
-        let root = fs::File::open(managed_fixture()).unwrap();
+        let managed = managed_fixture();
+        let root = fs::File::open(&managed.path).unwrap();
         let mapped_owner = root.metadata().unwrap().uid();
         let link = fixture.0.join("user-link");
-        symlink(managed_fixture().join("etc/ssh/ssh_known_hosts"), &link).unwrap();
+        symlink(managed.path.join("etc/ssh/ssh_known_hosts"), &link).unwrap();
         let untrusted_root = fs::File::open(&fixture.0).unwrap();
         if rustix::process::geteuid().as_raw() != mapped_owner {
             let error =

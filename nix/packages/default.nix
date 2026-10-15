@@ -13,9 +13,11 @@
 
 let
   # Public test trust only: no private key is generated or stored here.
+  # Plain `cargo test` builds the same tree from the same file; see
+  # managed_fixture() in crates/transport/src/hostkey/persist.rs.
   managedKnownHosts = runCommand "nix-secrets-managed-known-hosts-fixture" { } ''
     mkdir -p "$out/etc/ssh" "$out/store-generation/ssh"
-    printf '%s\n' '[ns1.example]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f' > "$out/store-generation/ssh/ssh_known_hosts"
+    cp ${../../crates/transport/tests/fixtures/managed_ssh_known_hosts} "$out/store-generation/ssh/ssh_known_hosts"
     ln "$out/store-generation/ssh/ssh_known_hosts" "$out/store-generation/optimized-copy"
     ln -s ../store-generation "$out/etc/static"
     ln -s ../static/ssh/ssh_known_hosts "$out/etc/ssh/ssh_known_hosts"
