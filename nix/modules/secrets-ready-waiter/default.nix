@@ -8,7 +8,7 @@
 let
   cfg = config.services.nixSecrets;
   waiter = config.services.secretsReadyWaiter;
-  secretsLib = import ../lib.nix { inherit lib; };
+  secretsLib = import ../../lib.nix { inherit lib; };
 
   machineEntries = lib.mapAttrsToList (name: value: {
     id = name;
@@ -29,9 +29,9 @@ let
   entryData =
     entry:
     let
-      leaves = builtins.filter (leaf: leaf.kind != "public-info" && leaf.kind != "operator" && !(leaf.optional or false)) (
-        secretsLib.collectLeaves entry.tree
-      );
+      leaves = builtins.filter (
+        leaf: leaf.kind != "public-info" && leaf.kind != "operator" && !(leaf.optional or false)
+      ) (secretsLib.collectLeaves entry.tree);
       destinations = map (
         leaf: if leaf.kind == "generated" then leaf.generatedSecret.output else leaf.destination
       ) leaves;
@@ -43,8 +43,10 @@ let
           group
           mode
           ;
-        runtime_readers = map (reader: { account = reader.account; uid_offset = reader.uidOffset; })
-          (waiter.runtimeReaders.${destination.path} or [ ]);
+        runtime_readers = map (reader: {
+          account = reader.account;
+          uid_offset = reader.uidOffset;
+        }) (waiter.runtimeReaders.${destination.path} or [ ]);
         acl_program = "${pkgs.acl}/bin/getfacl";
       }) destinations;
     in
@@ -65,42 +67,15 @@ let
           "local-fs.target"
           "nix-secrets-recover.service"
         ];
-        serviceConfig = {
+        serviceConfig = import ./hardening.nix // {
           Type = "oneshot";
           RemainAfterExit = true;
-          DynamicUser = true;
+          # Status updates ("still waiting for …") come from the waiter itself.
+          NotifyAccess = "main";
           ExecStart = "${lib.getExe waiter.package} ${entry.manifest}";
+          # The operator may need hours to deploy; waiting is never a failure.
           TimeoutStartSec = "infinity";
-          CapabilityBoundingSet = "";
-          DevicePolicy = "closed";
-          LockPersonality = true;
-          MemoryDenyWriteExecute = true;
-          NoNewPrivileges = true;
-          PrivateDevices = true;
-          PrivateMounts = true;
-          PrivateTmp = true;
-          ProtectClock = true;
-          ProtectControlGroups = true;
-          ProtectHome = true;
-          ProtectHostname = true;
-          ProtectKernelLogs = true;
-          ProtectKernelModules = true;
-          ProtectKernelTunables = true;
-          ProtectProc = "invisible";
-          ProtectSystem = "strict";
           ReadOnlyPaths = [ "/persistent/secrets" ];
-          RemoveIPC = true;
-          RestrictAddressFamilies = [ "AF_UNIX" ];
-          RestrictNamespaces = true;
-          RestrictRealtime = true;
-          RestrictSUIDSGID = true;
-          SystemCallArchitectures = "native";
-          SystemCallFilter = [
-            "@system-service"
-            "~@privileged"
-            "~@resources"
-          ];
-          UMask = "0077";
         };
       }
     ) activeEntries
@@ -119,22 +94,35 @@ let
   );
 in
 {
+  imports = [ ./reporter.nix ];
+
   options.services.secretsReadyWaiter = {
     enable = lib.mkEnableOption "per-service persistent-secret readiness gates";
     runtimeReaders = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.listOf (lib.types.submodule {
-        options = {
-          account = lib.mkOption { type = lib.types.str; };
-          uidOffset = lib.mkOption { type = lib.types.ints.unsigned; };
-        };
-      }));
+      type = lib.types.attrsOf (
+        lib.types.listOf (
+          lib.types.submodule {
+            options = {
+              account = lib.mkOption {
+                type = lib.types.str;
+                description = "Account whose /etc/subuid range contains the reader.";
+              };
+              uidOffset = lib.mkOption {
+                type = lib.types.ints.unsigned;
+                description = "Offset of the reader UID inside that subordinate range.";
+              };
+            };
+          }
+        )
+      );
       default = { };
       description = "Exact subordinate-UID readers permitted after runtime ACL preparation, keyed by secret destination.";
     };
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ../packages/secrets-ready-waiter.nix { };
+      default = pkgs.callPackage ../../packages/secrets-ready-waiter.nix { };
       defaultText = lib.literalExpression "the bundled secrets-ready-waiter";
+      description = "Package providing the secrets-ready-waiter binary (waiter and reporter).";
     };
   };
 

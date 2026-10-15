@@ -1,16 +1,22 @@
 #![forbid(unsafe_code)]
 
+mod notify;
+mod progress;
+mod report;
+
 use nix::unistd::{Group, User};
+use progress::Progress;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SECRET_ROOT: &str = "/persistent/secrets";
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -309,42 +315,134 @@ fn secret_is_ready_at(root: &Path, expected: &ExpectedSecret) -> Result<bool, St
     Ok(exact_runtime_acl(text, &expected.runtime_uids))
 }
 
+fn missing_secrets(root: &Path, secrets: &[ExpectedSecret]) -> Result<Vec<PathBuf>, String> {
+    let mut missing = Vec::new();
+    for secret in secrets {
+        if !secret_is_ready_at(root, secret)? {
+            missing.push(secret.path.clone());
+        }
+    }
+    Ok(missing)
+}
+
+/// Best effort: a status that cannot be published never fails the waiter.
+fn publish_status(socket: Option<&OsStr>, text: &str, failed: &mut bool) {
+    if let Err(error) = notify::send(socket, &notify::status_message(text))
+        && !std::mem::replace(failed, true)
+    {
+        eprintln!("secrets-ready-waiter: cannot update the unit status: {error}");
+    }
+}
+
 fn run(manifest: &Path, once: bool) -> Result<(), String> {
     let contents = fs::read_to_string(manifest)
         .map_err(|error| format!("cannot read manifest {}: {error}", manifest.display()))?;
     let secrets = parse_manifest(&contents)?;
+    let socket = env::var_os("NOTIFY_SOCKET");
+    let started = Instant::now();
+    let mut progress = Progress::default();
+    let mut notify_failed = false;
     loop {
-        if secrets
-            .iter()
-            .map(|secret| secret_is_ready_at(Path::new(SECRET_ROOT), secret))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .all(|ready| ready)
-        {
+        let missing = missing_secrets(Path::new(SECRET_ROOT), &secrets)?;
+        if missing.is_empty() {
+            if progress.waited() {
+                publish_status(
+                    socket.as_deref(),
+                    "declared secrets are ready",
+                    &mut notify_failed,
+                );
+            }
             return Ok(());
         }
         if once {
             return Err("declared secrets are not ready".into());
         }
+        let emit = progress.observe(&missing, started.elapsed());
+        if let Some(status) = emit.status {
+            publish_status(socket.as_deref(), &status, &mut notify_failed);
+        }
+        if let Some(line) = emit.log {
+            eprintln!("{line}");
+        }
         thread::sleep(POLL_INTERVAL);
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Mode {
+    Wait { manifest: PathBuf, once: bool },
+    Report { systemctl: PathBuf, after: Duration },
+}
+
+fn parse_report_args(args: &[OsString]) -> Result<Mode, String> {
+    let (mut systemctl, mut after) = (None, None);
+    for pair in args.chunks(2) {
+        let [flag, value] = pair else {
+            return Err("missing option value".into());
+        };
+        let slot = if flag == "--systemctl" {
+            &mut systemctl
+        } else if flag == "--after" {
+            &mut after
+        } else {
+            return Err(format!("unknown option {}", flag.to_string_lossy()));
+        };
+        if slot.replace(value.clone()).is_some() {
+            return Err(format!("duplicate option {}", flag.to_string_lossy()));
+        }
+    }
+    let systemctl = PathBuf::from(systemctl.ok_or("--systemctl is required")?);
+    if !systemctl.is_absolute() {
+        return Err("--systemctl must be an absolute path".into());
+    }
+    let after = after
+        .ok_or("--after is required")?
+        .to_str()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or("--after must be a whole number of seconds")?;
+    Ok(Mode::Report {
+        systemctl,
+        after: Duration::from_secs(after),
+    })
+}
+
+fn parse_args(args: &[OsString]) -> Result<Mode, String> {
+    match args {
+        [mode, rest @ ..] if mode == "--report-waiting" => parse_report_args(rest),
+        [manifest] => Ok(Mode::Wait {
+            manifest: manifest.into(),
+            once: false,
+        }),
+        [manifest, flag] if flag == "--once" => Ok(Mode::Wait {
+            manifest: manifest.into(),
+            once: true,
+        }),
+        _ => Err("invalid arguments".into()),
+    }
+}
+
+fn report_exit(result: Result<u8, String>) -> ExitCode {
+    match result {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("secrets-ready-waiter: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
 fn main() -> ExitCode {
     let mut args = env::args_os();
     let program = args.next().unwrap_or_default();
-    let (manifest, once) = match (args.next(), args.next(), args.next()) {
-        (Some(manifest), None, None) => (manifest, false),
-        (Some(manifest), Some(flag), None) if flag == "--once" => (manifest, true),
-        _ => {
-            eprintln!("usage: {} MANIFEST [--once]", Path::new(&program).display());
-            return ExitCode::FAILURE;
-        }
-    };
-    match run(Path::new(&manifest), once) {
-        Ok(()) => ExitCode::SUCCESS,
+    let args: Vec<_> = args.collect();
+    match parse_args(&args) {
+        Ok(Mode::Wait { manifest, once }) => report_exit(run(&manifest, once).map(|()| 0)),
+        Ok(Mode::Report { systemctl, after }) => report_exit(report::run(&systemctl, after)),
         Err(error) => {
-            eprintln!("secrets-ready-waiter: {error}");
+            let program = Path::new(&program).display().to_string();
+            eprintln!(
+                "secrets-ready-waiter: {error}\nusage: {program} MANIFEST [--once]\n       {program} --report-waiting --systemctl ABSOLUTE_PATH --after SECONDS"
+            );
             ExitCode::FAILURE
         }
     }

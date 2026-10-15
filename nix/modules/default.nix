@@ -5,6 +5,6 @@
     ./mock.nix
     ./receiver.nix
     ./schema.nix
-    ./secrets-ready-waiter.nix
+    ./secrets-ready-waiter
   ];
 }

@@ -248,3 +248,126 @@ fn readiness_accepts_deployed_then_exact_prepared_acl_and_rejects_extra_reader()
     assert_eq!(secret_is_ready_at(&root, &expected), Ok(false));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn missing_secrets_names_only_the_unready_paths() {
+    let root = test_root();
+    let generation = root.join(".generations").join(GENERATION);
+    let category = generation.join("mail/service");
+    fs::create_dir_all(&category).unwrap();
+    symlink(
+        Path::new(".generations").join(GENERATION),
+        root.join(".current"),
+    )
+    .unwrap();
+    symlink(".current/mail", root.join("mail")).unwrap();
+    let file = category.join("password");
+    fs::write(&file, b"x").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).unwrap();
+    let metadata = fs::symlink_metadata(&file).unwrap();
+    let secret = |name: &str| ExpectedSecret {
+        path: PathBuf::from(format!("/persistent/secrets/mail/service/{name}")),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        mode: 0o400,
+        runtime_uids: Vec::new(),
+        acl_program: None,
+    };
+    let secrets = [secret("password"), secret("token")];
+    assert_eq!(
+        missing_secrets(&root, &secrets),
+        Ok(vec![PathBuf::from(
+            "/persistent/secrets/mail/service/token"
+        )])
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn os_args(args: &[&str]) -> Vec<OsString> {
+    args.iter().map(OsString::from).collect()
+}
+
+#[test]
+fn parses_wait_and_report_modes() {
+    assert_eq!(
+        parse_args(&os_args(&["/m.json"])),
+        Ok(Mode::Wait {
+            manifest: "/m.json".into(),
+            once: false
+        })
+    );
+    assert_eq!(
+        parse_args(&os_args(&["/m.json", "--once"])),
+        Ok(Mode::Wait {
+            manifest: "/m.json".into(),
+            once: true
+        })
+    );
+    let report = Mode::Report {
+        systemctl: "/bin/systemctl".into(),
+        after: Duration::from_secs(900),
+    };
+    assert_eq!(
+        parse_args(&os_args(&[
+            "--report-waiting",
+            "--systemctl",
+            "/bin/systemctl",
+            "--after",
+            "900"
+        ])),
+        Ok(report)
+    );
+    assert_eq!(
+        parse_args(&os_args(&[
+            "--report-waiting",
+            "--after",
+            "0",
+            "--systemctl",
+            "/bin/systemctl"
+        ])),
+        Ok(Mode::Report {
+            systemctl: "/bin/systemctl".into(),
+            after: Duration::ZERO
+        })
+    );
+}
+
+#[test]
+fn rejects_malformed_report_arguments() {
+    for args in [
+        &["--report-waiting"][..],
+        &["--report-waiting", "--systemctl", "/bin/systemctl"],
+        &["--report-waiting", "--after", "5"],
+        &[
+            "--report-waiting",
+            "--systemctl",
+            "systemctl",
+            "--after",
+            "5",
+        ],
+        &["--report-waiting", "--systemctl", "/s", "--after", "-1"],
+        &[
+            "--report-waiting",
+            "--systemctl",
+            "/s",
+            "--after",
+            "5",
+            "--after",
+            "6",
+        ],
+        &["--report-waiting", "--systemctl", "/s", "--after"],
+        &[
+            "--report-waiting",
+            "--systemctl",
+            "/s",
+            "--after",
+            "5",
+            "--x",
+            "y",
+        ],
+        &[],
+        &["/m.json", "--twice"],
+    ] {
+        assert!(parse_args(&os_args(args)).is_err(), "{args:?}");
+    }
+}
