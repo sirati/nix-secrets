@@ -88,10 +88,70 @@ pub fn install_public_default(
 enum Decision {
     Install,
     Unchanged,
-    /// The installed value is an older declared default.
+    /// The installed value is an older default this unit installed.
     Replace,
     /// The installed value came from the operator, or its provenance is unknown.
     KeepOperatorValue,
+}
+
+/// Directory in the public-info root recording, per identifier, the version
+/// this unit last installed. Only such a value is ever replaced. Values
+/// installed before the record existed have none and are kept for good.
+const PROVENANCE_DIR: &str = ".public-defaults";
+
+fn provenance_path(deployer: &Deployer, identifier: &str) -> std::path::PathBuf {
+    deployer
+        .root()
+        .join(PROVENANCE_DIR)
+        .join(sha256_hex(identifier.as_bytes()))
+}
+
+/// The version this unit recorded installing at `identifier`. Anything
+/// unreadable as such a record counts as none, which keeps the value.
+fn installed_by_default(
+    deployer: &Deployer,
+    identifier: &str,
+) -> Result<Option<String>, DeployError> {
+    let path = provenance_path(deployer, identifier);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.len() > 256 {
+        return Ok(None);
+    }
+    Ok(String::from_utf8(fs::read(path)?).ok())
+}
+
+/// Records that this unit installed `version` at `identifier`.
+fn record_installed_by_default(
+    deployer: &Deployer,
+    identifier: &str,
+    version: &str,
+) -> Result<(), DeployError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = deployer.root().join(PROVENANCE_DIR);
+    match crate::fsutil::create_directory(&directory, 0o700) {
+        Err(DeployError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            crate::fsutil::require_real_directory(&directory, "public default provenance")?
+        }
+        result => result?,
+    }
+    let path = provenance_path(deployer, identifier);
+    let staged = path.with_extension("new");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&staged)?;
+    file.write_all(version.as_bytes())?;
+    file.sync_all()?;
+    fs::rename(&staged, &path)?;
+    crate::fsutil::sync_directory(&directory)
 }
 
 /// The destination as found under the deployment lock.
@@ -111,21 +171,21 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Host defaults are versioned by the SHA-256 of their contents (64 hex);
-/// operator edits get 16 random bytes (32 hex). An installed value is a
-/// default only while its version is such a hash of the file as it is now.
-fn decide(recorded: Option<&str>, new_version: &str, installed: &Installed) -> Decision {
-    let is_content_hash = |version: &str| {
-        version.len() == 64
-            && version
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    };
+/// An installed value is replaced only when this unit recorded installing
+/// exactly its version, and the file still holds those contents (defaults
+/// are versioned by the SHA-256 of their contents). The version alone proves
+/// nothing: anyone deploying may pick any version.
+fn decide(
+    recorded: Option<&str>,
+    installed_by_default: Option<&str>,
+    new_version: &str,
+    installed: &Installed,
+) -> Decision {
     match (recorded, installed) {
         (None, Installed::Absent) => Decision::Install,
         (Some(recorded), _) if recorded == new_version => Decision::Unchanged,
         (Some(recorded), Installed::Present(Some(digest)))
-            if is_content_hash(recorded) && digest == recorded =>
+            if installed_by_default == Some(recorded) && digest == recorded =>
         {
             Decision::Replace
         }
@@ -164,22 +224,28 @@ fn install(
         ));
     }
     let mut decision = Decision::Unchanged;
-    deployer.deploy_if(public, |deployer| {
-        let versions = deployer.current_versions()?;
-        let destination = deployer.secret_path(&entry.service, entry.class, &entry.secret)?;
-        decision = decide(
-            versions.get(&entry.identifier).map(String::as_str),
-            &entry.version_id,
-            &inspect_installed(&destination)?,
-        );
-        if decision == Decision::KeepOperatorValue {
-            eprintln!(
-                "secret-deploy: {} holds an operator-deployed value; keeping it instead of the declared default",
-                entry.identifier
+    deployer.deploy_if(
+        public,
+        |deployer| {
+            let versions = deployer.current_versions()?;
+            let destination = deployer.secret_path(&entry.service, entry.class, &entry.secret)?;
+            decision = decide(
+                versions.get(&entry.identifier).map(String::as_str),
+                installed_by_default(deployer, &entry.identifier)?.as_deref(),
+                &entry.version_id,
+                &inspect_installed(&destination)?,
             );
-        }
-        Ok(matches!(decision, Decision::Install | Decision::Replace))
-    })?;
+            if decision == Decision::KeepOperatorValue {
+                eprintln!(
+                    "secret-deploy: {} holds a value this unit did not record installing (operator-deployed, or installed before provenance records existed); keeping it instead of the declared default",
+                    entry.identifier
+                );
+            }
+            Ok(matches!(decision, Decision::Install | Decision::Replace))
+        },
+        // A crash before this record keeps the value for good: fail safe.
+        |deployer| record_installed_by_default(deployer, &entry.identifier, &entry.version_id),
+    )?;
     Ok(decision)
 }
 
@@ -263,7 +329,7 @@ mod tests {
         let new_version = sha256_hex(b"new default\n");
         let old_version = sha256_hex(old);
         let decide_new = |recorded: Option<&str>, installed: &Installed| {
-            decide(recorded, &new_version, installed)
+            decide(recorded, recorded, &new_version, installed)
         };
         assert_eq!(decide_new(None, &Installed::Absent), Decision::Install);
         assert_eq!(
@@ -273,6 +339,17 @@ mod tests {
         assert_eq!(
             decide_new(Some(&old_version), &present(old)),
             Decision::Replace
+        );
+        // Without this unit's record, a content-hash version proves nothing:
+        // the value came from the operator or predates the record.
+        assert_eq!(
+            decide(Some(&old_version), None, &new_version, &present(old)),
+            Decision::KeepOperatorValue
+        );
+        let other = sha256_hex(b"other\n");
+        assert_eq!(
+            decide(Some(&old_version), Some(&other), &new_version, &present(old)),
+            Decision::KeepOperatorValue
         );
         // An operator value is versioned randomly, never by its content hash.
         assert_eq!(
@@ -349,6 +426,59 @@ mod tests {
                 ["host.services.reporting-trust.receiver-known-hosts"],
             OPERATOR_VERSION
         );
+    }
+
+    /// The operator may deliver a value versioned exactly like a default,
+    /// and values installed before provenance records existed carry no
+    /// record. Neither is ever replaced.
+    #[test]
+    fn a_default_never_replaces_a_value_it_did_not_record_installing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("public-info");
+        let deployer = Deployer::at(&root).unwrap();
+        let installed = root.join("reporting/receiver-known-hosts");
+        let declared = format!("report.example {KEY}\n");
+        let deploy_default = || {
+            install(
+                &deployer,
+                &public_batch(declared.as_bytes(), &sha256_hex(declared.as_bytes())),
+            )
+            .unwrap()
+        };
+
+        let operator = format!("operator.example {KEY}\n");
+        deployer
+            .deploy(&public_batch(
+                operator.as_bytes(),
+                &sha256_hex(operator.as_bytes()),
+            ))
+            .unwrap();
+        assert_eq!(deploy_default(), Decision::KeepOperatorValue);
+        assert_eq!(fs::read_to_string(&installed).unwrap(), operator);
+
+        // After this unit installed a default, the operator redeploys it
+        // with a content-hash version: the record no longer matches.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("public-info");
+        let deployer = Deployer::at(&root).unwrap();
+        let installed = root.join("reporting/receiver-known-hosts");
+        let deploy_default = |value: &str| {
+            install(
+                &deployer,
+                &public_batch(value.as_bytes(), &sha256_hex(value.as_bytes())),
+            )
+            .unwrap()
+        };
+        assert_eq!(deploy_default(&operator), Decision::Install);
+        deployer
+            .deploy(&public_batch(
+                declared.as_bytes(),
+                &sha256_hex(declared.as_bytes()),
+            ))
+            .unwrap();
+        let next = format!("[report.example]:2222 {KEY}\n");
+        assert_eq!(deploy_default(&next), Decision::KeepOperatorValue);
+        assert_eq!(fs::read_to_string(&installed).unwrap(), declared);
     }
 
     /// The store's record, baked in as the boot-time default, predates the

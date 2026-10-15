@@ -149,10 +149,11 @@ protocol 4.
 
 `installDefaultIfMissing = true` with `publicInfoInventoryFile` set installs
 the stored value, or `defaultValue`, at boot if the destination does not exist.
-When the declared value changes, it replaces an installed earlier default (a
-value whose version is the SHA-256 of its contents), but never a value the
-operator deployed. Its `consumerUnits` get `Requires=` and `After=` on that
-installer unit.
+When the declared value changes, it replaces an earlier default only if the
+installer unit itself installed it: the unit records each version it installs
+under `/persistent/public-info/.public-defaults/`. A value without that record
+(deployed by the operator, or installed before the record existed) is kept.
+Its `consumerUnits` get `Requires=` and `After=` on that installer unit.
 
 `deployment.publishHostIdentityTo` names one of this host's public-info leaves
 by identifier. Deploying the host fills it with the host key the TUI verified.

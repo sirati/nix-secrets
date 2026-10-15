@@ -127,19 +127,27 @@ impl Deployer {
     /// interrupted deployment. The receiver's two roots go through
     /// [`deploy_together`] instead.
     pub fn deploy(&self, batch: &ResolvedBatch) -> Result<(), DeployError> {
-        self.deploy_inner(batch, None, |_| Ok(true)).map(|_| ())
+        self.deploy_inner(batch, None, |_| Ok(true), |_| Ok(()))
+            .map(|_| ())
     }
 
     /// Like [`Deployer::deploy`], but only when `proceed` approves the root
     /// as it is under the deployment lock, after recovery: a concurrent
     /// deployment has either finished before `proceed` looks or waits until
-    /// this one is done. Returns whether `batch` was deployed.
+    /// this one is done. `published` runs once the batch is published, still
+    /// under the lock. Returns whether `batch` was deployed.
     pub fn deploy_if(
         &self,
         batch: &ResolvedBatch,
         proceed: impl FnOnce(&Self) -> Result<bool, DeployError>,
+        published: impl FnOnce(&Self) -> Result<(), DeployError>,
     ) -> Result<bool, DeployError> {
-        self.deploy_inner(batch, None, proceed)
+        self.deploy_inner(batch, None, proceed, published)
+    }
+
+    /// This root's directory.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     fn deploy_inner(
@@ -147,6 +155,7 @@ impl Deployer {
         batch: &ResolvedBatch,
         fail: Option<FailurePoint>,
         proceed: impl FnOnce(&Self) -> Result<bool, DeployError>,
+        published: impl FnOnce(&Self) -> Result<(), DeployError>,
     ) -> Result<bool, DeployError> {
         let entries = validate(batch)?;
         self.prepare_root()?;
@@ -164,9 +173,9 @@ impl Deployer {
         if result.is_err() && fail.is_none() {
             let _ = self.recover_locked();
         }
-        result
-            .map(|()| true)
-            .map_err(|error| error.during(&self.publishing()))
+        result.map_err(|error| error.during(&self.publishing()))?;
+        published(self)?;
+        Ok(true)
     }
 
     /// Publishes generation `id` up to its pending pointer `.current-<id>`.
