@@ -140,12 +140,25 @@ impl ProcedureStep {
     }
 }
 
-/// Removes control characters from requester-supplied text before anyone
-/// shows it, and bounds it.
+/// Unicode bidirectional controls: they reorder what the operator reads,
+/// so a label could show one thing and mean another.
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
+    )
+}
+
+/// Removes control characters, bidirectional controls included, from
+/// requester-supplied text before anyone shows it, and bounds it.
 pub fn clean_text(text: &str, max_bytes: usize) -> String {
     let mut cleaned = String::new();
     for character in text.chars() {
-        let character = if character.is_control() { ' ' } else { character };
+        let character = if character.is_control() || is_bidi_control(character) {
+            ' '
+        } else {
+            character
+        };
         if cleaned.len() + character.len_utf8() > max_bytes {
             break;
         }
@@ -286,6 +299,28 @@ mod tests {
         assert_eq!(split_token("proc-1:abc"), Some(("proc-1", "abc")));
         assert_eq!(split_token("proc-1:"), None);
         assert_eq!(split_token("nocolon"), None);
+    }
+
+    #[test]
+    fn requester_text_loses_bidi_controls() {
+        for control in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}',
+        ] {
+            assert_eq!(
+                clean_text(&format!("a{control}b"), 64),
+                "a b",
+                "U+{:04X} survived",
+                control as u32
+            );
+        }
+        // "deploy to ns1 (staging)" that renders reversed after U+202E.
+        assert_eq!(
+            clean_text("deploy \u{202E}gnigats\u{202C} ns1", 64),
+            "deploy  gnigats  ns1"
+        );
+        // Their neighbours stay.
+        assert_eq!(clean_text("a\u{2065}\u{206A}\u{200D}b", 64), "a\u{2065}\u{206A}\u{200D}b");
     }
 
     #[test]
