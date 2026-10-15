@@ -283,6 +283,39 @@ fn missing_secrets_names_only_the_unready_paths() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// A root that cannot be inspected keeps the waiter waiting with the
+/// reason in its status; it is never ready and never exits.
+#[test]
+fn an_uninspectable_root_is_still_waiting_with_the_reason() {
+    let base = test_root();
+    fs::create_dir_all(&base).unwrap();
+    // A file where a directory belongs: inspecting below it is ENOTDIR.
+    fs::write(base.join("file"), b"").unwrap();
+    let root = base.join("file/persistent/secrets");
+    let secrets = [ExpectedSecret {
+        path: PathBuf::from("/persistent/secrets/mail/service/password"),
+        uid: 0,
+        gid: 0,
+        mode: 0o400,
+        runtime_uids: Vec::new(),
+        acl_program: None,
+    }];
+    let mut progress = Progress::default();
+    let Poll::Waiting(emit) = poll(&root, &secrets, &mut progress, Duration::from_secs(3)) else {
+        panic!("an uninspectable root was ready");
+    };
+    let status = emit.status.expect("the reason is published");
+    assert!(status.starts_with("still waiting: cannot inspect "), "{status}");
+    assert!(status.ends_with("(3s)"), "{status}");
+    assert!(emit.log.is_some_and(|line| line.contains("cannot inspect")));
+    // Unchanged, it refreshes like any wait and still is not ready.
+    assert_eq!(
+        poll(&root, &secrets, &mut progress, Duration::from_secs(4)),
+        Poll::Waiting(progress::Emit::default())
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
 fn os_args(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
 }

@@ -343,21 +343,23 @@ fn run(manifest: &Path, once: bool) -> Result<(), String> {
     let mut progress = Progress::default();
     let mut notify_failed = false;
     loop {
-        let missing = missing_secrets(Path::new(SECRET_ROOT), &secrets)?;
-        if missing.is_empty() {
-            if progress.waited() {
-                publish_status(
-                    socket.as_deref(),
-                    "declared secrets are ready",
-                    &mut notify_failed,
-                );
+        let emit = match poll(Path::new(SECRET_ROOT), &secrets, &mut progress, started.elapsed()) {
+            Poll::Ready => {
+                if progress.waited() {
+                    publish_status(
+                        socket.as_deref(),
+                        "declared secrets are ready",
+                        &mut notify_failed,
+                    );
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-        if once {
-            return Err("declared secrets are not ready".into());
-        }
-        let emit = progress.observe(&missing, started.elapsed());
+            Poll::Waiting(emit) if once => {
+                let reason = emit.status.unwrap_or_default();
+                return Err(format!("declared secrets are not ready: {reason}"));
+            }
+            Poll::Waiting(emit) => emit,
+        };
         if let Some(status) = emit.status {
             publish_status(socket.as_deref(), &status, &mut notify_failed);
         }
@@ -365,6 +367,31 @@ fn run(manifest: &Path, once: bool) -> Result<(), String> {
             eprintln!("{line}");
         }
         thread::sleep(POLL_INTERVAL);
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Poll {
+    Ready,
+    /// Not ready, with what to publish about it.
+    Waiting(progress::Emit),
+}
+
+/// One look at `root`. Only every declared secret in place is ready. A
+/// secret that cannot be inspected is not ready either: the waiter keeps
+/// waiting with the reason in its status, so its consumers stay blocked
+/// and the long-wait report names the reason, until a deployment or the
+/// operator repairs it.
+fn poll(
+    root: &Path,
+    secrets: &[ExpectedSecret],
+    progress: &mut Progress,
+    elapsed: Duration,
+) -> Poll {
+    match missing_secrets(root, secrets) {
+        Ok(missing) if missing.is_empty() => Poll::Ready,
+        Ok(missing) => Poll::Waiting(progress.observe(&missing, elapsed)),
+        Err(error) => Poll::Waiting(progress.observe_error(&error, elapsed)),
     }
 }
 

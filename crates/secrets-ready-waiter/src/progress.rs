@@ -20,6 +20,8 @@ pub struct Emit {
 #[derive(Debug, Default)]
 pub struct Progress {
     missing: Vec<PathBuf>,
+    /// Why the last poll could not inspect the secrets, if it could not.
+    error: Option<String>,
     last_status: Option<Duration>,
     last_log: Option<Duration>,
 }
@@ -46,20 +48,35 @@ impl Progress {
         if missing.is_empty() {
             return Emit::default();
         }
-        let changed = self.missing.as_slice() != missing;
+        let changed = self.missing.as_slice() != missing || self.error.take().is_some();
         if changed {
             self.missing = missing.to_vec();
         }
+        self.emit(waiting_text(missing, elapsed), changed, false, elapsed)
+    }
+
+    /// Records a poll that could not inspect the secrets: still waiting,
+    /// with the reason in the status and, when it changes, in the log.
+    pub fn observe_error(&mut self, error: &str, elapsed: Duration) -> Emit {
+        let changed = self.error.as_deref() != Some(error);
+        if changed {
+            self.error = Some(error.to_owned());
+            self.missing.clear();
+        }
+        let text = format!("still waiting: {error} ({}s)", elapsed.as_secs());
+        self.emit(text, changed, changed, elapsed)
+    }
+
+    fn emit(&mut self, text: String, changed: bool, log_now: bool, elapsed: Duration) -> Emit {
         let due = |last: Option<Duration>, interval: Duration| {
             last.is_none_or(|last| elapsed.saturating_sub(last) >= interval)
         };
-        let text = waiting_text(missing, elapsed);
         let mut emit = Emit::default();
         if changed || due(self.last_status, STATUS_INTERVAL) {
             self.last_status = Some(elapsed);
             emit.status = Some(text.clone());
         }
-        if due(self.last_log, LOG_INTERVAL) {
+        if log_now || due(self.last_log, LOG_INTERVAL) {
             self.last_log = Some(elapsed);
             emit.log = Some(format!("secrets-ready-waiter: {text}"));
         }
@@ -152,6 +169,25 @@ mod tests {
             progress.observe(&missing, Duration::from_secs(601)).log,
             None
         );
+    }
+
+    #[test]
+    fn an_inspection_error_is_published_and_logged_when_it_changes() {
+        let mut progress = Progress::default();
+        progress.observe(&paths(&["/a"]), Duration::ZERO);
+        let emit = progress.observe_error("cannot inspect /x: denied", Duration::from_secs(5));
+        assert_eq!(
+            emit.status.as_deref(),
+            Some("still waiting: cannot inspect /x: denied (5s)")
+        );
+        assert!(emit.log.is_some());
+        assert_eq!(
+            progress.observe_error("cannot inspect /x: denied", Duration::from_secs(6)),
+            Emit::default()
+        );
+        // Back to an ordinary wait for the same path: the status follows.
+        let emit = progress.observe(&paths(&["/a"]), Duration::from_secs(7));
+        assert_eq!(emit.status.as_deref(), Some("still waiting for /a (7s)"));
     }
 
     #[test]
