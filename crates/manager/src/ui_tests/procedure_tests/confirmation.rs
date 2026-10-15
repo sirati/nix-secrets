@@ -1,6 +1,6 @@
-//! `nix-secrets procedure-confirm` in the TUI: a red warning that only y
-//! confirms, n and Esc decline, nothing else answers, and that does not
-//! count towards the procedure's declared steps.
+//! `nix-secrets procedure-confirm` in the TUI: a red warning that only
+//! typing `yes` and Enter confirms, n and Esc decline, nothing else
+//! answers, and that does not count towards the procedure's declared steps.
 use super::*;
 use nix_secrets_core::procedure::Confirmation;
 use ratatui::style::Color;
@@ -49,8 +49,70 @@ fn colour_of(model: &Model, needle: &str) -> Option<Color> {
     Some(cells[owner[at]].fg)
 }
 
+/// Types each of `keys`, then Enter.
+fn type_and_enter(model: &mut Model, channel: &mut Channel, keys: &str) {
+    for key in keys.chars() {
+        reduce(model, UiEvent::Character(key), channel);
+    }
+    reduce(model, UiEvent::Enter, channel);
+}
+
 #[test]
-fn only_y_confirms_and_the_warning_is_red_with_its_items() {
+fn a_bare_y_or_a_partial_yes_never_confirms() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(confirmation("confirm", 0, 1));
+    tick(&mut model, &mut channel);
+    for keys in ["y", "ye", "es", "s", "", "Yes", "YES"] {
+        type_and_enter(&mut model, &mut channel, keys);
+        assert!(channel.answers.is_empty(), "{keys:?} confirmed");
+        assert!(model.shown_prompt().is_some());
+        for _ in 0..3 {
+            reduce(&mut model, UiEvent::Backspace, &mut channel);
+        }
+    }
+    // A y alone, or its old button, answers nothing.
+    reduce(&mut model, UiEvent::Character('y'), &mut channel);
+    reduce(
+        &mut model,
+        UiEvent::Click(MouseTarget::Shortcut(Shortcut::Character('y'))),
+        &mut channel,
+    );
+    assert!(channel.answers.is_empty());
+    // Typing past `yes` does not make it `yes`; Backspace corrects.
+    type_and_enter(&mut model, &mut channel, "yyes");
+    assert!(channel.answers.is_empty());
+    for _ in 0..4 {
+        reduce(&mut model, UiEvent::Backspace, &mut channel);
+    }
+    assert!(render(&model).contains("Type yes and press Enter to confirm"));
+    type_and_enter(&mut model, &mut channel, "yes");
+    assert_eq!(channel.answers, [("confirm".to_owned(), true)]);
+}
+
+/// What is typed belongs to one confirmation: the next starts empty.
+#[test]
+fn typing_does_not_carry_over_to_the_next_confirmation() {
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(confirmation("first", 0, 1));
+    channel.prompts.push(confirmation("second", 0, 1));
+    tick(&mut model, &mut channel);
+    for key in "ye".chars() {
+        reduce(&mut model, UiEvent::Character(key), &mut channel);
+    }
+    reduce(&mut model, UiEvent::Character('n'), &mut channel);
+    assert_eq!(channel.answers, [("first".to_owned(), false)]);
+    assert_eq!(model.shown_prompt().map(|prompt| prompt.id.as_str()), Some("second"));
+    type_and_enter(&mut model, &mut channel, "s");
+    assert_eq!(channel.answers.len(), 1, "{:?}", channel.answers);
+    reduce(&mut model, UiEvent::Backspace, &mut channel);
+    type_and_enter(&mut model, &mut channel, "yes");
+    assert_eq!(channel.answers[1], ("second".to_owned(), true));
+}
+
+#[test]
+fn only_yes_confirms_and_the_warning_is_red_with_its_items() {
     let mut model = model(true);
     let mut channel = Channel::default();
     channel.prompts.push(confirmation("confirm", 0, 3));
@@ -66,7 +128,7 @@ fn only_y_confirms_and_the_warning_is_red_with_its_items() {
     for item in ["M file-0.nix", "M file-1.nix", "M file-2.nix"] {
         assert!(screen.contains(item), "{screen}");
     }
-    assert!(screen.contains("y Yes, confirm"), "{screen}");
+    assert!(screen.contains("type yes, Enter: Confirm"), "{screen}");
     assert!(
         !screen.contains("denies in"),
         "it never counts down: {screen}"
@@ -77,10 +139,12 @@ fn only_y_confirms_and_the_warning_is_red_with_its_items() {
         Some(Color::Red),
         "the border is red"
     );
-    // Nothing else answers it: not Enter, not the approval chord, not Y.
+    // Nothing else answers it: not Enter, not the approval chord, not y or Y.
     for event in [
         UiEvent::Enter,
         UiEvent::ConfirmLoss,
+        UiEvent::Character('y'),
+        UiEvent::Backspace,
         UiEvent::Character('Y'),
         UiEvent::Character('a'),
         UiEvent::Character('d'),
@@ -99,7 +163,12 @@ fn only_y_confirms_and_the_warning_is_red_with_its_items() {
     tick(&mut model, &mut channel);
     model.expire_prompts(Instant::now() + Duration::from_secs(3600));
     assert!(model.shown_prompt().is_some());
-    reduce(&mut model, UiEvent::Character('y'), &mut channel);
+    for key in "yes".chars() {
+        reduce(&mut model, UiEvent::Character(key), &mut channel);
+    }
+    assert!(render(&model).contains("> yes"));
+    assert!(channel.answers.is_empty(), "typing alone never confirms");
+    reduce(&mut model, UiEvent::Enter, &mut channel);
     assert_eq!(channel.answers, [("confirm".to_owned(), true)]);
     assert!(model.shown_prompt().is_none());
     answered(&mut model, "confirm", Ok(()));
@@ -137,7 +206,7 @@ fn a_long_item_list_is_cut_and_scrolls() {
     let mut channel = Channel::default();
     channel.prompts.push(confirmation("confirm", 0, 55));
     tick(&mut model, &mut channel);
-    let body = crate::ui::secret_request::confirmation_body(model.shown_prompt().unwrap());
+    let body = crate::ui::secret_request::confirmation_body(model.shown_prompt().unwrap(), "");
     assert!(body.contains("55 items:"), "{body}");
     assert!(body.contains("M file-39.nix"), "{body}");
     assert!(!body.contains("M file-40.nix"), "{body}");
@@ -164,7 +233,7 @@ fn a_confirmation_does_not_count_towards_the_declared_steps() {
     )));
     channel.prompts.push(confirmation("confirm", 0, 2));
     tick(&mut model, &mut channel);
-    reduce(&mut model, UiEvent::Character('y'), &mut channel);
+    type_and_enter(&mut model, &mut channel, "yes");
     answered(&mut model, "confirm", Ok(()));
     assert!(render(&model).contains("waiting for step 1/3"));
     for number in 1..=3 {

@@ -6,9 +6,9 @@
 //! ```
 //!
 //! The TUI shows a red warning dialog with the label, the reason and the
-//! items, such as the dirty files of a git tree. Only `y` confirms; `n` or
-//! Esc declines. Nothing confirms on its own: no profile, approval or
-//! countdown. It exits 0 only when the operator confirmed, and 1 when they
+//! items, such as the dirty files of a git tree. Only typing `yes` and
+//! Enter confirms; `n` or Esc declines. Nothing confirms on its own: no
+//! profile, approval or countdown. It exits 0 only when the operator confirmed, and 1 when they
 //! declined, outside a procedure, without a backend or an attached TUI, or
 //! on any error. The procedure lists the answer as a step: a confirmation
 //! as a warning, a refusal as a denied step.

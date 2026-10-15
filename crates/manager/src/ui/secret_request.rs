@@ -10,7 +10,8 @@
 //! [`crate::operator_channel::DECISION_TIMEOUT`] unless c cancels that.
 //!
 //! A confirmation from `nix-secrets procedure-confirm` is a red warning
-//! instead: only y confirms, n and Esc decline, and it never counts down.
+//! instead: only typing `yes` and Enter confirms, n and Esc decline, and it
+//! never counts down.
 use super::*;
 use crate::operator_channel::SecretPrompt;
 use nix_secrets_core::secret_request::ProcessInfo;
@@ -113,10 +114,17 @@ pub(super) fn intercept(
     true
 }
 
-/// Handles input while a confirmation is shown. Only y (or its button)
-/// confirms; n and Esc decline. The list scrolls, m and M move between
-/// procedures, and every other key does nothing.
+/// What the operator types, then Enter, to confirm.
+pub(crate) const CONFIRMATION_WORD: &str = "yes";
+
+/// Handles input while a confirmation is shown. Only typing `yes` and then
+/// Enter (or its button) confirms; n and Esc decline. The list scrolls, m
+/// and M move between procedures, and every other key does nothing.
 fn confirmation(model: &mut Model, event: &UiEvent, writer: &mut impl SecretWriter) -> bool {
+    let id = model.shown_prompt().expect("a prompt is shown").id.clone();
+    if model.confirmation_typed.0 != id {
+        model.confirmation_typed = (id, String::new());
+    }
     let confirmed = match event {
         UiEvent::Hover(target) => {
             model.hover = *target;
@@ -145,8 +153,23 @@ fn confirmation(model: &mut Model, event: &UiEvent, writer: &mut impl SecretWrit
             restore(model, *index);
             return true;
         }
-        UiEvent::Character('y')
-        | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Character('y'))) => true,
+        UiEvent::Character(character @ ('y' | 'e' | 's')) => {
+            let typed = &mut model.confirmation_typed.1;
+            if typed.len() < CONFIRMATION_WORD.len() {
+                typed.push(*character);
+            }
+            return true;
+        }
+        UiEvent::Backspace => {
+            model.confirmation_typed.1.pop();
+            return true;
+        }
+        UiEvent::Enter | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Enter)) => {
+            if model.confirmation_typed.1 != CONFIRMATION_WORD {
+                return true;
+            }
+            true
+        }
         UiEvent::Character('n')
         | UiEvent::Escape
         | UiEvent::Click(MouseTarget::Shortcut(Shortcut::Escape | Shortcut::Character('n'))) => {
@@ -166,7 +189,7 @@ pub(crate) const CONFIRMATION_ITEMS_SHOWN: usize = 40;
 
 /// The body of a confirmation: what is at stake, why, and what it
 /// concerns. A long list is cut with a `+N more` line; the body scrolls.
-pub(crate) fn confirmation_body(prompt: &SecretPrompt) -> String {
+pub(crate) fn confirmation_body(prompt: &SecretPrompt, typed: &str) -> String {
     let Some(confirmation) = &prompt.confirmation else {
         return String::new();
     };
@@ -193,7 +216,10 @@ pub(crate) fn confirmation_body(prompt: &SecretPrompt) -> String {
         }
     }
     lines.push(String::new());
-    lines.push("y: confirm · n or Esc: decline".into());
+    lines.push(format!(
+        "Type {CONFIRMATION_WORD} and press Enter to confirm · n or Esc: decline"
+    ));
+    lines.push(format!("> {typed}"));
     lines.join("\n")
 }
 

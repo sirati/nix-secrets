@@ -52,7 +52,8 @@ pub struct SecretPrompt {
     /// The procedure step the backend verified, if the request has one.
     pub procedure: Option<ProcedureStep>,
     /// A risky step to confirm, from `nix-secrets procedure-confirm`: shown
-    /// as a red warning, confirmed only with `y`, never counting down.
+    /// as a red warning, confirmed only by typing `yes` and Enter, never
+    /// counting down.
     pub confirmation: Option<Confirmation>,
 }
 

@@ -759,7 +759,7 @@ fn render_secret_request(
 }
 
 /// A confirmation from `nix-secrets procedure-confirm`: a red warning that
-/// only y confirms.
+/// only typing `yes` and Enter confirms.
 fn render_confirmation(
     frame: &mut ratatui::Frame<'_>,
     model: &Model,
@@ -767,8 +767,12 @@ fn render_confirmation(
     area: Rect,
     hits: &mut HitMap,
 ) {
+    let typed = match &model.confirmation_typed {
+        (id, typed) if *id == prompt.id => typed.as_str(),
+        _ => "",
+    };
     let footer = vec![
-        Button::new("y Yes, confirm", MouseTarget::Shortcut(Shortcut::Character('y'))),
+        Button::new("type yes, Enter: Confirm", MouseTarget::Shortcut(Shortcut::Enter)),
         Button::new("n Decline", MouseTarget::Shortcut(Shortcut::Character('n'))),
         Button::new("Esc Decline", MouseTarget::Shortcut(Shortcut::Escape)),
         Button::new("m Minimise", MouseTarget::Shortcut(Shortcut::Character('m'))),
@@ -780,7 +784,7 @@ fn render_confirmation(
         hits,
         Dialog {
             title: format!(" WARNING · {} ", super::secret_request::dialog_title(prompt)),
-            body: Box::new(|_| super::secret_request::confirmation_body(prompt)),
+            body: Box::new(|_| super::secret_request::confirmation_body(prompt, typed)),
             padded: true,
             note: None,
             scroll: model.secret_scroll,

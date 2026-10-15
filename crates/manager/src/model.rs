@@ -441,6 +441,9 @@ pub struct Model {
     /// Whether the secret-request modal shows full commands, fingerprints
     /// and descriptions instead of its summary.
     pub secret_details: bool,
+    /// What the operator typed into the confirmation with this prompt id;
+    /// typing into another confirmation starts afresh.
+    pub confirmation_typed: (String, String),
     /// The deployment dialog shows every identifier and reason (`d`).
     pub approval_details: bool,
 }
@@ -534,6 +537,7 @@ impl Model {
             backend_problem: None,
             secret_scroll: 0,
             secret_details: false,
+            confirmation_typed: Default::default(),
             approval_details: false,
         };
         if structured {

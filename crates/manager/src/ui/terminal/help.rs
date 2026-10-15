@@ -115,8 +115,9 @@ reason, and the procedure's result names it. A step reported with
 warnings stays until Enter closes it.
 What `nix-secrets procedure-step-progress` reports shows under the
 current step, with a bar for a percentage.
-`nix-secrets procedure-confirm` asks in a red WARNING dialog: only y
-confirms, n or Esc declines, and it never counts down or counts as a step.
+`nix-secrets procedure-confirm` asks in a red WARNING dialog: only typing
+yes and Enter confirms, n or Esc declines, Backspace corrects, and it
+never counts down or counts as a step.
 m      Minimise the open secret request or deployment dialog
 M      Restore the next procedure that waits for you, flashing ones first
 Click  A task bar entry restores it

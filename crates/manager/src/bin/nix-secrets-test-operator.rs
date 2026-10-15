@@ -200,7 +200,7 @@ struct Scripted {
     prompt_delay: Duration,
     /// The prompt on screen, when to answer it, and whether that happened.
     prompt: Option<(String, std::time::Instant, bool)>,
-    /// The open prompt is a confirmation, which only y confirms.
+    /// The open prompt is a confirmation, which only `yes` and Enter confirm.
     prompt_confirmation: bool,
     procedures: ProcedureLog,
 }
@@ -451,6 +451,12 @@ impl Frontend for Scripted {
                 *answered = true;
                 println!("prompt-answered: {id}");
                 return Ok(if self.prompt_answer == Some('y') && self.prompt_confirmation {
+                    // A confirmation takes `yes` typed, then Enter.
+                    self.queued.extend([
+                        UiEvent::Character('e'),
+                        UiEvent::Character('s'),
+                        UiEvent::Enter,
+                    ]);
                     UiEvent::Character('y')
                 } else if self.prompt_answer == Some('y') {
                     UiEvent::ConfirmLoss
