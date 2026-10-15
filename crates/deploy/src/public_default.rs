@@ -161,6 +161,8 @@ mod tests {
             Some((valid.clone().into_bytes(), "ab".into()))
         );
         assert_eq!(usable_default(&spec(None), "id", stale.clone(), "ab"), None);
+        let loopback = format!("127.0.0.1 {KEY}\nreport.example {KEY}\n").into_bytes();
+        assert_eq!(usable_default(&spec(None), "id", loopback, "ab"), None);
         let (value, version) = usable_default(&spec(Some(&valid)), "id", stale, "ab").unwrap();
         assert_eq!(value, valid.as_bytes());
         assert_eq!(version.len(), 64);

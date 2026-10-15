@@ -24,7 +24,9 @@ pub use generated::{
     GeneratedKind, GeneratedSecret, GeneratedSecretLeaf, GeneratedSecretType, StorageBoxBootstrap,
 };
 pub use identity::{SecretIdentity, SecretPresentation};
-pub use validation::{known_hosts_keys, validate_ssh_known_hosts, MAX_KNOWN_HOSTS_BYTES};
+pub use validation::{
+    known_hosts_keys, local_only_ssh_host, validate_ssh_known_hosts, MAX_KNOWN_HOSTS_BYTES,
+};
 use validation::{validate_component, validate_namespace, validate_tree};
 pub use value::{ConsumerConstraints, ValueType};
 pub use value_generator::{

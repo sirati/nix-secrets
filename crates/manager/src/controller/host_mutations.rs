@@ -798,6 +798,12 @@ fn render_identity(identity: &HostIdentity, spec: &SecretSpec) -> Result<String,
         .ok_or("host identity destination has no SSH port")?;
     let mut lines = BTreeSet::new();
     for host in spec.ssh_hosts() {
+        if let Some(kind) = nix_secrets_core::schema::local_only_ssh_host(host) {
+            return Err(format!(
+                "refusing to publish the host identity for {} under {host}: it is {kind}",
+                spec.shared_public_id.as_deref().unwrap_or("public information")
+            ));
+        }
         for key in &identity.keys {
             let name = if port == 22 {
                 host.to_owned()

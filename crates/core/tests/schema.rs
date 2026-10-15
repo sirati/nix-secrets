@@ -275,3 +275,91 @@ fn known_hosts_errors_name_the_offending_host() {
     assert!(error.contains("line 2 names ns1.lamk.eu"), "{error}");
     assert!(error.contains("report.example, 2001:db8::1 on port 22"), "{error}");
 }
+
+/// Loopback and link-local names reach whatever listens on this machine or
+/// link, so no known_hosts value may pin them, in any spelling.
+const LOCAL_ONLY_HOSTS: &[&str] = &[
+    "127.0.0.1",
+    "127.0.0.53",
+    "127.255.255.254",
+    "127.1",
+    "0x7f000001",
+    "0177.0.0.1",
+    "2130706433",
+    "::1",
+    "0:0:0:0:0:0:0:1",
+    "::ffff:127.0.0.1",
+    "::ffff:7f00:1",
+    "0.0.0.0",
+    "::",
+    "localhost",
+    "LocalHost",
+    "localhost.",
+    "report.localhost",
+    "REPORT.LOCALHOST.",
+    "169.254.0.1",
+    "169.254.169.254",
+    "fe80::1",
+    "FE80::1",
+    "febf:ffff::1",
+    "::ffff:169.254.1.1",
+];
+
+#[test]
+fn known_hosts_never_pin_loopback_or_link_local_hosts() {
+    use nix_secrets_core::schema::validate_ssh_known_hosts;
+    let key = KEY.split_ascii_whitespace().nth(1).unwrap();
+    for host in LOCAL_ONLY_HOSTS {
+        for (port, line) in [(22, format!("{host} ssh-ed25519 {key}\n")), (23, format!("[{host}]:23 ssh-ed25519 {key}\n"))] {
+            let error = validate_ssh_known_hosts(&line, &[host], port).unwrap_err();
+            assert!(error.contains(&format!("names {host}, which is a")) || error.contains(&format!("names {host}, which is the")), "{host}: {error}");
+            assert!(error.contains("never pinned"), "{host}: {error}");
+        }
+    }
+    for host in [
+        "report.example",
+        "report.example.",
+        "localhost.example",
+        "mylocalhost",
+        "127.0.0.1.example",
+        "88.99.80.66",
+        "128.0.0.1",
+        "126.255.255.255",
+        "169.255.0.1",
+        "169.253.255.255",
+        "2a01:4f8:1c17:5100::1",
+        "fec0::1",
+        "fe7f::1",
+        "::2",
+        "::ffff:88.99.80.66",
+        "0x7f.example",
+    ] {
+        let line = format!("[{host}]:23 ssh-ed25519 {key}\n");
+        validate_ssh_known_hosts(&line, &[host], 23).unwrap_or_else(|error| panic!("{host}: {error}"));
+    }
+}
+
+#[test]
+fn schema_rejects_loopback_or_link_local_expected_ssh_hosts() {
+    let schema = |host: &str, more: &[&str]| {
+        serde_json::json!({"host": {
+            "metadata": {"socketPath": "/run/nix-secrets/backend.sock",
+                "deployment": {"host": "host", "destination": "secrets@host", "port": 22}},
+            "services": {"reporting-trust": {"receiver-known-hosts": {
+                "kind": "public-info", "sharedPublicId": "reporting/receiver-known-hosts",
+                "expectedSshHost": host, "expectedSshHosts": more,
+                "expectedSshPort": 22, "consumerUnits": [],
+                "destination": {"path": "/persistent/public-info/reporting/receiver-known-hosts",
+                    "category": "public-info", "owner": "root", "group": "root",
+                    "mode": "0644", "contentType": "ssh-known-hosts"}}}}
+        }})
+        .to_string()
+    };
+    Schema::from_json(&schema("report.example", &["88.99.80.66", "2a01:4f8:1c17:5100::1"])).unwrap();
+    for host in LOCAL_ONLY_HOSTS {
+        for document in [schema(host, &[]), schema("report.example", &[host])] {
+            let error = Schema::from_json(&document).unwrap_err().to_string();
+            assert!(error.contains(&format!("expected SSH host {host} is a")) || error.contains(&format!("expected SSH host {host} is the")), "{host}: {error}");
+        }
+    }
+}

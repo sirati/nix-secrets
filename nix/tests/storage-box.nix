@@ -94,6 +94,8 @@ pkgs.testers.runNixOSTest {
     machine.start(allow_reboot=True)
     machine.wait_for_unit("sshd.service")
     machine.wait_for_unit("nix-secrets-deployer.socket")
+    # The public-info default unit is part of multi-user.target.
+    machine.wait_for_unit("multi-user.target")
     machine.succeed("ss -lnt | grep ':23 '")
 
     machine.succeed("install -d -m 0700 -o storagebox -g users /var/lib/storagebox/.ssh")
@@ -101,7 +103,7 @@ pkgs.testers.runNixOSTest {
         "install -m 0600 -o storagebox -g users ${unrelatedKey}/id.pub "
         "/var/lib/storagebox/.ssh/authorized_keys"
     )
-    machine.succeed("runuser -u nobody -- cat /persistent/public-info/storage-box/known-hosts | grep '\\[127.0.0.1\\]:23 ssh-ed25519 '")
+    machine.succeed("runuser -u nobody -- cat /persistent/public-info/storage-box/known-hosts | grep '\\[storagebox.test\\]:23 ssh-ed25519 '")
     original = machine.succeed("cat /var/lib/storagebox/.ssh/authorized_keys")
 
     unit = "nix-secrets-deployer@probe.service"
@@ -133,7 +135,7 @@ pkgs.testers.runNixOSTest {
         "-o BatchMode=yes -o StrictHostKeyChecking=yes "
         "-o PasswordAuthentication=no -o KbdInteractiveAuthentication=no "
         "-o UserKnownHostsFile=/persistent/public-info/storage-box/known-hosts "
-        "storagebox@127.0.0.1 true"
+        "storagebox@storagebox.test true"
     )
     machine.succeed(auth)
 
@@ -149,7 +151,7 @@ pkgs.testers.runNixOSTest {
     machine.reboot()
     machine.wait_for_unit("sshd.service")
     assert machine.succeed(f"sha256sum {private_key}").split()[0] == first_hash
-    machine.succeed("runuser -u nobody -- cat /persistent/public-info/storage-box/known-hosts | grep '\\[127.0.0.1\\]:23 ssh-ed25519 '")
+    machine.succeed("runuser -u nobody -- cat /persistent/public-info/storage-box/known-hosts | grep '\\[storagebox.test\\]:23 ssh-ed25519 '")
     machine.succeed(auth)
   '';
 }

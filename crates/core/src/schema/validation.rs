@@ -142,11 +142,74 @@ fn validate_public_destination(
     {
         return Err(invalid(path, "invalid expected SSH host or port"));
     }
+    if let Some((host, kind)) = hosts
+        .iter()
+        .find_map(|host| local_only_ssh_host(host).map(|kind| (host, kind)))
+    {
+        return Err(invalid(
+            path,
+            &format!("expected SSH host {host} is {kind}; pin the host's real name or address"),
+        ));
+    }
     if let Some(value) = &leaf.default_value {
         validate_ssh_known_hosts(value, &hosts, leaf.expected_ssh_port.unwrap_or(0))
             .map_err(|error| invalid(path, &format!("invalid defaultValue: {error}")))?;
     }
     Ok(())
+}
+
+/// Why a known_hosts pin may never name `host`: a loopback, unspecified or
+/// link-local name or address (also IPv4-mapped, and in the numeric forms
+/// `getaddrinfo` accepts) reaches whatever listens on this machine or link,
+/// so a key pinned for it vouches for no particular host. `None` otherwise.
+pub fn local_only_ssh_host(host: &str) -> Option<&'static str> {
+    use std::net::{IpAddr, Ipv4Addr};
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return Some("a loopback name");
+    }
+    let literal = host.split_once('%').map_or(host, |(address, _)| address);
+    let address = match literal.parse::<IpAddr>() {
+        Ok(IpAddr::V6(v6)) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+        Ok(v4) => v4,
+        Err(_) => IpAddr::V4(Ipv4Addr::from(inet_aton(host)?)),
+    };
+    match address {
+        IpAddr::V4(v4) if v4.is_loopback() => Some("a loopback address"),
+        IpAddr::V6(v6) if v6.is_loopback() => Some("a loopback address"),
+        IpAddr::V4(v4) if v4.is_unspecified() => Some("the unspecified address"),
+        IpAddr::V6(v6) if v6.is_unspecified() => Some("the unspecified address"),
+        IpAddr::V4(v4) if v4.is_link_local() => Some("a link-local address"),
+        IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80 => Some("a link-local address"),
+        _ => None,
+    }
+}
+
+/// The address of an `inet_aton` form such as `127.1`, `0x7f000001` or
+/// `0177.0.0.1`, which ssh resolves like a dotted quad.
+fn inet_aton(host: &str) -> Option<u32> {
+    let parts = host
+        .split('.')
+        .map(|part| {
+            let (digits, radix) = match part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+                Some(hex) => (hex, 16),
+                None if part.len() > 1 && part.starts_with('0') => (&part[1..], 8),
+                None => (part, 10),
+            };
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            u32::from_str_radix(digits, radix).ok()
+        })
+        .collect::<Option<Vec<u32>>>()?;
+    let (last, leading) = parts.split_last()?;
+    let last_bits = 8 * (4 - leading.len().min(4)) as u32;
+    if leading.len() > 3 || leading.iter().any(|part| *part > 0xff) || u64::from(*last) >= 1 << last_bits {
+        return None;
+    }
+    let high = leading.iter().fold(0_u64, |address, part| address << 8 | u64::from(*part));
+    u32::try_from(high << last_bits | u64::from(*last)).ok()
 }
 
 /// The largest public-info known_hosts value.
@@ -207,6 +270,15 @@ fn known_hosts_lines<'a>(
             ));
         }
         let name = parts[0];
+        let bare = name
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("]:"))
+            .map_or(name, |(host, _)| host);
+        if let Some(kind) = local_only_ssh_host(bare) {
+            return Err(format!(
+                "known_hosts line {number} names {bare}, which is {kind} and is never pinned"
+            ));
+        }
         let host = hosts
             .iter()
             .copied()

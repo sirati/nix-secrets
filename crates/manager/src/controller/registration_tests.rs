@@ -63,7 +63,7 @@ impl Fixture {
             document[&host]["services"]["reporting-trust"]["receiver-known-hosts"] = serde_json::json!({
                 "kind":"public-info", "recipientPublicKeys":[], "recipientIds":[], "consumerUnits":[], "optional":true,
                 "sharedPublicId":"reporting/receiver-known-hosts", "expectedSshHost":"receiver.example",
-                "expectedSshHosts":["127.0.0.1","2a01:4f8:1c17:5100::1"], "expectedSshPort":22,
+                "expectedSshHosts":["203.0.113.7","2a01:4f8:1c17:5100::1"], "expectedSshPort":22,
                 "destination":{"path":"/persistent/public-info/reporting/receiver-known-hosts","category":"public-info","owner":"root","group":"root","mode":"0644","contentType":"ssh-known-hosts"}
             });
         }
@@ -1048,12 +1048,22 @@ fn other_deployed_consumers_are_deferred_until_original_selected_send() {
 /// wider host list. The narrower schema must not deadlock the producer.
 #[test]
 fn a_stored_identity_from_an_older_schema_is_kept_listed_and_republished() {
+    republishes_a_stored_identity_the_schema_rejects("ns1.lamk.eu", "names ns1.lamk.eu");
+}
+
+/// The value ns1 published while it reported to itself over loopback.
+#[test]
+fn a_stored_identity_pinning_loopback_is_kept_listed_and_republished() {
+    republishes_a_stored_identity_the_schema_rejects("127.0.0.1", "names 127.0.0.1, which is a loopback address");
+}
+
+fn republishes_a_stored_identity_the_schema_rejects(stale_host: &str, reason_part: &str) {
     let mut fixture = Fixture::new("ns1", false);
     let leaf = "ns1.services.reporting-trust.receiver-known-hosts".to_owned();
     let identity = fixture.trusted_identity(7);
     let key = format!("ssh-ed25519 {}", identity.keys[0].encoded);
-    // Published while the schema still allowed ns1.lamk.eu.
-    let stale = format!("ns1.lamk.eu {key}\nreceiver.example {key}\n");
+    // Published while the schema still allowed the stale host.
+    let stale = format!("{stale_host} {key}\nreceiver.example {key}\n");
     std::fs::write(
         &fixture.store,
         format!(
@@ -1077,7 +1087,7 @@ fn a_stored_identity_from_an_older_schema_is_kept_listed_and_republished() {
     assert_eq!(plan.reasons[&leaf], super::unset::MissingKind::InvalidUnderSchema);
     let reason = &plan.missing.iter().find(|(id, _)| id == &leaf).unwrap().1;
     assert!(reason.contains("reporting/receiver-known-hosts"), "{reason}");
-    assert!(reason.contains("names ns1.lamk.eu"), "{reason}");
+    assert!(reason.contains(reason_part), "{reason}");
     assert!(reason.contains("deploy ns1 to republish it"), "{reason}");
     assert!(plan.skippable.contains(&leaf));
     // The producer's own deployment proposes the replacement instead of
@@ -1089,7 +1099,7 @@ fn a_stored_identity_from_an_older_schema_is_kept_listed_and_republished() {
     assert_eq!(Fixture::stored_identity(&mut fixture.controller), stale);
     fixture.controller.apply_host_mutations(batch).unwrap();
     let republished = Fixture::stored_identity(&mut fixture.controller);
-    assert!(!republished.contains("ns1.lamk.eu"), "{republished}");
+    assert!(!republished.contains(stale_host), "{republished}");
     assert!(republished.contains("receiver.example ssh-ed25519"), "{republished}");
     fixture.controller.plan_set(&ids).unwrap();
     assert!(fixture.controller.stale_public.is_empty());
@@ -1132,4 +1142,30 @@ fn a_quarantined_public_key_is_adopted_explicitly() {
     let adopted = fixture.controller.client.generated_public_key(&path).unwrap().unwrap();
     assert_eq!(adopted.public_key, dated.split_once(' ').unwrap().1);
     assert!(fixture.controller.client.list_quarantine().unwrap().is_empty());
+}
+/// A schema that skipped validation (it deserializes without it) still never
+/// makes the identity producer pin a loopback or link-local name.
+#[test]
+fn identity_producer_refuses_loopback_and_link_local_hosts() {
+    for host in ["127.0.0.1", "::1", "localhost", "169.254.1.1", "fe80::1"] {
+        let mut fixture = Fixture::new("ns1", false);
+        let mut document = serde_json::to_value(&fixture.controller.schema).unwrap();
+        document["ns1"]["services"]["reporting-trust"]["receiver-known-hosts"]["expectedSshHosts"] =
+            serde_json::json!([host, "2a01:4f8:1c17:5100::1"]);
+        fixture.controller.schema = serde_json::from_value(document).unwrap();
+        let mut batch = super::host_mutations::HostMutationBatch::default();
+        let identity = fixture.trusted_identity(7);
+        let error = fixture
+            .controller
+            .stage_host_identity("ns1", &identity, &mut batch)
+            .unwrap_err();
+        assert!(
+            error.contains(&format!(
+                "refusing to publish the host identity for reporting/receiver-known-hosts under {host}"
+            )),
+            "{error}"
+        );
+        assert!(batch.mutations.is_empty());
+        assert!(fixture.controller.client.get_public_info("reporting/receiver-known-hosts").unwrap().is_none());
+    }
 }

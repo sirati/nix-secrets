@@ -21,7 +21,7 @@ let
     mode = "0400";
   };
   bootstrap = key: {
-    host = "127.0.0.1";
+    host = "storagebox.test";
     port = 23;
     user = "storagebox";
     hostPublicKeys = [ (publicKey key) ];
@@ -30,11 +30,15 @@ let
   knownHostsInventory = builtins.toFile "storage-box-public-info.toml" ''
     [public_info."storage-box/known-hosts"]
     version_id = "00000000000000000000000000000000"
-    value = "[127.0.0.1]:23 ${hostPin}\n"
+    value = "[storagebox.test]:23 ${hostPin}\n"
   '';
 in
 {
   imports = [ module ];
+
+  # The storage box's name resolves to its sshd, here on this machine, as DNS
+  # does in production. Pins never name a loopback address.
+  networking.hosts."127.0.0.1" = [ "storagebox.test" ];
 
   environment.systemPackages = [
     pkgs.openssh
@@ -85,7 +89,7 @@ in
         type = "storage-box-ssh-key";
         output = output "storage-box-key";
         bootstrap = {
-          host = "127.0.0.1";
+          host = "storagebox.test";
           port = 23;
           user = "storagebox";
           knownHostsFile = runtimeKnownHosts;
@@ -94,7 +98,7 @@ in
       known-hosts = {
         kind = "public-info";
         sharedPublicId = "storage-box/known-hosts";
-        expectedSshHost = "127.0.0.1";
+        expectedSshHost = "storagebox.test";
         expectedSshPort = 23;
         installDefaultIfMissing = true;
         destination = {
