@@ -66,6 +66,10 @@ fn fixture() -> Fixture {
                     "identifier": "host.services.app.password", "prefix": "pw=", "suffix": "\n"}}), json!({})),
                 "remote": leaf("remote", json!({"valueType": "key", "derivedFrom": {
                     "identifier": "other.services.db.password", "prefix": "[", "suffix": "]"}}), json!({})),
+                "knot": leaf("knot", json!({"valueType": "key", "derivedFrom": {
+                    "identifier": "other.services.mail.dns-update-key",
+                    "prefix": "key:\n  - id: shared\n    algorithm: hmac-sha256\n    secret: ",
+                    "suffix": "\n"}}), json!({})),
                 "external": leaf("external", json!({"valueType": "password", "externalInputRequired": true}), json!({})),
                 "opaque": leaf("opaque", json!({"valueType": "key"}), json!({})),
                 "private": leaf("private", json!({}), json!({"contentType": "openssh-private-key"})),
@@ -116,7 +120,7 @@ fn installs_every_deployable_leaf_through_the_publisher() {
     let f = fixture();
     let report = mock_install(&f.manifest, "host", &values(), true, &f.secrets, &f.public).unwrap();
     assert_eq!(report.already_installed, 0);
-    assert_eq!(report.installed.len(), 12);
+    assert_eq!(report.installed.len(), 13);
     assert!(!report
         .installed
         .iter()
@@ -132,6 +136,16 @@ fn installs_every_deployable_leaf_through_the_publisher() {
     assert_eq!(read(root, "app/service/framed"), format!("pw={password}\n"));
     let remote = read(root, "app/service/remote");
     assert!(remote.starts_with('[') && remote.ends_with(']') && remote.len() > 2);
+    // A source on another host gets production's shared-key shape: padded
+    // standard base64 of 32 bytes, as Knot requires of a TSIG secret.
+    let secret = read(root, "app/service/knot")
+        .strip_prefix("key:\n  - id: shared\n    algorithm: hmac-sha256\n    secret: ")
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .map(str::to_owned)
+        .unwrap();
+    assert_eq!(secret.len(), 44);
+    assert!(secret.ends_with('='));
+    assert_eq!(STANDARD.decode(&secret).unwrap().len(), 32);
     assert!(ssh_key::PrivateKey::from_openssh(read(root, "app/service/private")).is_ok());
     assert!(ssh_key::PrivateKey::from_openssh(read(root, "keys/service/local")).is_ok());
     assert!(ssh_key::PublicKey::from_openssh(read(root, "app/service/public").trim()).is_ok());
@@ -174,7 +188,7 @@ fn second_run_changes_nothing_and_only_missing_leaves_are_added() {
     let current = std::fs::read_link(f.secrets_root.join(".current")).unwrap();
     let report = mock_install(&f.manifest, "host", &values(), true, &f.secrets, &f.public).unwrap();
     assert!(report.installed.is_empty());
-    assert_eq!(report.already_installed, 12);
+    assert_eq!(report.already_installed, 13);
     assert_eq!(
         std::fs::read_link(f.secrets_root.join(".current")).unwrap(),
         current

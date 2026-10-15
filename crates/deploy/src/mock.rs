@@ -20,8 +20,10 @@
 //!   - a derived leaf: its source's mock value (explicit, generated in this
 //!     run, or already installed), framed with the real `DerivedFrom`
 //!     framing and version. An explicit value for a derived leaf is taken
-//!     as its source value and framed. A source on another host gets a random
-//!     value, since that host's mock value is unknown here;
+//!     as its source value and framed. A source on another host, whose
+//!     generator and mock value are unknown here, gets what production's
+//!     shared-key generator (`random-bytes`, 32 bytes, `base64`) emits:
+//!     padded standard base64, as a TSIG secret must be;
 //!   - a generated-secret task: a fresh Ed25519 private key;
 //!   - public information: a known-hosts line for its expected host and port;
 //!   - anything else: a value that passes the receiver's content checks
@@ -169,7 +171,7 @@ pub fn mock_install(
         } else if generate_rest {
             // The source lives on another host whose mock value is unknown
             // here; the framing is still the real one.
-            Some((fresh_version()?.to_vec(), random_text()?))
+            Some((fresh_version()?.to_vec(), shared_key()?))
         } else {
             None
         };
@@ -325,6 +327,14 @@ fn random_text() -> Result<Zeroizing<Vec<u8>>, DeployError> {
     Ok(Zeroizing::new(
         URL_SAFE_NO_PAD.encode(bytes.as_ref()).into_bytes(),
     ))
+}
+
+/// What `random-bytes` with 32 bytes and `base64` encoding generates: the
+/// production generator of secrets shared across hosts, such as TSIG keys.
+fn shared_key() -> Result<Zeroizing<Vec<u8>>, DeployError> {
+    let mut bytes = Zeroizing::new([0_u8; 32]);
+    getrandom::fill(bytes.as_mut()).map_err(|_| invalid("operating-system randomness failed"))?;
+    Ok(Zeroizing::new(STANDARD.encode(bytes.as_ref()).into_bytes()))
 }
 
 fn fresh_version() -> Result<[u8; VERSION_ID_SIZE], DeployError> {
