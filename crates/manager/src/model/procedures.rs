@@ -287,6 +287,7 @@ impl Procedure {
                 deployment: false,
                 failure: None,
                 warning: None,
+                progress: None,
             });
         next.step += 1;
         next.position()
@@ -312,6 +313,21 @@ impl Procedure {
         Some(format!("{} · {state}", self.title))
     }
 
+    /// What the current step does right now, as the procedure's command
+    /// reported it: its text, then a bar when it has a percentage,
+    /// `█████████░░░░░░░░░░░ 45%`.
+    pub fn progress(&self) -> Vec<String> {
+        let Some(progress) = self.step.as_ref().and_then(|step| step.progress.as_ref()) else {
+            return Vec::new();
+        };
+        let mut lines = vec![progress.text.clone()];
+        if let Some(percent) = progress.percent {
+            let filled = usize::from(percent.min(100)) / 5;
+            lines.push(format!("{}{} {percent}%", "█".repeat(filled), "░".repeat(20 - filled)));
+        }
+        lines
+    }
+
     /// The finished steps, then what happens now. `spinner` is the current
     /// spinner frame.
     pub fn between_body(&self, spinner: char, now: Instant) -> Option<String> {
@@ -328,6 +344,7 @@ impl Procedure {
                         format!("{}: {}", step.position(), step.label)
                     });
                 lines.push(format!("{spinner} {what} … {} s", seconds(since)));
+                lines.extend(self.progress().into_iter().map(|line| format!("  {line}")));
             }
             Between::Waiting { since } => {
                 // An SSH login may reconnect, which asks for the same step again.
@@ -345,6 +362,7 @@ impl Procedure {
                     self.next_position(),
                     seconds(since)
                 ));
+                lines.extend(self.progress().into_iter().map(|line| format!("  {line}")));
             }
             Between::Result { text, .. } => {
                 if !lines.is_empty() {

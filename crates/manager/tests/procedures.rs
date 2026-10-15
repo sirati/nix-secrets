@@ -500,3 +500,49 @@ fn a_step_the_command_reports_warned_reaches_the_operator_with_its_reason() {
     );
     assert!(!stderr.contains("not reached"), "{stderr}");
 }
+
+#[test]
+fn the_progress_of_the_current_step_reaches_the_operator_without_a_new_step() {
+    let fixture = fixture(Duration::from_secs(600));
+    let operator = fixture.attach();
+    let progress = |arguments: &str| {
+        format!(r#""$NIX_SECRETS" procedure-step-progress --backend-socket "$SOCKET" {arguments}"#)
+    };
+    let holder = fixture.procedure(
+        "Update host",
+        &format!(
+            r#""$NIX_SECRETS" procedure-step-warning --backend-socket "$SOCKET" --label "update of host" --reason "slow" && {} && {} && ! {}"#,
+            progress(r#"--text "uploading the closure: 45%" --percent 45"#),
+            progress(r#"--text "activating the new system""#),
+            progress(r#"--text "too far" --percent 101"#),
+        ),
+    );
+    let mut steps = Vec::new();
+    let until = Instant::now() + Duration::from_secs(30);
+    while steps.len() < 3 {
+        assert!(Instant::now() < until, "the progress never arrived");
+        if let ChannelEvent::Procedure(step) = operator.next() {
+            if step.step > 0 {
+                steps.push(step);
+            }
+        }
+    }
+    // Every report stays on step 1, the step of the warning.
+    for step in &steps {
+        assert_eq!((step.step, step.label.as_str()), (1, "update of host"));
+    }
+    assert_eq!(steps[0].progress, None);
+    let progress = |step: &nix_secrets_core::procedure::ProcedureStep| {
+        step.progress.as_ref().map(|progress| (progress.text.clone(), progress.percent))
+    };
+    assert_eq!(progress(&steps[1]), Some(("uploading the closure: 45%".into(), Some(45))));
+    assert_eq!(progress(&steps[2]), Some(("activating the new system".into(), None)));
+    assert_eq!(steps[2].warning.as_deref(), Some("slow"), "progress keeps the warning");
+    assert_eq!(operator.until_ended(&steps[0].id), Some(0));
+    let output = finish(holder);
+    assert!(output.status.success(), "{output:?}");
+    // The command shows its own progress; nix-secrets adds nothing.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("uploading"), "{stderr}");
+    assert!(stderr.contains("--percent takes a number from 0 to 100"), "{stderr}");
+}

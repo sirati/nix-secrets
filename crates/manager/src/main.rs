@@ -86,6 +86,11 @@ fn main() {
         .is_some()
     {
         procedure_step_report(StepReportKind::Warning, arguments.collect())
+    } else if arguments
+        .next_if(|argument| argument == "procedure-step-progress")
+        .is_some()
+    {
+        procedure_step_progress(arguments.collect())
     } else {
         run(arguments.collect()).map(|()| 0)
     };
@@ -264,6 +269,22 @@ fn procedure_step_report(
     // Nothing about this environment may keep the report from being shown.
     let report = parse_step_report(kind, arguments, env::current_dir().unwrap_or_default())?;
     Ok(report_step(
+        &report,
+        &runtime_directory(&home().unwrap_or_default()),
+        with_secrets::procedure_token(),
+        STEP_REPORT_TIMEOUT,
+        &mut io::stderr(),
+    ))
+}
+
+/// Reports the progress of the current step of the procedure this runs in;
+/// see `procedure_command`.
+fn procedure_step_progress(arguments: Vec<OsString>) -> Result<i32, Box<dyn std::error::Error>> {
+    use nix_secrets_manager::procedure_command::{
+        parse_progress_report, report_progress, STEP_REPORT_TIMEOUT,
+    };
+    let report = parse_progress_report(arguments, env::current_dir().unwrap_or_default())?;
+    Ok(report_progress(
         &report,
         &runtime_directory(&home().unwrap_or_default()),
         with_secrets::procedure_token(),

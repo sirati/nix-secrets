@@ -62,6 +62,7 @@ fn step(id: &str, title: &str, number: u32, label: &str) -> ProcedureStep {
         deployment: false,
         failure: None,
         warning: None,
+        progress: None,
     }
 }
 
@@ -1149,4 +1150,45 @@ fn a_warned_procedure_in_the_task_bar_waits_after_its_clean_exit() {
     assert!(screen.contains("⚠ step 3/3: activate ns1: nothing regressed"), "{screen}");
     reduce(&mut model, UiEvent::Enter, &mut channel);
     assert!(model.procedures.is_empty());
+}
+
+#[test]
+fn the_current_step_shows_its_progress_live_in_the_procedure_dialog() {
+    use nix_secrets_core::procedure::StepProgress;
+    let mut model = model(true);
+    let mut channel = Channel::default();
+    channel.prompts.push(closure_step("closure", 1, 3));
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    signed(&mut model, "closure", Ok(()));
+    let progressed = |text: &str, percent| {
+        let mut step = step(UPDATE, "Update ns1", 1, "sign closure for ns1");
+        step.progress = Some(StepProgress { text: text.into(), percent });
+        ProcedureEvent::Step(step)
+    };
+    channel
+        .events
+        .push(progressed("uploading the closure: 45% (153 of 340 paths, 367.2 of 812.0 MiB)", Some(45)));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("┌Update ns1 · waiting for step 2/3"), "{screen}");
+    assert!(
+        screen.contains("  uploading the closure: 45% (153 of 340 paths, 367.2 of 812.0 MiB)")
+            && screen.contains("  █████████░░░░░░░░░░░ 45%"),
+        "{screen}"
+    );
+    // A stage replaces it; it has no bar.
+    channel.events.push(progressed("activating the new system", None));
+    tick(&mut model, &mut channel);
+    let screen = render(&model);
+    assert!(screen.contains("  activating the new system"), "{screen}");
+    assert!(!screen.contains("uploading"), "{screen}");
+    assert!(!screen.contains('░'), "{screen}");
+    // The next step starts without it.
+    let mut login = prompt("login", Some(step(UPDATE, "Update ns1", 2, "SSH authentication to update@ns1")));
+    login.deadline = None;
+    channel.prompts.push(login);
+    tick(&mut model, &mut channel);
+    reduce(&mut model, UiEvent::ConfirmLoss, &mut channel);
+    assert!(!render(&model).contains("activating the new system"));
 }

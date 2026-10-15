@@ -28,6 +28,14 @@
 //! Reports that the step worked with a caveat, the same way. The TUI lists
 //! it with ⚠, and a procedure that succeeds with warnings stays until the
 //! operator closes its result.
+//!
+//! ```text
+//! nix-secrets procedure-step-progress [--repository PATH] [--backend-socket PATH] --text TEXT [--percent N]
+//! ```
+//!
+//! Shows what the current step does right now, and how far it got, in the
+//! procedure dialog. It never adds a step; the next step, failure or warning
+//! replaces it.
 use crate::socket::connect_verified;
 use crate::with_secrets::{backend_candidates, connect_backend, Options};
 use nix_secrets_core::framing::{read_json, write_json};
@@ -287,11 +295,6 @@ fn send_report(
     token: String,
     timeout: Duration,
 ) -> Result<Result<(), String>, String> {
-    let mut stream = connect_running(&report.options, runtime)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
-        .map_err(|error| error.to_string())?;
     let (procedure, label, reason) = (token, report.label.clone(), report.reason.clone());
     let request = match report.kind {
         StepReportKind::Failed => Request::FailProcedureStep {
@@ -305,12 +308,115 @@ fn send_report(
             reason,
         },
     };
-    write_json(&mut stream, &request).map_err(|error| error.to_string())?;
+    send(&report.options, runtime, &request, timeout)
+}
+
+/// Sends one request to the running backend; `Ok(Err(..))` is the backend
+/// refusing it.
+fn send(
+    options: &Options,
+    runtime: &Path,
+    request: &Request,
+    timeout: Duration,
+) -> Result<Result<(), String>, String> {
+    let mut stream = connect_running(options, runtime)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|error| error.to_string())?;
+    write_json(&mut stream, request).map_err(|error| error.to_string())?;
     match read_json::<Response>(&mut stream).map_err(|error| error.to_string())? {
         Some(Response::Success) => Ok(Ok(())),
         Some(Response::Error { message }) => Ok(Err(message)),
         Some(other) => Ok(Err(format!("unexpected backend response: {other:?}"))),
         None => Ok(Err("the backend closed the connection without an answer".into())),
+    }
+}
+
+pub const PROGRESS_USAGE: &str = "usage: nix-secrets procedure-step-progress [--repository PATH] \
+[--backend-socket PATH] --text TEXT [--percent N]";
+
+/// `nix-secrets procedure-step-progress`: the command of a procedure
+/// reports what its current step does right now, and how far it got.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgressReport {
+    pub options: Options,
+    pub text: String,
+    pub percent: Option<u8>,
+}
+
+pub fn parse_progress_report(
+    arguments: impl IntoIterator<Item = OsString>,
+    working_directory: PathBuf,
+) -> Result<ProgressReport, String> {
+    let mut arguments = arguments.into_iter();
+    let mut options = Options {
+        repository: working_directory,
+        ..Options::default()
+    };
+    let (mut text, mut percent) = (None, None);
+    while let Some(argument) = arguments.next() {
+        let name = argument
+            .to_str()
+            .ok_or_else(|| format!("unexpected argument {argument:?}; {PROGRESS_USAGE}"))?
+            .to_owned();
+        let mut value = |name: &str| {
+            arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| format!("{name} requires UTF-8 text; {PROGRESS_USAGE}"))
+        };
+        match name.as_str() {
+            "--text" => text = Some(value("--text")?),
+            "--percent" => {
+                percent = Some(
+                    value("--percent")?
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|percent| *percent <= 100)
+                        .ok_or_else(|| format!("--percent takes a number from 0 to 100; {PROGRESS_USAGE}"))?,
+                )
+            }
+            "--repository" => options.repository = value("--repository")?.into(),
+            "--backend-socket" => options.backend_socket = Some(value("--backend-socket")?.into()),
+            _ => return Err(format!("unexpected argument {name:?}; {PROGRESS_USAGE}")),
+        }
+    }
+    let text = text
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| format!("say what happens with --text; {PROGRESS_USAGE}"))?;
+    Ok(ProgressReport {
+        options,
+        text,
+        percent,
+    })
+}
+
+/// Shows the progress of the current step in the TUI. The command that
+/// reports it shows its progress itself, so this prints nothing unless the
+/// backend refuses the report, which exits 1. Outside a procedure, or
+/// without a reachable backend, it does nothing and exits 0.
+pub fn report_progress(
+    report: &ProgressReport,
+    runtime: &Path,
+    token: Option<String>,
+    timeout: Duration,
+    stderr: &mut dyn std::io::Write,
+) -> i32 {
+    let Some(procedure) = token else {
+        return 0;
+    };
+    let request = Request::ReportProcedureProgress {
+        procedure,
+        text: report.text.clone(),
+        percent: report.percent,
+    };
+    match send(&report.options, runtime, &request, timeout) {
+        Ok(Ok(())) | Err(_) => 0,
+        Ok(Err(message)) => {
+            let _ = writeln!(stderr, "nix-secrets: the backend refused the progress report: {message}");
+            1
+        }
     }
 }
 

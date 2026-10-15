@@ -52,6 +52,7 @@ fn prompt(id: &str, deadline: Option<Instant>, step: Option<(u32, &str)>) -> Sec
             deployment: false,
             failure: None,
             warning: None,
+            progress: None,
         }),
     }
 }

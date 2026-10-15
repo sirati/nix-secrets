@@ -268,6 +268,20 @@ impl Operators {
         self.broadcast_step(step.clone());
         Ok(step)
     }
+
+    /// Sets the progress of the current step; see
+    /// [`super::Request::ReportProcedureProgress`].
+    pub(super) fn progress_step(
+        &self,
+        token: &str,
+        peer: u32,
+        text: &str,
+        percent: Option<u8>,
+    ) -> Result<ProcedureStep, String> {
+        let step = self.procedures.progress_step(token, peer, text, percent)?;
+        self.broadcast_step(step.clone());
+        Ok(step)
+    }
 }
 
 /// Serves an attached TUI until it disconnects.

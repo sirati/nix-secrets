@@ -9,7 +9,7 @@ use super::{Request, Response};
 use crate::framing::{read_json, write_json};
 use crate::procedure::{
     MAX_DECLARED_STEPS, MAX_LABEL_BYTES, MAX_PROCEDURES, MAX_REASON_BYTES, MAX_TITLE_BYTES,
-    ProcedureStep,
+    ProcedureStep, StepProgress,
     clean_text, split_token,
 };
 use crate::secret_request::is_same_or_descendant;
@@ -106,6 +106,7 @@ impl Procedures {
             deployment: false,
             failure: None,
             warning: None,
+            progress: None,
         };
         live.insert(
             id.clone(),
@@ -177,15 +178,36 @@ impl Procedures {
         self.number_step(token, peer, label, false, true, Some(Report::Warning(reason)))
     }
 
-    fn number_step(
+    /// Sets what the current step does right now; see
+    /// [`super::Request::ReportProcedureProgress`]. The step keeps its number,
+    /// label, failure and warning.
+    pub(super) fn progress_step(
         &self,
         token: &str,
         peer: u32,
-        label: &str,
-        deployment: bool,
-        repeatable: bool,
-        report: Option<Report>,
+        text: &str,
+        percent: Option<u8>,
     ) -> Result<ProcedureStep, String> {
+        let text = clean_text(text, MAX_REASON_BYTES);
+        if text.is_empty() {
+            return Err("a progress report needs a text".into());
+        }
+        if percent.is_some_and(|percent| percent > 100) {
+            return Err("a progress percentage is at most 100".into());
+        }
+        self.joined(token, peer, |procedure| {
+            procedure.step.progress = Some(StepProgress { text, percent });
+            procedure.step.clone()
+        })
+    }
+
+    /// Runs `change` on the procedure of `token` once `peer` may act in it.
+    fn joined<T>(
+        &self,
+        token: &str,
+        peer: u32,
+        change: impl FnOnce(&mut Live) -> T,
+    ) -> Result<T, String> {
         let (id, secret) = split_token(token).ok_or("the procedure token is malformed")?;
         let mut live = self.live.lock().map_err(|_| "procedure registry poisoned")?;
         let procedure = live
@@ -198,28 +220,49 @@ impl Procedures {
                  `nix-secrets procedure` and its descendants may join it"
             ));
         }
+        Ok(change(procedure))
+    }
+
+    fn number_step(
+        &self,
+        token: &str,
+        peer: u32,
+        label: &str,
+        deployment: bool,
+        repeatable: bool,
+        report: Option<Report>,
+    ) -> Result<ProcedureStep, String> {
         let label = clean_text(label, MAX_LABEL_BYTES);
-        let repeat = repeatable
-            && procedure.repeatable
-            && procedure.step.step > 0
-            && procedure.step.label == label;
-        if !repeat {
-            procedure.step.step = procedure.step.step.saturating_add(1);
-            procedure.step.failure = None;
-            procedure.step.warning = None;
-        }
-        procedure.step.label = label;
-        procedure.step.deployment = deployment;
-        match report {
-            Some(Report::Failure(reason)) => procedure.step.failure = Some(reason),
-            Some(Report::Warning(reason)) => procedure.step.warning = Some(reason),
-            None => {
+        self.joined(token, peer, |procedure| {
+            let repeat = repeatable
+                && procedure.repeatable
+                && procedure.step.step > 0
+                && procedure.step.label == label;
+            if !repeat {
+                procedure.step.step = procedure.step.step.saturating_add(1);
                 procedure.step.failure = None;
                 procedure.step.warning = None;
+                procedure.step.progress = None;
             }
-        }
-        procedure.repeatable = repeatable;
-        Ok(procedure.step.clone())
+            procedure.step.label = label;
+            procedure.step.deployment = deployment;
+            match report {
+                Some(Report::Failure(reason)) => {
+                    procedure.step.failure = Some(reason);
+                    procedure.step.progress = None;
+                }
+                Some(Report::Warning(reason)) => {
+                    procedure.step.warning = Some(reason);
+                    procedure.step.progress = None;
+                }
+                None => {
+                    procedure.step.failure = None;
+                    procedure.step.warning = None;
+                }
+            }
+            procedure.repeatable = repeatable;
+            procedure.step.clone()
+        })
     }
 }
 
@@ -462,5 +505,51 @@ mod tests {
             procedures.begin(1, "x", None).unwrap();
         }
         assert!(procedures.begin(1, "x", None).is_err());
+    }
+
+    #[test]
+    fn progress_shows_on_the_current_step_until_the_next_step_or_report() {
+        let procedures = Procedures::default();
+        let own = std::process::id();
+        let (_, token) = procedures.begin(own, "Update ns1", Some(3)).unwrap();
+        procedures
+            .next_step(&token, own, "SSH login to update@ns1", false, true)
+            .unwrap();
+        let step = procedures
+            .progress_step(&token, own, "uploading the closure: 45%\x1b", Some(45))
+            .unwrap();
+        // It never numbers a step.
+        assert_eq!((step.step, step.label.as_str()), (1, "SSH login to update@ns1"));
+        assert_eq!(
+            step.progress,
+            Some(StepProgress { text: "uploading the closure: 45%".into(), percent: Some(45) })
+        );
+        assert_eq!(procedures.snapshot()[0].progress, step.progress);
+        // A reconnect to the same destination keeps it; a new step clears it.
+        let step = procedures
+            .next_step(&token, own, "SSH login to update@ns1", false, true)
+            .unwrap();
+        assert!(step.progress.is_some());
+        procedures.progress_step(&token, own, "activating the new system", None).unwrap();
+        let step = procedures.fail_step(&token, own, "update of ns1", "rolled back").unwrap();
+        assert_eq!((step.step, step.progress), (2, None));
+        let step = procedures.progress_step(&token, own, "rolling back", None).unwrap();
+        assert_eq!(step.failure.as_deref(), Some("rolled back"), "progress keeps the failure");
+        let step = procedures.fail_step(&token, own, "update of ns1", "rolled back; restored").unwrap();
+        assert_eq!((step.step, step.progress), (2, None), "the final report clears it");
+        procedures.progress_step(&token, own, "deploying", None).unwrap();
+        let step = procedures.next_step(&token, own, "deploy secrets to ns1", true, false).unwrap();
+        assert_eq!((step.step, step.progress), (3, None));
+        // Same checks as any report.
+        assert!(procedures.progress_step(&token, own, " ", None).is_err());
+        assert!(procedures.progress_step(&token, own, "x", Some(101)).is_err());
+        let (id, _) = split_token(&token).unwrap();
+        assert!(procedures.progress_step(&format!("{id}:{}", "0".repeat(64)), own, "x", None).is_err());
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let (_, foreign) = procedures.begin(child.id(), "Other", None).unwrap();
+        let error = procedures.progress_step(&foreign, own, "x", None).unwrap_err();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(error.contains("does not belong"), "{error}");
     }
 }

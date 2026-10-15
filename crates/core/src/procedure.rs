@@ -17,6 +17,9 @@
 //! descendant checks, and the TUI shows it as a failed step with its reason.
 //! `nix-secrets procedure-step-warning` reports a step that worked with a
 //! caveat ([`crate::Request::WarnProcedureStep`]) the same way.
+//! `nix-secrets procedure-step-progress` reports what the current step does
+//! right now ([`crate::Request::ReportProcedureProgress`]); it never numbers a
+//! step.
 use serde::{Deserialize, Serialize};
 
 /// The environment variable carrying a procedure token to requesters.
@@ -57,6 +60,22 @@ pub struct ProcedureStep {
     /// `failure`; any later step clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// What the procedure's command does in this step right now, such as
+    /// an upload and its percentage; see
+    /// [`crate::Request::ReportProcedureProgress`]. A new step, a failure or a
+    /// warning clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<StepProgress>,
+}
+
+/// The live progress of a procedure step.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepProgress {
+    pub text: String,
+    /// 0 to 100, when the work has a known size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
 }
 
 impl ProcedureStep {
@@ -107,6 +126,13 @@ impl ProcedureStep {
         {
             return Err("procedure step warning has an invalid length");
         }
+        if self.progress.as_ref().is_some_and(|progress| {
+            progress.text.is_empty()
+                || progress.text.len() > MAX_REASON_BYTES
+                || progress.percent.is_some_and(|percent| percent > 100)
+        }) {
+            return Err("procedure step progress is invalid");
+        }
         Ok(())
     }
 }
@@ -146,6 +172,7 @@ mod tests {
             deployment: false,
             failure: None,
             warning: None,
+            progress: None,
         };
         assert!(step.countdown());
         assert_eq!(step.position(), "step 1/4");
@@ -171,6 +198,13 @@ mod tests {
         step.warning = Some("x".repeat(MAX_REASON_BYTES + 1));
         assert!(step.validate().is_err());
         step.warning = None;
+        step.progress = Some(StepProgress { text: "uploading".into(), percent: Some(100) });
+        assert!(step.validate().is_ok());
+        step.progress = Some(StepProgress { text: "uploading".into(), percent: Some(101) });
+        assert!(step.validate().is_err());
+        step.progress = Some(StepProgress { text: String::new(), percent: None });
+        assert!(step.validate().is_err());
+        step.progress = None;
         step.id = "proc:1".into();
         assert!(step.validate().is_err());
     }

@@ -87,6 +87,16 @@ warnings shows "succeeded with warnings" and stays until the operator closes
 it with Enter. A clean success closes on its own. The command prints
 `nix-secrets: step warning: LABEL: REASON` to stderr.
 
+```text
+nix-secrets procedure-step-progress --text TEXT [--percent N]
+```
+
+Shows what the current step does right now in the procedure dialog, under
+the step, with a bar when it has a percentage (0 to 100). It never adds a
+step. The next step, failure or warning replaces it. It prints nothing: the
+command shows its own progress. Outside a procedure or without a backend it
+does nothing and exits 0; it exits 1 if the backend refuses the report.
+
 ## with-secrets and pipe-secret
 
 ```text

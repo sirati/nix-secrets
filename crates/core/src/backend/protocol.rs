@@ -243,6 +243,19 @@ pub enum Request {
         label: String,
         reason: String,
     },
+    /// From inside a procedure: what its current step does right now,
+    /// `text`, and how far it got, `percent` (0 to 100), if known. It never
+    /// numbers a step: it sets the current step's progress, which the next
+    /// step, failure or warning clears, and broadcasts it in a
+    /// [`Response::ProcedureUpdate`]. Same token and descendant checks as
+    /// [`Request::FailProcedureStep`]; answers [`Response::Success`].
+    ReportProcedureProgress {
+        /// The token from [`crate::procedure::PROCEDURE_ENVIRONMENT`].
+        procedure: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        percent: Option<u8>,
+    },
     /// The schema document the backend evaluated; see
     /// [`Response::SchemaDocument`]. A TUI that finds requests waiting uses it
     /// instead of evaluating the repository again.
@@ -454,6 +467,7 @@ mod tests {
             deployment: false,
             failure: Some("rolled back".into()),
             warning: None,
+            progress: None,
         };
         let update = serde_json::to_string(&Response::ProcedureUpdate {
             procedure: step.clone(),
@@ -510,6 +524,7 @@ mod tests {
             deployment: false,
             failure: None,
             warning: Some("nothing regressed".into()),
+            progress: None,
         };
         let update = serde_json::to_string(&Response::ProcedureUpdate {
             procedure: step.clone(),
@@ -527,5 +542,54 @@ mod tests {
         })
         .unwrap();
         assert!(!update.contains("warning"), "{update}");
+    }
+
+    #[test]
+    fn a_progress_report_and_its_update_round_trip() {
+        let request = Request::ReportProcedureProgress {
+            procedure: "proc-1-ab:secret".into(),
+            text: "uploading the closure: 45%".into(),
+            percent: Some(45),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"operation": "report-procedure-progress",
+                "procedure": "proc-1-ab:secret", "text": "uploading the closure: 45%",
+                "percent": 45})
+        );
+        assert!(matches!(
+            serde_json::from_value::<Request>(json).unwrap(),
+            Request::ReportProcedureProgress { percent: Some(45), .. }
+        ));
+        let without = serde_json::json!({"operation": "report-procedure-progress",
+            "procedure": "p:s", "text": "activating"});
+        assert!(matches!(
+            serde_json::from_value::<Request>(without).unwrap(),
+            Request::ReportProcedureProgress { percent: None, .. }
+        ));
+        let step = ProcedureStep {
+            id: "proc-1-ab".into(),
+            title: "Update ns1".into(),
+            step: 2,
+            steps: Some(3),
+            label: "SSH login".into(),
+            deployment: false,
+            failure: None,
+            warning: None,
+            progress: Some(crate::procedure::StepProgress {
+                text: "activating".into(),
+                percent: None,
+            }),
+        };
+        let update = serde_json::to_string(&Response::ProcedureUpdate {
+            procedure: step.clone(),
+        })
+        .unwrap();
+        assert!(update.contains(r#""progress":{"text":"activating"}"#), "{update}");
+        match serde_json::from_str::<Response>(&update).unwrap() {
+            Response::ProcedureUpdate { procedure } => assert_eq!(procedure, step),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

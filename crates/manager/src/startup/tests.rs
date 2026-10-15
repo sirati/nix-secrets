@@ -59,10 +59,11 @@ fn starts_once_then_connects_to_same_user_backend() {
 
 #[test]
 fn the_socket_names_the_backend_compatibility_version() {
-    // 26: the store keeps a quarantine of host-returned values. A TUI or
-    // requester of another version never reaches this backend.
-    assert_eq!(BACKEND_COMPATIBILITY_VERSION, 26);
-    assert!(socket_name(&path()).starts_with("backend-v26-"));
+    // 27: procedure steps carry progress, which a TUI of version 26 refuses
+    // as an unknown field. A TUI or requester of another version never
+    // reaches this backend.
+    assert_eq!(BACKEND_COMPATIBILITY_VERSION, 27);
+    assert!(socket_name(&path()).starts_with("backend-v27-"));
 }
 
 #[test]

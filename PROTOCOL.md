@@ -2,8 +2,8 @@
 
 ## Backend socket
 
-The socket is `$XDG_RUNTIME_DIR/nix-secrets/backend-v26-<hash>.sock`, where
-`<hash>` is 16 hex digits hashed from the canonical repository path and 26 is
+The socket is `$XDG_RUNTIME_DIR/nix-secrets/backend-v27-<hash>.sock`, where
+`<hash>` is 16 hex digits hashed from the canonical repository path and 27 is
 the compatibility version. A `.lock` file next to it belongs to the running
 backend. A starter never removes the socket of a backend that holds the lock.
 A backend whose socket is removed or replaced exits.
@@ -209,7 +209,7 @@ ends with `EndProcedure` or when that connection closes.
 A request joins a procedure by carrying the token in `procedure`. The backend
 compares the secret in constant time and requires the requester to be the
 owner or its descendant. Each accepted request becomes the next step,
-`ProcedureStep { id, title, step, steps, label, deployment, failure, warning }`. An SSH login
+`ProcedureStep { id, title, step, steps, label, deployment, failure, warning, progress }`. An SSH login
 grant with the same label as the SSH login step before it keeps that
 step number. `FailProcedureStep { procedure, label, reason }` passes the same
 token and descendant checks and answers `Success`. It is numbered like an SSH
@@ -218,7 +218,11 @@ login, so a report with the same label right after keeps the step. The step's
 bytes. The label must not be empty. The next step clears `failure`.
 `WarnProcedureStep { procedure, label, reason }` works the same way and sets
 `warning`. On the same step it leaves `failure` alone. A new step starts
-with neither. `SubmitApproval` requests never carry a step. `EndProcedure {
+with neither. `ReportProcedureProgress { procedure, text, percent }` passes the same
+checks and answers `Success`, but never numbers a step: it sets the current
+step's `progress { text, percent }` (text cleaned and at most 2048 bytes,
+`percent` 0 to 100 or absent) and keeps its failure and warning. The next
+step, a failure or a warning clears it. `SubmitApproval` requests never carry a step. `EndProcedure {
 exit_code }` may report how the command exited (128 + signal when a signal
 ended it). The operator channel receives it in `ProcedureEnded { id, exit_code
 }`.

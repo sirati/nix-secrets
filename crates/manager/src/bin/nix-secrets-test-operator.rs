@@ -32,12 +32,13 @@
 //! stdout.
 //!
 //! From the model it also prints each step a procedure's command reported
-//! failed or warned, again when its reason changes, and each procedure's
-//! end:
+//! failed or warned, again when its reason changes, the progress of each
+//! current step whenever it changes, and each procedure's end:
 //!
 //! ```text
 //! procedure-step-failed: TITLE POSITION: LABEL: REASON
 //! procedure-step-warning: TITLE POSITION: LABEL: REASON
+//! procedure-step-progress: TITLE POSITION: LABEL: PROGRESS
 //! procedure-ended: TITLE exit=CODE|none[ failed-at=POSITION: LABEL: REASON][ warnings=POSITION: LABEL: REASON[; ...]]
 //! procedure-ended: TITLE exit=0|0-or-none
 //! ```
@@ -228,6 +229,8 @@ struct ProcedureLog {
     /// Live procedures seen, with their titles and whether a step of
     /// theirs had finished.
     live: HashMap<String, (String, bool)>,
+    /// The progress of each procedure's current step printed last.
+    progress: HashMap<String, String>,
     /// Procedures whose end was printed.
     ended: HashSet<String>,
 }
@@ -236,6 +239,18 @@ impl ProcedureLog {
     fn lines(&mut self, model: &Model) -> Vec<String> {
         let mut lines = Vec::new();
         for procedure in model.procedures.iter().filter(|procedure| !procedure.implicit) {
+            let progress = procedure.progress().join(" ");
+            if let (false, Some(step)) = (progress.is_empty(), procedure.step.as_ref()) {
+                if self.progress.get(&procedure.id) != Some(&progress) {
+                    lines.push(format!(
+                        "procedure-step-progress: {} {}: {}: {progress}",
+                        procedure.title,
+                        step.position(),
+                        step.label
+                    ));
+                    self.progress.insert(procedure.id.clone(), progress);
+                }
+            }
             for step in &procedure.finished {
                 if step.kind != StepKind::Reported {
                     continue;
@@ -549,7 +564,32 @@ mod tests {
             deployment: false,
             failure: failure.map(Into::into),
             warning: None,
+            progress: None,
         }
+    }
+
+    #[test]
+    fn the_progress_of_the_current_step_is_printed_when_it_changes() {
+        use nix_secrets_core::procedure::StepProgress;
+        let mut scripted = scripted();
+        let mut model = Model::new(vec![]);
+        let progressed = |text: &str, percent| {
+            let mut step = step("proc-1", "Update ns1", 2, "SSH login", None);
+            step.progress = Some(StepProgress { text: text.into(), percent });
+            step
+        };
+        model.procedure_step(progressed("uploading the closure: 50%", Some(50)));
+        assert_eq!(
+            scripted.procedures.lines(&model),
+            ["procedure-step-progress: Update ns1 step 2/3: SSH login: uploading the closure: 50% ██████████░░░░░░░░░░ 50%"]
+        );
+        model.procedure_step(progressed("uploading the closure: 50%", Some(50)));
+        assert!(scripted.procedures.lines(&model).is_empty());
+        model.procedure_step(progressed("activating the new system", None));
+        assert_eq!(
+            scripted.procedures.lines(&model),
+            ["procedure-step-progress: Update ns1 step 2/3: SSH login: activating the new system"]
+        );
     }
 
     #[test]
