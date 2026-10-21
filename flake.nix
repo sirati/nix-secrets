@@ -138,6 +138,7 @@
             };
             pkgs.runCommand "secrets-ready-waiter-module-test" { } "touch $out";
           real-age = pkgs.callPackage ./nix/checks/real-age.nix { };
+          terminal-pty = pkgs.callPackage ./nix/checks/terminal-pty.nix { };
           inherit (self.packages.${system}) secrets-ready-waiter;
           secrets-ready-waiter-vm = import ./nix/tests/secrets-ready-waiter.nix {
             inherit pkgs;

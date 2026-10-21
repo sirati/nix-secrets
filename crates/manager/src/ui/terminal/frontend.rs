@@ -42,8 +42,12 @@ impl CrosstermFrontend {
             event::EnableBracketedPaste,
             event::EnableMouseCapture
         )?;
+        // Startup progress printed before this point stays on terminals
+        // whose alternate screen is not blank; ratatui skips blank cells.
+        let mut terminal = Terminal::new(CrosstermBackend::new(output))?;
+        terminal.clear()?;
         Ok(Self {
-            terminal: Terminal::new(CrosstermBackend::new(output))?,
+            terminal,
             hits: HitMap::default(),
             last_paste: None,
             attention: Default::default(),
